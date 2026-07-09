@@ -49,6 +49,8 @@ type APIKey struct {
 	Name               string            `json:"name"`
 	KeyHash            string            `json:"-"`
 	KeyPrefix          string            `json:"key_prefix"`
+	WorkspaceID        string            `json:"workspace_id,omitempty"`
+	Role               string            `json:"role,omitempty"`
 	CreatedAt          time.Time         `json:"created_at"`
 	ExpiresAt          *time.Time        `json:"expires_at,omitempty"`
 	RateLimit          int               `json:"rate_limit"`
@@ -148,6 +150,36 @@ type Feedback struct {
 	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
+type Organization struct {
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`
+	CreatedAt time.Time         `json:"created_at"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
+}
+
+type Workspace struct {
+	ID             string            `json:"id"`
+	OrganizationID string            `json:"organization_id"`
+	Name           string            `json:"name"`
+	CreatedAt      time.Time         `json:"created_at"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
+}
+
+type User struct {
+	ID        string            `json:"id"`
+	Email     string            `json:"email"`
+	Name      string            `json:"name,omitempty"`
+	CreatedAt time.Time         `json:"created_at"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
+}
+
+type WorkspaceMember struct {
+	WorkspaceID string    `json:"workspace_id"`
+	UserID      string    `json:"user_id"`
+	Role        string    `json:"role"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 // New creates a new Store backed by a SQLite database at the given directory.
 func New(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -210,6 +242,8 @@ func (s *Store) migrate() error {
 			monthly_cost_budget REAL DEFAULT 0,
 			monthly_token_budget INTEGER DEFAULT 0,
 			enabled INTEGER DEFAULT 1,
+			workspace_id TEXT,
+			role TEXT,
 			metadata TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS prompts (
@@ -265,6 +299,33 @@ func (s *Store) migrate() error {
 			user_id TEXT,
 			metadata TEXT
 		)`,
+		`CREATE TABLE IF NOT EXISTS organizations (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			metadata TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS workspaces (
+			id TEXT PRIMARY KEY,
+			organization_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			metadata TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS users (
+			id TEXT PRIMARY KEY,
+			email TEXT UNIQUE NOT NULL,
+			name TEXT,
+			created_at TEXT NOT NULL,
+			metadata TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS workspace_members (
+			workspace_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			role TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (workspace_id, user_id)
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_trace ON request_logs(trace_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_provider ON request_logs(provider)`,
@@ -274,6 +335,8 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_shadow_request ON shadow_requests(request_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_feedback_request ON feedback(request_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_feedback_trace ON feedback(trace_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_workspaces_org ON workspaces(organization_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id)`,
 	}
 
 	for _, m := range migrations {
@@ -297,6 +360,12 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := s.ensureColumn("api_keys", "spend_usd", "REAL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("api_keys", "workspace_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("api_keys", "role", "TEXT"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn("semantic_cache", "cache_key", "TEXT"); err != nil {
@@ -346,7 +415,7 @@ func (s *Store) ListLogs(ctx context.Context, limit, offset int, provider, statu
 	}
 
 	query := fmt.Sprintf(
-		"SELECT id, timestamp, trace_id, session_id, provider, model, api_key_id, status, input_tokens, output_tokens, total_tokens, latency_ms, cost, decision, decision_reason, error_message, cached FROM request_logs WHERE %s ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+		"SELECT id, timestamp, trace_id, session_id, provider, model, api_key_id, status, input_tokens, output_tokens, total_tokens, latency_ms, cost, COALESCE(request_body, ''), COALESCE(response_body, ''), decision, decision_reason, error_message, cached FROM request_logs WHERE %s ORDER BY timestamp DESC LIMIT ? OFFSET ?",
 		where,
 	)
 	args = append(args, limit, offset)
@@ -363,7 +432,7 @@ func (s *Store) ListLogs(ctx context.Context, limit, offset int, provider, statu
 		var cached int
 		if err := rows.Scan(&l.ID, &ts, &l.TraceID, &l.SessionID, &l.Provider, &l.Model, &l.APIKeyID,
 			&l.Status, &l.InputTokens, &l.OutputTokens, &l.TotalTokens,
-			&l.LatencyMs, &l.Cost, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached); err != nil {
+			&l.LatencyMs, &l.Cost, &l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached); err != nil {
 			return nil, 0, err
 		}
 		l.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
@@ -438,8 +507,8 @@ func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
 		expiresAt = &s
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO api_keys (id, name, key_hash, key_prefix, created_at, expires_at, rate_limit, enabled, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO api_keys (id, name, key_hash, key_prefix, created_at, expires_at, rate_limit, enabled, workspace_id, role, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			key_hash = excluded.key_hash,
@@ -447,10 +516,12 @@ func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
 			expires_at = excluded.expires_at,
 			rate_limit = excluded.rate_limit,
 			enabled = excluded.enabled,
+			workspace_id = excluded.workspace_id,
+			role = excluded.role,
 			metadata = excluded.metadata`,
 		key.ID, key.Name, key.KeyHash, key.KeyPrefix,
 		key.CreatedAt.Format(time.RFC3339), expiresAt,
-		key.RateLimit, boolToInt(key.Enabled), string(meta),
+		key.RateLimit, boolToInt(key.Enabled), key.WorkspaceID, key.Role, string(meta),
 	)
 	if err != nil {
 		return err
@@ -466,13 +537,13 @@ func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
 func (s *Store) GetAPIKeyByHash(ctx context.Context, hash string) (APIKey, error) {
 	var key APIKey
 	var createdAt, metaStr string
-	var expiresAt sql.NullString
+	var expiresAt, workspaceID, role sql.NullString
 	var enabled int
 
 	err := s.db.QueryRowContext(ctx,
-		"SELECT id, name, key_hash, key_prefix, created_at, expires_at, rate_limit, budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, metadata FROM api_keys WHERE key_hash = ?",
+		"SELECT id, name, key_hash, key_prefix, created_at, expires_at, rate_limit, budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, workspace_id, role, metadata FROM api_keys WHERE key_hash = ?",
 		hash,
-	).Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &createdAt, &expiresAt, &key.RateLimit, &key.BudgetUSD, &key.SpendUSD, &key.MonthlyCostBudget, &key.MonthlyTokenBudget, &enabled, &metaStr)
+	).Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &createdAt, &expiresAt, &key.RateLimit, &key.BudgetUSD, &key.SpendUSD, &key.MonthlyCostBudget, &key.MonthlyTokenBudget, &enabled, &workspaceID, &role, &metaStr)
 	if err != nil {
 		return key, err
 	}
@@ -482,6 +553,8 @@ func (s *Store) GetAPIKeyByHash(ctx context.Context, hash string) (APIKey, error
 		t, _ := time.Parse(time.RFC3339, expiresAt.String)
 		key.ExpiresAt = &t
 	}
+	key.WorkspaceID = nullableString(workspaceID)
+	key.Role = nullableString(role)
 	key.Enabled = enabled == 1
 	_ = json.Unmarshal([]byte(metaStr), &key.Metadata)
 	return key, nil
@@ -490,7 +563,7 @@ func (s *Store) GetAPIKeyByHash(ctx context.Context, hash string) (APIKey, error
 // ListAPIKeys returns all API keys.
 func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, name, key_prefix, created_at, expires_at, rate_limit, budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled FROM api_keys ORDER BY created_at DESC")
+		"SELECT id, name, key_prefix, created_at, expires_at, rate_limit, budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, workspace_id, role FROM api_keys ORDER BY created_at DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -500,9 +573,9 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 	for rows.Next() {
 		var k APIKey
 		var createdAt string
-		var expiresAt sql.NullString
+		var expiresAt, workspaceID, role sql.NullString
 		var enabled int
-		if err := rows.Scan(&k.ID, &k.Name, &k.KeyPrefix, &createdAt, &expiresAt, &k.RateLimit, &k.BudgetUSD, &k.SpendUSD, &k.MonthlyCostBudget, &k.MonthlyTokenBudget, &enabled); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.KeyPrefix, &createdAt, &expiresAt, &k.RateLimit, &k.BudgetUSD, &k.SpendUSD, &k.MonthlyCostBudget, &k.MonthlyTokenBudget, &enabled, &workspaceID, &role); err != nil {
 			return nil, err
 		}
 		k.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
@@ -510,6 +583,8 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 			t, _ := time.Parse(time.RFC3339, expiresAt.String)
 			k.ExpiresAt = &t
 		}
+		k.WorkspaceID = nullableString(workspaceID)
+		k.Role = nullableString(role)
 		k.Enabled = enabled == 1
 		keys = append(keys, k)
 	}
@@ -559,6 +634,40 @@ func (s *Store) ListPrompts(ctx context.Context) ([]Prompt, error) {
 	return prompts, rows.Err()
 }
 
+func (s *Store) ListPromptVersions(ctx context.Context, name string) ([]Prompt, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, name, version, template, variables, created_at, updated_at FROM prompts WHERE name = ? ORDER BY version DESC",
+		name,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var prompts []Prompt
+	for rows.Next() {
+		var p Prompt
+		var createdAt, updatedAt, varsStr string
+		if err := rows.Scan(&p.ID, &p.Name, &p.Version, &p.Template, &varsStr, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		p.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		p.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		_ = json.Unmarshal([]byte(varsStr), &p.Variables)
+		prompts = append(prompts, p)
+	}
+	return prompts, rows.Err()
+}
+
+func (s *Store) NextPromptVersion(ctx context.Context, name string) (int, error) {
+	var latest int
+	err := s.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM prompts WHERE name = ?", name).Scan(&latest)
+	if err != nil {
+		return 0, err
+	}
+	return latest + 1, nil
+}
+
 // GetPrompt returns a specific prompt by ID.
 func (s *Store) GetPrompt(ctx context.Context, id string) (Prompt, error) {
 	var p Prompt
@@ -589,13 +698,13 @@ func (s *Store) InsertGuardrailEvent(ctx context.Context, e GuardrailEvent) erro
 func (s *Store) GetAPIKeyByID(ctx context.Context, id string) (APIKey, error) {
 	var key APIKey
 	var createdAt, metaStr string
-	var expiresAt sql.NullString
+	var expiresAt, workspaceID, role sql.NullString
 	var enabled int
 
 	err := s.db.QueryRowContext(ctx,
-		"SELECT id, name, key_hash, key_prefix, created_at, expires_at, rate_limit, budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, metadata FROM api_keys WHERE id = ?",
+		"SELECT id, name, key_hash, key_prefix, created_at, expires_at, rate_limit, budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, workspace_id, role, metadata FROM api_keys WHERE id = ?",
 		id,
-	).Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &createdAt, &expiresAt, &key.RateLimit, &key.BudgetUSD, &key.SpendUSD, &key.MonthlyCostBudget, &key.MonthlyTokenBudget, &enabled, &metaStr)
+	).Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &createdAt, &expiresAt, &key.RateLimit, &key.BudgetUSD, &key.SpendUSD, &key.MonthlyCostBudget, &key.MonthlyTokenBudget, &enabled, &workspaceID, &role, &metaStr)
 	if err != nil {
 		return key, err
 	}
@@ -605,6 +714,8 @@ func (s *Store) GetAPIKeyByID(ctx context.Context, id string) (APIKey, error) {
 		t, _ := time.Parse(time.RFC3339, expiresAt.String)
 		key.ExpiresAt = &t
 	}
+	key.WorkspaceID = nullableString(workspaceID)
+	key.Role = nullableString(role)
 	key.Enabled = enabled == 1
 	_ = json.Unmarshal([]byte(metaStr), &key.Metadata)
 	return key, nil
@@ -844,6 +955,181 @@ func (s *Store) ListFeedback(ctx context.Context, limit int, requestID, traceID 
 	return entries, rows.Err()
 }
 
+func (s *Store) InsertOrganization(ctx context.Context, org Organization) error {
+	if org.CreatedAt.IsZero() {
+		org.CreatedAt = time.Now().UTC()
+	}
+	metadata, _ := json.Marshal(org.Metadata)
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO organizations (id, name, created_at, metadata)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET name = excluded.name, metadata = excluded.metadata`,
+		org.ID,
+		org.Name,
+		org.CreatedAt.Format(time.RFC3339Nano),
+		string(metadata),
+	)
+	return err
+}
+
+func (s *Store) ListOrganizations(ctx context.Context) ([]Organization, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, name, created_at, metadata FROM organizations ORDER BY created_at DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var organizations []Organization
+	for rows.Next() {
+		var org Organization
+		var createdAt, metadata string
+		if err := rows.Scan(&org.ID, &org.Name, &createdAt, &metadata); err != nil {
+			return nil, err
+		}
+		org.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		_ = json.Unmarshal([]byte(metadata), &org.Metadata)
+		organizations = append(organizations, org)
+	}
+	return organizations, rows.Err()
+}
+
+func (s *Store) InsertWorkspace(ctx context.Context, workspace Workspace) error {
+	if workspace.CreatedAt.IsZero() {
+		workspace.CreatedAt = time.Now().UTC()
+	}
+	metadata, _ := json.Marshal(workspace.Metadata)
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO workspaces (id, organization_id, name, created_at, metadata)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			organization_id = excluded.organization_id,
+			name = excluded.name,
+			metadata = excluded.metadata`,
+		workspace.ID,
+		workspace.OrganizationID,
+		workspace.Name,
+		workspace.CreatedAt.Format(time.RFC3339Nano),
+		string(metadata),
+	)
+	return err
+}
+
+func (s *Store) ListWorkspaces(ctx context.Context, organizationID string) ([]Workspace, error) {
+	where := "1=1"
+	args := []any{}
+	if organizationID != "" {
+		where = "organization_id = ?"
+		args = append(args, organizationID)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		fmt.Sprintf("SELECT id, organization_id, name, created_at, metadata FROM workspaces WHERE %s ORDER BY created_at DESC", where),
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var workspaces []Workspace
+	for rows.Next() {
+		var workspace Workspace
+		var createdAt, metadata string
+		if err := rows.Scan(&workspace.ID, &workspace.OrganizationID, &workspace.Name, &createdAt, &metadata); err != nil {
+			return nil, err
+		}
+		workspace.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		_ = json.Unmarshal([]byte(metadata), &workspace.Metadata)
+		workspaces = append(workspaces, workspace)
+	}
+	return workspaces, rows.Err()
+}
+
+func (s *Store) InsertUser(ctx context.Context, user User) error {
+	if user.CreatedAt.IsZero() {
+		user.CreatedAt = time.Now().UTC()
+	}
+	metadata, _ := json.Marshal(user.Metadata)
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO users (id, email, name, created_at, metadata)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(email) DO UPDATE SET name = excluded.name, metadata = excluded.metadata`,
+		user.ID,
+		user.Email,
+		user.Name,
+		user.CreatedAt.Format(time.RFC3339Nano),
+		string(metadata),
+	)
+	return err
+}
+
+func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, email, COALESCE(name, ''), created_at, metadata FROM users ORDER BY created_at DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var user User
+		var createdAt, metadata string
+		if err := rows.Scan(&user.ID, &user.Email, &user.Name, &createdAt, &metadata); err != nil {
+			return nil, err
+		}
+		user.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		_ = json.Unmarshal([]byte(metadata), &user.Metadata)
+		users = append(users, user)
+	}
+	return users, rows.Err()
+}
+
+func (s *Store) UpsertWorkspaceMember(ctx context.Context, member WorkspaceMember) error {
+	if member.CreatedAt.IsZero() {
+		member.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(workspace_id, user_id) DO UPDATE SET role = excluded.role`,
+		member.WorkspaceID,
+		member.UserID,
+		member.Role,
+		member.CreatedAt.Format(time.RFC3339Nano),
+	)
+	return err
+}
+
+func (s *Store) ListWorkspaceMembers(ctx context.Context, workspaceID string) ([]WorkspaceMember, error) {
+	where := "1=1"
+	args := []any{}
+	if workspaceID != "" {
+		where = "workspace_id = ?"
+		args = append(args, workspaceID)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		fmt.Sprintf("SELECT workspace_id, user_id, role, created_at FROM workspace_members WHERE %s ORDER BY created_at DESC", where),
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var members []WorkspaceMember
+	for rows.Next() {
+		var member WorkspaceMember
+		var createdAt string
+		if err := rows.Scan(&member.WorkspaceID, &member.UserID, &member.Role, &createdAt); err != nil {
+			return nil, err
+		}
+		member.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		members = append(members, member)
+	}
+	return members, rows.Err()
+}
+
 // Close closes the database connection.
 func (s *Store) Close() error {
 	return s.db.Close()
@@ -892,4 +1178,11 @@ func firstPositive(values ...float64) float64 {
 		}
 	}
 	return 0
+}
+
+func nullableString(value sql.NullString) string {
+	if !value.Valid {
+		return ""
+	}
+	return value.String
 }

@@ -47,14 +47,20 @@ func (h *Handler) CreatePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	version, err := h.store.NextPromptVersion(r.Context(), req.Name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	now := time.Now().UTC()
 	p := store.Prompt{
 		ID:        newID("prompt"),
 		Name:      req.Name,
-		Version:   1,
+		Version:   version,
 		Template:  req.Template,
 		Variables: extractVariables(req.Template),
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 
 	if err := h.store.InsertPrompt(r.Context(), p); err != nil {
@@ -67,6 +73,24 @@ func (h *Handler) CreatePrompt(w http.ResponseWriter, r *http.Request) {
 // ListPrompts handles GET /api/prompts.
 func (h *Handler) ListPrompts(w http.ResponseWriter, r *http.Request) {
 	prompts, err := h.store.ListPrompts(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if prompts == nil {
+		prompts = []store.Prompt{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"prompts": prompts})
+}
+
+// ListPromptVersions handles GET /api/prompts/versions?name=<prompt-name>.
+func (h *Handler) ListPromptVersions(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	prompts, err := h.store.ListPromptVersions(r.Context(), name)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

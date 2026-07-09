@@ -31,10 +31,32 @@ func TestCreateListRenderPrompt(t *testing.T) {
 		t.Fatalf("Variables = %+v, want two unique variables", created.Variables)
 	}
 
+	secondRec := httptest.NewRecorder()
+	handler.CreatePrompt(secondRec, httptest.NewRequest(http.MethodPost, "/api/prompts", strings.NewReader(`{
+		"name":"support",
+		"template":"Updated {{name}}"
+	}`)))
+	if secondRec.Code != http.StatusCreated {
+		t.Fatalf("second CreatePrompt status = %d, body = %s", secondRec.Code, secondRec.Body.String())
+	}
+	var second store.Prompt
+	if err := json.Unmarshal(secondRec.Body.Bytes(), &second); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	if second.Version != 2 {
+		t.Fatalf("second Version = %d, want 2", second.Version)
+	}
+
 	listRec := httptest.NewRecorder()
 	handler.ListPrompts(listRec, httptest.NewRequest(http.MethodGet, "/api/prompts", nil))
 	if listRec.Code != http.StatusOK || !strings.Contains(listRec.Body.String(), `"prompts"`) {
 		t.Fatalf("ListPrompts status/body = %d/%s", listRec.Code, listRec.Body.String())
+	}
+
+	versionsRec := httptest.NewRecorder()
+	handler.ListPromptVersions(versionsRec, httptest.NewRequest(http.MethodGet, "/api/prompts/versions?name=support", nil))
+	if versionsRec.Code != http.StatusOK || !strings.Contains(versionsRec.Body.String(), `"version":2`) {
+		t.Fatalf("ListPromptVersions status/body = %d/%s", versionsRec.Code, versionsRec.Body.String())
 	}
 
 	renderRec := httptest.NewRecorder()

@@ -5,15 +5,15 @@ Sentinel's goal is to become a local-first, open-source control plane for AI gat
 ## Near Term
 
 - Provider credential vault with encrypted-at-rest storage.
-- Workspace and role-based access control.
+- Workspace enforcement middleware and SSO/SAML integration on top of the current organization/workspace/user data model.
 - Richer MCP server registry with credential injection and per-tool access policies.
 - OpenTelemetry trace export.
-- Prompt versioning, rollback, and playground workflows.
+- Prompt rollback and playground workflows on top of the current prompt version API.
 - Guardrail registry and configurable guardrail bundles.
 
 ## Medium Term
 
-- Evaluation datasets and replayable policy/model simulations.
+- Evaluation datasets and model-quality simulations on top of the current policy replay endpoint.
 - Visual policy and routing editor.
 - Provider SDK packages for Python and Node.js.
 - More provider adapters, including Azure OpenAI, Mistral, Cohere, Together, AWS Bedrock, and local OpenAI-compatible providers.

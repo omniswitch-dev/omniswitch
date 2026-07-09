@@ -18,7 +18,7 @@ func TestCreateListDeleteAPIKey(t *testing.T) {
 	st := newAdminTestStore(t)
 	handler := New(st)
 
-	createReq := httptest.NewRequest(http.MethodPost, "/api/keys", strings.NewReader(`{"name":"local","rate_limit":3}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/keys", strings.NewReader(`{"name":"local","rate_limit":3,"workspace_id":"ws_1","role":"admin"}`))
 	createRec := httptest.NewRecorder()
 	handler.CreateAPIKey(createRec, createReq)
 	if createRec.Code != http.StatusCreated {
@@ -37,8 +37,8 @@ func TestCreateListDeleteAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAPIKeyByHash() error = %v", err)
 	}
-	if stored.RateLimit != 3 {
-		t.Fatalf("RateLimit = %d, want 3", stored.RateLimit)
+	if stored.RateLimit != 3 || stored.WorkspaceID != "ws_1" || stored.Role != "admin" {
+		t.Fatalf("stored key = %+v, want rate limit 3 and workspace role", stored)
 	}
 
 	listRec := httptest.NewRecorder()

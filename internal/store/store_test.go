@@ -17,16 +17,18 @@ func TestStoreLogsAndMetrics(t *testing.T) {
 
 	logs := []RequestLog{
 		{
-			ID:          "req_1",
-			Timestamp:   now.Add(-time.Minute),
-			Provider:    "openai",
-			Model:       "gpt-4o-mini",
-			Status:      "success",
-			Decision:    "ALLOW",
-			TotalTokens: 10,
-			LatencyMs:   42,
-			Cost:        0.01,
-			Cached:      true,
+			ID:           "req_1",
+			Timestamp:    now.Add(-time.Minute),
+			Provider:     "openai",
+			Model:        "gpt-4o-mini",
+			Status:       "success",
+			Decision:     "ALLOW",
+			TotalTokens:  10,
+			LatencyMs:    42,
+			Cost:         0.01,
+			RequestBody:  `{"model":"gpt-4o-mini"}`,
+			ResponseBody: `{"id":"chat_1"}`,
+			Cached:       true,
 		},
 		{
 			ID:             "req_2",
@@ -54,6 +56,9 @@ func TestStoreLogsAndMetrics(t *testing.T) {
 	}
 	if got[0].ID != "req_2" {
 		t.Fatalf("logs are not newest-first: first ID = %q", got[0].ID)
+	}
+	if got[1].RequestBody == "" || got[1].ResponseBody == "" {
+		t.Fatalf("raw bodies were not returned in log listing: %+v", got[1])
 	}
 
 	metrics, err := st.GetMetrics(ctx, now.Add(-time.Hour))
@@ -85,6 +90,8 @@ func TestStoreAPIKeysAndPrompts(t *testing.T) {
 		Name:               "local",
 		KeyHash:            hex.EncodeToString(hash[:]),
 		KeyPrefix:          "sk-sentinel-...",
+		WorkspaceID:        "ws_1",
+		Role:               "admin",
 		CreatedAt:          time.Now().UTC(),
 		ExpiresAt:          &expiresAt,
 		RateLimit:          7,
@@ -101,7 +108,7 @@ func TestStoreAPIKeysAndPrompts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAPIKeyByHash() error = %v", err)
 	}
-	if loaded.ID != key.ID || loaded.RateLimit != 7 || loaded.MonthlyCostBudget != 1.5 || loaded.MonthlyTokenBudget != 100 || !loaded.Enabled {
+	if loaded.ID != key.ID || loaded.RateLimit != 7 || loaded.MonthlyCostBudget != 1.5 || loaded.MonthlyTokenBudget != 100 || loaded.WorkspaceID != "ws_1" || loaded.Role != "admin" || !loaded.Enabled {
 		t.Fatalf("loaded key = %+v, want original enabled key", loaded)
 	}
 
@@ -109,7 +116,7 @@ func TestStoreAPIKeysAndPrompts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAPIKeys() error = %v", err)
 	}
-	if len(keys) != 1 || keys[0].KeyHash != "" {
+	if len(keys) != 1 || keys[0].KeyHash != "" || keys[0].WorkspaceID != "ws_1" {
 		t.Fatalf("ListAPIKeys() = %+v, want one key without hash", keys)
 	}
 
@@ -136,6 +143,13 @@ func TestStoreAPIKeysAndPrompts(t *testing.T) {
 	if err := st.InsertPrompt(ctx, prompt); err != nil {
 		t.Fatalf("InsertPrompt() error = %v", err)
 	}
+	nextVersion, err := st.NextPromptVersion(ctx, "support")
+	if err != nil {
+		t.Fatalf("NextPromptVersion() error = %v", err)
+	}
+	if nextVersion != 2 {
+		t.Fatalf("NextPromptVersion() = %d, want 2", nextVersion)
+	}
 	prompts, err := st.ListPrompts(ctx)
 	if err != nil {
 		t.Fatalf("ListPrompts() error = %v", err)
@@ -149,6 +163,13 @@ func TestStoreAPIKeysAndPrompts(t *testing.T) {
 	}
 	if loadedPrompt.Template != prompt.Template {
 		t.Fatalf("Template = %q, want %q", loadedPrompt.Template, prompt.Template)
+	}
+	versions, err := st.ListPromptVersions(ctx, "support")
+	if err != nil {
+		t.Fatalf("ListPromptVersions() error = %v", err)
+	}
+	if len(versions) != 1 || versions[0].Version != 1 {
+		t.Fatalf("versions = %+v, want one version 1 prompt", versions)
 	}
 }
 
@@ -239,6 +260,75 @@ func TestStoreSemanticCacheBudgetAndShadowLogs(t *testing.T) {
 	}
 	if len(shadowLogs) != 1 || shadowLogs[0].ShadowProvider != "shadow" {
 		t.Fatalf("shadow logs = %+v, want one shadow row", shadowLogs)
+	}
+}
+
+func TestStoreOrganizationsWorkspacesAndMembers(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if err := st.InsertOrganization(ctx, Organization{
+		ID:        "org_1",
+		Name:      "Acme",
+		CreatedAt: time.Now().UTC(),
+		Metadata:  map[string]string{"tier": "enterprise"},
+	}); err != nil {
+		t.Fatalf("InsertOrganization() error = %v", err)
+	}
+	organizations, err := st.ListOrganizations(ctx)
+	if err != nil {
+		t.Fatalf("ListOrganizations() error = %v", err)
+	}
+	if len(organizations) != 1 || organizations[0].Metadata["tier"] != "enterprise" {
+		t.Fatalf("organizations = %+v, want stored organization", organizations)
+	}
+
+	if err := st.InsertWorkspace(ctx, Workspace{
+		ID:             "ws_1",
+		OrganizationID: "org_1",
+		Name:           "Production",
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("InsertWorkspace() error = %v", err)
+	}
+	workspaces, err := st.ListWorkspaces(ctx, "org_1")
+	if err != nil {
+		t.Fatalf("ListWorkspaces() error = %v", err)
+	}
+	if len(workspaces) != 1 || workspaces[0].Name != "Production" {
+		t.Fatalf("workspaces = %+v, want production workspace", workspaces)
+	}
+
+	if err := st.InsertUser(ctx, User{
+		ID:        "user_1",
+		Email:     "ada@example.com",
+		Name:      "Ada",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("InsertUser() error = %v", err)
+	}
+	users, err := st.ListUsers(ctx)
+	if err != nil {
+		t.Fatalf("ListUsers() error = %v", err)
+	}
+	if len(users) != 1 || users[0].Email != "ada@example.com" {
+		t.Fatalf("users = %+v, want Ada", users)
+	}
+
+	if err := st.UpsertWorkspaceMember(ctx, WorkspaceMember{
+		WorkspaceID: "ws_1",
+		UserID:      "user_1",
+		Role:        "admin",
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("UpsertWorkspaceMember() error = %v", err)
+	}
+	members, err := st.ListWorkspaceMembers(ctx, "ws_1")
+	if err != nil {
+		t.Fatalf("ListWorkspaceMembers() error = %v", err)
+	}
+	if len(members) != 1 || members[0].Role != "admin" {
+		t.Fatalf("members = %+v, want admin membership", members)
 	}
 }
 

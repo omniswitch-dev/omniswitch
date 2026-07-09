@@ -1,8 +1,8 @@
 # Binaries
-sentinel
-gateway
-proxy
-agentctl
+/sentinel
+/gateway
+/proxy
+/agentctl
 *.exe
 *.dll
 *.so

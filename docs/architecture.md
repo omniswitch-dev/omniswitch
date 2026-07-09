@@ -34,3 +34,11 @@ Provider accounts in `GatewayConfig` create virtual provider aliases such as `@o
 The gateway accepts OpenAI-compatible multimodal message content arrays. Text parts are extracted for guardrails, cache keys, and text-only provider adapters, while OpenAI-compatible providers receive the original content parts.
 
 Human feedback can be posted to `/api/feedback` with a `trace_id` or `request_id`. This gives application UIs a simple quality loop without changing the chat-completions contract.
+
+Gateway request logs persist capped raw request and response bodies alongside cost, latency, cache status, trace IDs, and session IDs. This supports incident review and later replay without requiring a separate logging pipeline.
+
+The management plane includes organizations, workspaces, users, workspace memberships, roles, and workspace-scoped API keys. This is the data foundation for enterprise RBAC and workspace isolation; SSO/SAML and route-level authorization enforcement are roadmap items.
+
+Prompt records are immutable by version. Creating a prompt with an existing name creates the next version, and `/api/prompts/versions` returns version history for review or rollback workflows.
+
+Policy replay evals live at `/api/evals/policy`. They load one or more Sentinel policy files and evaluate a batch of canonical `ToolRequest` objects, returning aggregate allow/deny counts and per-request decision traces.

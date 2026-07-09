@@ -16,6 +16,10 @@ The format is based on Keep a Changelog, and this project follows semantic versi
 - Circuit breakers, retries, fallbacks, A/B routing, and shadow routing.
 - Cost and token budgets for API keys.
 - Feedback API tied to `trace_id` and `request_id`.
+- Raw request/response bodies in capped observability logs.
+- Organization, workspace, user, membership, role, and workspace-scoped API key foundations.
+- Prompt version history for immutable prompt revisions.
+- Policy replay eval endpoint for batch allow/deny simulation.
 - OpenAI-style multimodal message content compatibility.
 - MCP policy proxy mounted in the gateway.
 - CEL-backed policy engine and Git-like policy CLI.

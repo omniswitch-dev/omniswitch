@@ -25,6 +25,8 @@ func New(st *store.Store) *Handler {
 // CreateKeyRequest is the request body for creating an API key.
 type CreateKeyRequest struct {
 	Name               string  `json:"name"`
+	WorkspaceID        string  `json:"workspace_id,omitempty"`
+	Role               string  `json:"role,omitempty"`
 	RateLimit          int     `json:"rate_limit,omitempty"`
 	BudgetUSD          float64 `json:"budget_usd,omitempty"`
 	MonthlyCostBudget  float64 `json:"monthly_cost_budget,omitempty"`
@@ -65,6 +67,8 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		Name:               req.Name,
 		KeyHash:            hex.EncodeToString(hash[:]),
 		KeyPrefix:          rawKey[:12] + "...",
+		WorkspaceID:        req.WorkspaceID,
+		Role:               req.Role,
 		CreatedAt:          time.Now().UTC(),
 		RateLimit:          req.RateLimit,
 		BudgetUSD:          firstPositive(req.BudgetUSD, req.MonthlyCostBudget),

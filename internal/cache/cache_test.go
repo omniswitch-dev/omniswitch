@@ -68,7 +68,7 @@ func TestKeyIsStableAndIgnoresStreamFlag(t *testing.T) {
 }
 
 func TestSQLiteCacheRoundTripAndExpiration(t *testing.T) {
-	c, err := NewSQLiteCache(filepath.Join(t.TempDir(), "nested", "cache"), 20*time.Millisecond)
+	c, err := NewSQLiteCache(filepath.Join(t.TempDir(), "nested", "cache"), 250*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewSQLiteCache() error = %v", err)
 	}
@@ -97,7 +97,7 @@ func TestSQLiteCacheRoundTripAndExpiration(t *testing.T) {
 		t.Fatalf("Get() = %+v, %v, want cached response", got, ok)
 	}
 
-	time.Sleep(30 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	_, ok, err = c.Get("cache-key")
 	if err != nil {
 		t.Fatalf("expired Get() error = %v", err)

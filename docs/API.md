@@ -48,6 +48,8 @@ Query parameters:
 - `provider`
 - `status`
 
+Logs include capped raw `request_body` and `response_body` fields for debugging, incident review, and replay workflows.
+
 ### `GET /api/metrics`
 
 Returns gateway metrics.
@@ -97,6 +99,17 @@ Records human feedback.
 
 Creates a Sentinel API key.
 
+```json
+{
+  "name": "production-app",
+  "workspace_id": "ws_123",
+  "role": "admin",
+  "rate_limit": 120,
+  "monthly_cost_budget": 50,
+  "monthly_token_budget": 1000000
+}
+```
+
 ### `GET /api/keys`
 
 Lists API keys.
@@ -105,17 +118,108 @@ Lists API keys.
 
 Disables an API key.
 
+### `POST /api/orgs`
+
+Creates an organization.
+
+```json
+{
+  "name": "Acme",
+  "metadata": {
+    "tier": "enterprise"
+  }
+}
+```
+
+### `GET /api/orgs`
+
+Lists organizations.
+
+### `POST /api/workspaces`
+
+Creates a workspace inside an organization.
+
+```json
+{
+  "organization_id": "org_123",
+  "name": "Production"
+}
+```
+
+### `GET /api/workspaces`
+
+Lists workspaces. Use `organization_id` to filter.
+
+### `POST /api/users`
+
+Creates or updates a user.
+
+```json
+{
+  "email": "ada@example.com",
+  "name": "Ada Lovelace"
+}
+```
+
+### `GET /api/users`
+
+Lists users.
+
+### `POST /api/workspace-members`
+
+Creates or updates a workspace membership.
+
+```json
+{
+  "workspace_id": "ws_123",
+  "user_id": "user_123",
+  "role": "admin"
+}
+```
+
+### `GET /api/workspace-members`
+
+Lists workspace memberships. Use `workspace_id` to filter.
+
 ### `POST /api/prompts`
 
-Creates a prompt template.
+Creates a prompt template. Reusing an existing `name` creates the next version.
 
 ### `GET /api/prompts`
 
 Lists prompt templates.
 
+### `GET /api/prompts/versions?name=<prompt_name>`
+
+Lists all versions for a prompt name, newest version first.
+
 ### `POST /api/prompts/render`
 
 Renders a prompt template with variables.
+
+### `POST /api/evals/policy`
+
+Replays a batch of tool requests against one or more Sentinel policy files.
+
+```json
+{
+  "policy_paths": ["policies/production-delete.yaml"],
+  "requests": [
+    {
+      "agent": {"id": "coder", "department": "engineering"},
+      "tool": {"name": "github"},
+      "action": {"name": "delete"},
+      "resource": {
+        "type": "repo",
+        "name": "payments",
+        "environment": "production"
+      }
+    }
+  ]
+}
+```
+
+The response includes aggregate `allowed`, `denied`, and `errors` counts plus each decision trace.
 
 ## MCP Gateway
 

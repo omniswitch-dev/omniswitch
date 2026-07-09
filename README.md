@@ -38,6 +38,7 @@ Override with `SENTINEL_LISTEN`, `SENTINEL_POLICY`, and `SENTINEL_UPSTREAM`.
 - [Configuration](docs/CONFIGURATION.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Architecture](docs/architecture.md)
+- [Portkey Comparison](docs/PORTKEY_COMPARISON.md)
 - [Policy Standard](docs/standard.md)
 - [Roadmap](ROADMAP.md)
 - [Security Policy](SECURITY.md)
@@ -89,9 +90,14 @@ Gateway endpoints:
 - `GET /api/logs`
 - `GET /api/metrics`
 - `POST /api/keys`
+- `POST /api/orgs`
+- `POST /api/workspaces`
+- `POST /api/users`
+- `POST /api/workspace-members`
 - `GET /api/providers`
 - `POST /api/feedback`
 - `POST /api/prompts`
+- `POST /api/evals/policy`
 
 The dashboard is served from `/`.
 
@@ -100,11 +106,15 @@ Advanced gateway behavior:
 - **Streaming:** `POST /v1/chat/completions` supports `stream: true` and emits OpenAI-compatible SSE chunks.
 - **Caching:** exact prompt/provider/model matches are hashed and cached first; semantic similarity is used as a fallback. Hits return `x-sentinel-cache: HIT`.
 - **Agent observability:** pass `x-sentinel-trace-id` and `x-sentinel-session-id` to group calls across an agent run.
+- **Raw observability logs:** request and response payloads are persisted with size-capped raw log entries for incident review and replay.
 - **Budgets:** API keys can carry `budget_usd`, `monthly_cost_budget`, and `monthly_token_budget`; exceeded keys receive `budget_exceeded`.
+- **Workspace governance:** organizations, workspaces, users, roles, workspace memberships, and workspace-scoped API keys are available through the management API.
 - **Circuit breakers:** failing providers are opened after consecutive errors and skipped until their cooldown expires.
 - **Config-as-code:** use `SENTINEL_CONFIG` with `examples/gateway-config.yaml` to define cache, MCP, fallback, retry, and weighted routing behavior.
 - **Provider catalog:** define provider accounts in config without embedding secrets. Accounts are exposed as virtual providers such as `@openai-prod/gpt-4o-mini`.
 - **Feedback loop:** `POST /api/feedback` records thumbs-up/down style feedback against a `trace_id` or `request_id`.
+- **Prompt versions:** creating a prompt with an existing name creates the next immutable version; `/api/prompts/versions` returns version history.
+- **Policy eval replay:** `/api/evals/policy` replays batches of tool requests against one or more policy files to estimate future allow/deny impact.
 - **Multimodal compatibility:** OpenAI-style message content arrays with text and image URL parts are accepted and preserved for OpenAI-compatible providers.
 - **A/B routing:** use config routes or `SENTINEL_AB_TEST` to split a logical model across provider/model variants.
 - **Shadow routing:** use `SENTINEL_SHADOW_PROVIDER` or `x-sentinel-shadow-provider` to compare a second provider without affecting the user response.
