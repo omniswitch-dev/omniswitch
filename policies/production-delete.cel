@@ -1,0 +1,4 @@
+// name: production-delete
+// reason: Repository {{resource.name}} is protected.
+resource.environment == "production" &&
+action.name == "delete"

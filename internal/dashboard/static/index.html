@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sentinel — AI Gateway Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a2e;--border:#2a2a3e;--text:#e4e4f0;--text2:#8888a8;--accent:#6c5ce7;--accent2:#a29bfe;--green:#00e676;--red:#ff5252;--yellow:#ffd740;--blue:#448aff}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex}
+.sidebar{width:240px;background:var(--surface);border-right:1px solid var(--border);padding:20px 0;display:flex;flex-direction:column;position:fixed;height:100vh;z-index:10}
+.logo{padding:0 20px 24px;font-size:20px;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;display:flex;align-items:center;gap:10px}
+.logo span{font-size:24px}
+.nav{list-style:none;flex:1}
+.nav li{padding:10px 20px;cursor:pointer;color:var(--text2);font-size:14px;font-weight:500;border-left:3px solid transparent;transition:all .2s}
+.nav li:hover,.nav li.active{color:var(--text);background:var(--surface2);border-left-color:var(--accent)}
+.nav li .icon{margin-right:10px;font-size:16px}
+.main{margin-left:240px;flex:1;padding:24px;min-height:100vh}
+.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}
+.header h1{font-size:24px;font-weight:600}
+.header .badge{background:var(--green);color:#000;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:24px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;position:relative;overflow:hidden}
+.card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+.card.green::before{background:linear-gradient(90deg,var(--green),#69f0ae)}
+.card.red::before{background:linear-gradient(90deg,var(--red),#ff8a80)}
+.card.yellow::before{background:linear-gradient(90deg,var(--yellow),#ffe57f)}
+.card .label{font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+.card .value{font-size:28px;font-weight:700}
+.card .sub{font-size:12px;color:var(--text2);margin-top:4px}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:24px;overflow:hidden}
+.panel-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.panel-header h2{font-size:16px;font-weight:600}
+.panel-header .filters{display:flex;gap:8px}
+.panel-header select,.panel-header input{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:6px;font-size:13px;font-family:inherit}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:12px 16px;font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border)}
+td{padding:12px 16px;font-size:13px;border-bottom:1px solid var(--border)}
+tr:hover{background:var(--surface2)}
+.badge-sm{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-success{background:rgba(0,230,118,.15);color:var(--green)}
+.badge-error{background:rgba(255,82,82,.15);color:var(--red)}
+.badge-denied{background:rgba(255,215,64,.15);color:var(--yellow)}
+.provider-badge{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:500;background:var(--surface2)}
+.section{display:none}.section.active{display:block}
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:13px;color:var(--text2);margin-bottom:6px}
+.form-group input,.form-group textarea,.form-group select{width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:8px;font-size:14px;font-family:inherit}
+.form-group textarea{min-height:120px;resize:vertical}
+.btn{padding:10px 20px;border-radius:8px;font-size:14px;font-weight:600;border:none;cursor:pointer;transition:all .2s}
+.btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+.btn-primary:hover{opacity:.9;transform:translateY(-1px)}
+.btn-danger{background:rgba(255,82,82,.2);color:var(--red);border:1px solid var(--red)}
+.empty{text-align:center;padding:40px;color:var(--text2)}
+.key-display{background:var(--bg);padding:12px;border-radius:8px;font-family:monospace;font-size:13px;word-break:break-all;margin:12px 0;border:1px solid var(--accent)}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.card,.panel{animation:fadeIn .3s ease}
+</style>
+</head>
+<body>
+<nav class="sidebar">
+  <div class="logo"><span>🛡️</span> Sentinel</div>
+  <ul class="nav">
+    <li class="active" data-section="overview"><span class="icon">📊</span>Overview</li>
+    <li data-section="logs"><span class="icon">📝</span>Request Logs</li>
+    <li data-section="guardrails"><span class="icon">🔒</span>Guardrails</li>
+    <li data-section="prompts"><span class="icon">💬</span>Prompts</li>
+    <li data-section="keys"><span class="icon">🔑</span>API Keys</li>
+    <li data-section="providers"><span class="icon">🌐</span>Providers</li>
+  </ul>
+</nav>
+<main class="main">
+
+<!-- OVERVIEW -->
+<div id="overview" class="section active">
+  <div class="header"><h1>Dashboard</h1><span class="badge" id="health-badge">● Healthy</span></div>
+  <div class="cards" id="metric-cards"></div>
+  <div class="panel">
+    <div class="panel-header"><h2>Recent Requests</h2>
+      <div class="filters"><select id="ov-window" onchange="loadMetrics()"><option value="1h">Last 1h</option><option value="6h">Last 6h</option><option value="24h" selected>Last 24h</option><option value="7d">Last 7d</option></select></div>
+    </div>
+    <div id="recent-logs-table"></div>
+  </div>
+</div>
+
+<!-- LOGS -->
+<div id="logs" class="section">
+  <div class="header"><h1>Request Logs</h1></div>
+  <div class="panel">
+    <div class="panel-header"><h2>All Requests</h2>
+      <div class="filters">
+        <select id="log-provider" onchange="loadLogs()"><option value="">All Providers</option><option>openai</option><option>anthropic</option><option>google</option><option>groq</option></select>
+        <select id="log-status" onchange="loadLogs()"><option value="">All Status</option><option value="success">Success</option><option value="error">Error</option><option value="denied">Denied</option></select>
+      </div>
+    </div>
+    <div id="logs-table"></div>
+  </div>
+</div>
+
+<!-- GUARDRAILS -->
+<div id="guardrails" class="section">
+  <div class="header"><h1>Guardrails</h1></div>
+  <div class="cards">
+    <div class="card green"><div class="label">Active Checks</div><div class="value">5</div><div class="sub">PII · Injection · SQL · Toxic · Secrets</div></div>
+    <div class="card"><div class="label">Input Guardrails</div><div class="value">3</div><div class="sub">PII, Prompt Injection, SQL Injection</div></div>
+    <div class="card"><div class="label">Output Guardrails</div><div class="value">2</div><div class="sub">Toxic Content, Secret Leakage</div></div>
+  </div>
+  <div class="panel"><div class="panel-header"><h2>Built-in Guardrail Checks</h2></div>
+    <table><thead><tr><th>Type</th><th>Direction</th><th>Action</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td>PII Detection</td><td>Input/Output</td><td><span class="badge-sm badge-denied">warn</span></td><td>Detects emails, phones, SSNs, credit cards</td></tr>
+      <tr><td>Prompt Injection</td><td>Input</td><td><span class="badge-sm badge-error">deny</span></td><td>Blocks jailbreak and override attempts</td></tr>
+      <tr><td>SQL Injection</td><td>Input</td><td><span class="badge-sm badge-error">deny</span></td><td>Blocks DROP TABLE, UNION SELECT patterns</td></tr>
+      <tr><td>Toxic Content</td><td>Input/Output</td><td><span class="badge-sm badge-error">deny</span></td><td>Blocks harmful/abusive content</td></tr>
+      <tr><td>Secret Leakage</td><td>Output</td><td><span class="badge-sm badge-denied">warn</span></td><td>Detects API keys and credentials in responses</td></tr>
+    </tbody></table>
+  </div>
+</div>
+
+<!-- PROMPTS -->
+<div id="prompts" class="section">
+  <div class="header"><h1>Prompt Management</h1></div>
+  <div class="panel"><div class="panel-header"><h2>Create Prompt</h2></div>
+    <div style="padding:20px">
+      <div class="form-group"><label>Name</label><input id="prompt-name" placeholder="e.g. customer-support"></div>
+      <div class="form-group"><label>Template (use {{variable}} syntax)</label><textarea id="prompt-template" placeholder="You are a {{role}}. Help the user with {{topic}}."></textarea></div>
+      <button class="btn btn-primary" onclick="createPrompt()">Create Prompt</button>
+    </div>
+  </div>
+  <div class="panel"><div class="panel-header"><h2>Saved Prompts</h2></div><div id="prompts-list"></div></div>
+</div>
+
+<!-- API KEYS -->
+<div id="keys" class="section">
+  <div class="header"><h1>API Keys</h1></div>
+  <div class="panel"><div class="panel-header"><h2>Create Key</h2></div>
+    <div style="padding:20px">
+      <div class="form-group"><label>Name</label><input id="key-name" placeholder="e.g. production-app"></div>
+      <div class="form-group"><label>Rate Limit (req/min)</label><input id="key-rate" type="number" value="60"></div>
+      <button class="btn btn-primary" onclick="createKey()">Generate Key</button>
+      <div id="key-result"></div>
+    </div>
+  </div>
+  <div class="panel"><div class="panel-header"><h2>Active Keys</h2></div><div id="keys-list"></div></div>
+</div>
+
+<!-- PROVIDERS -->
+<div id="providers" class="section">
+  <div class="header"><h1>Provider Analytics</h1></div>
+  <div id="provider-cards" class="cards"></div>
+  <div class="panel"><div class="panel-header"><h2>Provider Performance</h2></div><div id="provider-table"></div></div>
+</div>
+
+</main>
+<script>
+const API = '';
+
+// Navigation
+document.querySelectorAll('.nav li').forEach(li => {
+  li.addEventListener('click', () => {
+    document.querySelectorAll('.nav li').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.section').forEach(x => x.classList.remove('active'));
+    li.classList.add('active');
+    document.getElementById(li.dataset.section).classList.add('active');
+    if(li.dataset.section === 'logs') loadLogs();
+    if(li.dataset.section === 'keys') loadKeys();
+    if(li.dataset.section === 'prompts') loadPrompts();
+    if(li.dataset.section === 'providers') loadProviders();
+  });
+});
+
+async function fetchJSON(url) {
+  try { const r = await fetch(API + url); return await r.json(); }
+  catch(e) { return null; }
+}
+
+async function postJSON(url, data) {
+  const r = await fetch(API + url, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  return await r.json();
+}
+
+// Metrics
+async function loadMetrics() {
+  const window = document.getElementById('ov-window').value;
+  const m = await fetchJSON(`/api/metrics?window=${window}`);
+  if(!m) return;
+  document.getElementById('metric-cards').innerHTML = `
+    <div class="card"><div class="label">Total Requests</div><div class="value">${m.total_requests||0}</div><div class="sub">${(m.requests_per_min||0).toFixed(1)} req/min</div></div>
+    <div class="card green"><div class="label">Avg Latency</div><div class="value">${(m.avg_latency_ms||0).toFixed(0)}ms</div><div class="sub">${m.allowed_count||0} allowed</div></div>
+    <div class="card yellow"><div class="label">Total Cost</div><div class="value">$${(m.total_cost||0).toFixed(4)}</div><div class="sub">${m.total_tokens||0} tokens</div></div>
+    <div class="card red"><div class="label">Denied / Errors</div><div class="value">${(m.denied_count||0)+(m.error_count||0)}</div><div class="sub">${m.denied_count||0} denied · ${m.error_count||0} errors</div></div>
+  `;
+  loadRecentLogs();
+}
+
+async function loadRecentLogs() {
+  const data = await fetchJSON('/api/logs?limit=10');
+  if(!data) { document.getElementById('recent-logs-table').innerHTML='<div class="empty">No requests yet</div>'; return; }
+  renderLogsTable('recent-logs-table', data.logs||[]);
+}
+
+function renderLogsTable(id, logs) {
+  if(!logs.length) { document.getElementById(id).innerHTML='<div class="empty">No requests yet. Send a request to /v1/chat/completions to get started.</div>'; return; }
+  let html = '<table><thead><tr><th>Time</th><th>Provider</th><th>Model</th><th>Status</th><th>Latency</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>';
+  logs.forEach(l => {
+    const time = new Date(l.timestamp).toLocaleString();
+    const statusClass = l.status==='success'?'badge-success':l.status==='denied'?'badge-denied':'badge-error';
+    html += `<tr><td>${time}</td><td><span class="provider-badge">${l.provider||'-'}</span></td><td>${l.model||'-'}</td><td><span class="badge-sm ${statusClass}">${l.status}</span></td><td>${(l.latency_ms||0).toFixed(0)}ms</td><td>${l.total_tokens||0}</td><td>$${(l.cost||0).toFixed(5)}</td></tr>`;
+  });
+  html += '</tbody></table>';
+  document.getElementById(id).innerHTML = html;
+}
+
+async function loadLogs() {
+  const p = document.getElementById('log-provider').value;
+  const s = document.getElementById('log-status').value;
+  const data = await fetchJSON(`/api/logs?limit=50&provider=${p}&status=${s}`);
+  renderLogsTable('logs-table', data?.logs||[]);
+}
+
+// Keys
+async function createKey() {
+  const name = document.getElementById('key-name').value;
+  const rate = parseInt(document.getElementById('key-rate').value)||60;
+  if(!name) return alert('Name is required');
+  const data = await postJSON('/api/keys', {name, rate_limit: rate});
+  if(data.key) {
+    document.getElementById('key-result').innerHTML = `<div class="key-display">⚠️ Copy this key now — it won't be shown again:<br><br><strong>${data.key}</strong></div>`;
+    loadKeys();
+  }
+}
+
+async function loadKeys() {
+  const data = await fetchJSON('/api/keys');
+  const keys = data?.keys||[];
+  if(!keys.length) { document.getElementById('keys-list').innerHTML='<div class="empty">No API keys created yet</div>'; return; }
+  let html = '<table><thead><tr><th>Name</th><th>Prefix</th><th>Rate Limit</th><th>Created</th><th>Status</th><th>Action</th></tr></thead><tbody>';
+  keys.forEach(k => {
+    html += `<tr><td>${k.name}</td><td><code>${k.key_prefix}</code></td><td>${k.rate_limit}/min</td><td>${new Date(k.created_at).toLocaleDateString()}</td><td><span class="badge-sm ${k.enabled?'badge-success':'badge-error'}">${k.enabled?'active':'disabled'}</span></td><td><button class="btn btn-danger" onclick="deleteKey('${k.id}')" style="padding:4px 12px;font-size:12px">Revoke</button></td></tr>`;
+  });
+  html += '</tbody></table>';
+  document.getElementById('keys-list').innerHTML = html;
+}
+
+async function deleteKey(id) {
+  if(!confirm('Revoke this key?')) return;
+  await fetch(`/api/keys?id=${id}`, {method:'DELETE'});
+  loadKeys();
+}
+
+// Prompts
+async function createPrompt() {
+  const name = document.getElementById('prompt-name').value;
+  const template = document.getElementById('prompt-template').value;
+  if(!name||!template) return alert('Name and template required');
+  await postJSON('/api/prompts', {name, template});
+  document.getElementById('prompt-name').value = '';
+  document.getElementById('prompt-template').value = '';
+  loadPrompts();
+}
+
+async function loadPrompts() {
+  const data = await fetchJSON('/api/prompts');
+  const prompts = data?.prompts||[];
+  if(!prompts.length) { document.getElementById('prompts-list').innerHTML='<div class="empty">No prompts created yet</div>'; return; }
+  let html = '<table><thead><tr><th>Name</th><th>Version</th><th>Variables</th><th>Updated</th></tr></thead><tbody>';
+  prompts.forEach(p => {
+    html += `<tr><td><strong>${p.name}</strong></td><td>v${p.version}</td><td>${(p.variables||[]).map(v=>'{{'+v+'}}').join(', ')||'—'}</td><td>${new Date(p.updated_at).toLocaleDateString()}</td></tr>`;
+  });
+  html += '</tbody></table>';
+  document.getElementById('prompts-list').innerHTML = html;
+}
+
+// Providers
+async function loadProviders() {
+  const data = await fetchJSON('/api/metrics/providers');
+  const providers = data?.providers||[];
+  if(!providers.length) { document.getElementById('provider-cards').innerHTML=''; document.getElementById('provider-table').innerHTML='<div class="empty">No provider data yet</div>'; return; }
+  let cards = '';
+  providers.forEach(p => {
+    cards += `<div class="card"><div class="label">${p.provider}</div><div class="value">${p.request_count}</div><div class="sub">${(p.avg_latency_ms||0).toFixed(0)}ms avg · $${(p.total_cost||0).toFixed(4)}</div></div>`;
+  });
+  document.getElementById('provider-cards').innerHTML = cards;
+  let html = '<table><thead><tr><th>Provider</th><th>Requests</th><th>Avg Latency</th><th>Total Cost</th><th>Error Rate</th></tr></thead><tbody>';
+  providers.forEach(p => {
+    html += `<tr><td><span class="provider-badge">${p.provider}</span></td><td>${p.request_count}</td><td>${(p.avg_latency_ms||0).toFixed(0)}ms</td><td>$${(p.total_cost||0).toFixed(4)}</td><td>${((p.error_rate||0)*100).toFixed(1)}%</td></tr>`;
+  });
+  html += '</tbody></table>';
+  document.getElementById('provider-table').innerHTML = html;
+}
+
+// Init
+loadMetrics();
+setInterval(loadMetrics, 15000);
+</script>
+</body>
+</html>

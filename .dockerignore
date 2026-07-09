@@ -1,0 +1,13 @@
+.git
+.github
+.sentinel
+data
+bin
+dist
+tmp
+*.db
+*.db-*
+.env
+.env.*
+coverage.out
+coverage.html

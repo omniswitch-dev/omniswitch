@@ -1,0 +1,43 @@
+# Binaries
+sentinel
+gateway
+proxy
+agentctl
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test and coverage output
+coverage.out
+coverage.html
+*.test
+
+# Local data
+sentinel.db
+sentinel.db-*
+sentinel_cache.db
+sentinel_cache.db-*
+.sentinel/
+data/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.local.yaml
+*.local.yml
+*.local.json
+
+# Editor and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# Build folders
+bin/
+dist/
+tmp/

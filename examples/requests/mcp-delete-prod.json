@@ -1,0 +1,15 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "github.delete_repo",
+    "arguments": {
+      "repo": "payments-prod",
+      "agent_id": "agent-1",
+      "agent_department": "engineering",
+      "agent_role": "developer",
+      "session_id": "session-1"
+    }
+  }
+}

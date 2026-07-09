@@ -1,0 +1,42 @@
+apiVersion: sentinel.dev/v1
+kind: GatewayConfig
+
+gateway:
+  listen: ":8080"
+  data_dir: ".sentinel"
+  auth: false
+  cache_threshold: 0.95
+  cache_ttl: 24h
+  shadow_provider: ""
+
+providers:
+  - name: openai-prod
+    type: openai
+    api_key_env: OPENAI_API_KEY
+  - name: anthropic-prod
+    type: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+
+mcp:
+  enabled: true
+  policy: policies/production-delete.yaml
+  upstream: http://127.0.0.1:8090/mcp
+
+routes:
+  fast-chat:
+    variants:
+      - name: openai-prod
+        provider: "@openai-prod"
+        model: "@openai-prod/gpt-4o-mini"
+        weight: 100
+
+  canary-chat:
+    variants:
+      - name: openai-baseline
+        provider: "@openai-prod"
+        model: "@openai-prod/gpt-4o-mini"
+        weight: 90
+      - name: anthropic-canary
+        provider: "@anthropic-prod"
+        model: "@anthropic-prod/claude-3-5-haiku-20241022"
+        weight: 10

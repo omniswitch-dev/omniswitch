@@ -1,0 +1,22 @@
+{
+  "agent": {
+    "id": "agent-1",
+    "department": "engineering",
+    "role": "developer"
+  },
+  "tool": {
+    "name": "github"
+  },
+  "action": {
+    "name": "delete"
+  },
+  "resource": {
+    "type": "repository",
+    "name": "payments-prod",
+    "environment": "production"
+  },
+  "session": {
+    "id": "session-1"
+  },
+  "metadata": {}
+}

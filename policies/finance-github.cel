@@ -1,0 +1,4 @@
+// name: finance-github
+// reason: Finance agents cannot call {{tool.name}} tools.
+agent.department == "finance" &&
+tool.name == "github"
