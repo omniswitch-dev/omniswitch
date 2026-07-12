@@ -9,13 +9,56 @@ gateway:
   cache_ttl: 24h
   shadow_provider: ""
 
+observability:
+  otel_enabled: false
+  otlp_endpoint: ""
+  service_name: sentinel-gateway
+  insecure: true
+  timeout: 10s
+
 providers:
+  # Built-in providers (auto-detected type)
   - name: openai-prod
     type: openai
     api_key_env: OPENAI_API_KEY
   - name: anthropic-prod
     type: anthropic
     api_key_env: ANTHROPIC_API_KEY
+
+  # Custom OpenAI-compatible providers - connects to any endpoint
+  - name: ollama
+    type: custom
+    base_url: http://localhost:11434/v1
+    models:
+      - llama3.2
+      - codellama
+      - mistral
+
+  - name: deepseek
+    type: custom
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    models:
+      - deepseek-chat
+      - deepseek-coder
+
+  - name: together
+    type: custom
+    base_url: https://api.together.xyz/v1
+    api_key_env: TOGETHER_API_KEY
+    models:
+      - meta-llama/Llama-3.3-70B-Instruct-Turbo
+      - mistralai/Mixtral-8x22B-Instruct-v0.1
+
+  # Azure OpenAI (uses api-key header instead of Bearer token)
+  # - name: azure-gpt4o
+  #   type: custom
+  #   base_url: https://YOUR_RESOURCE.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21
+  #   api_key_env: AZURE_OPENAI_API_KEY
+  #   extra_headers:
+  #     api-key: "${AZURE_OPENAI_API_KEY}"
+  #   models:
+  #     - gpt-4o
 
 mcp:
   enabled: true

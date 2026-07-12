@@ -1,6 +1,6 @@
 # Sentinel
 
-Sentinel is a local policy enforcement layer for AI agent tool calls. It converts protocol requests into a canonical `ToolRequest`, evaluates `sentinel.dev/v1` policies with CEL, and returns explainable decisions.
+Sentinel is an open-source AI gateway and policy enforcement layer. It provides a unified OpenAI-compatible API across any LLM provider, including OpenAI, Anthropic, Google Gemini, Groq, and **any OpenAI-compatible endpoint** (Ollama, vLLM, DeepSeek, Together AI, Mistral, Azure OpenAI, and more).
 
 Sentinel is open source under the Apache-2.0 license.
 
@@ -80,7 +80,117 @@ Useful environment variables:
 - `SENTINEL_MCP_ENABLED`: set to `false` to disable MCP proxy endpoints in `cmd/gateway`
 - `SENTINEL_MCP_POLICY`: MCP policy file mounted at `/mcp`, default `policies/production-delete.yaml`
 - `SENTINEL_MCP_UPSTREAM`: MCP upstream for allowed tool calls, default `http://127.0.0.1:8090/mcp`
-- `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`: provider credentials
+- `SENTINEL_VAULT_KEY`: passphrase used to encrypt stored provider credentials
+- `SENTINEL_OTEL_ENABLED`: set to `true` to enable OpenTelemetry trace export
+- `SENTINEL_OTEL_ENDPOINT`: OTLP HTTP traces endpoint, for example `http://localhost:4318/v1/traces`
+- `SENTINEL_OTEL_SERVICE_NAME`: OpenTelemetry service name, default `sentinel-gateway`
+- `SENTINEL_OTEL_HEADERS`: comma-separated OTLP headers, for example `x-api-key=...`
+- `SENTINEL_OTEL_INSECURE`: allow insecure OTLP transport when needed
+- `SENTINEL_OTEL_TIMEOUT`: OTLP exporter timeout, default `10s`
+- `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`: built-in provider credentials
+- Any custom provider keys (e.g. `DEEPSEEK_API_KEY`, `TOGETHER_API_KEY`) referenced via `api_key_env` in config
+
+### Custom Providers (Ollama, vLLM, DeepSeek, etc.)
+
+Connect any OpenAI-compatible endpoint by adding it to your config:
+
+```yaml
+providers:
+  - name: ollama
+    type: custom
+    base_url: http://localhost:11434/v1
+    models: [llama3.2, codellama, mistral]
+
+  - name: deepseek
+    type: custom
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    models: [deepseek-chat, deepseek-coder]
+
+  - name: together
+    type: custom
+    base_url: https://api.together.xyz/v1
+    api_key_env: TOGETHER_API_KEY
+    models: [meta-llama/Llama-3.3-70B-Instruct-Turbo]
+
+  - name: azure-gpt4o
+    type: custom
+    base_url: https://YOUR_RESOURCE.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21
+    api_key_env: AZURE_OPENAI_API_KEY
+    extra_headers:
+      api-key: "${AZURE_OPENAI_API_KEY}"
+    models: [gpt-4o]
+```
+
+Then query them via the unified API:
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-sentinel-provider: ollama" \
+  -d '{"model": "llama3.2", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+## SDKs
+
+### Python
+
+```bash
+pip install openai  # sentinel-ai wraps the official openai package
+```
+
+```python
+from sentinel import Sentinel
+
+client = Sentinel(gateway_url="http://localhost:8080")
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(response.choices[0].message.content)
+
+# Force a provider
+client = Sentinel(provider="anthropic")
+
+# With observability
+client = Sentinel(trace_id="agent-run-001", session_id="conv-abc")
+
+# Streaming
+stream = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Tell a story"}],
+    stream=True,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="")
+```
+
+### Node.js / TypeScript
+
+```bash
+npm install openai  # sentinel-ai wraps the official openai package
+```
+
+```javascript
+const { Sentinel } = require('./sdk/node');
+
+const client = new Sentinel({ gatewayUrl: 'http://localhost:8080' });
+const response = await client.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Hello!' }],
+});
+console.log(response.choices[0].message.content);
+
+// Streaming
+const stream = await client.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Tell a story' }],
+  stream: true,
+});
+for await (const chunk of stream) {
+  process.stdout.write(chunk.choices[0]?.delta?.content || '');
+}
+```
 
 Gateway endpoints:
 
@@ -95,6 +205,9 @@ Gateway endpoints:
 - `POST /api/users`
 - `POST /api/workspace-members`
 - `GET /api/providers`
+- `GET /api/virtual-keys`
+- `POST /api/virtual-keys`
+- `POST /api/virtual-keys/rotate`
 - `POST /api/feedback`
 - `POST /api/prompts`
 - `POST /api/evals/policy`
@@ -119,6 +232,8 @@ Advanced gateway behavior:
 - **A/B routing:** use config routes or `SENTINEL_AB_TEST` to split a logical model across provider/model variants.
 - **Shadow routing:** use `SENTINEL_SHADOW_PROVIDER` or `x-sentinel-shadow-provider` to compare a second provider without affecting the user response.
 - **MCP Gateway:** `/mcp` and `/v1/mcp/tools/call` use Sentinel CEL policies to govern agent tool calls in the same process as LLM traffic.
+- **OpenTelemetry:** export gateway and provider spans to any OTLP-compatible backend.
+- **Provider credential vault:** store encrypted provider credentials and expose them as virtual providers with rotation and revoke workflows.
 
 Example config:
 

@@ -20,12 +20,13 @@ const (
 )
 
 type Config struct {
-	APIVersion string                  `json:"apiVersion" yaml:"apiVersion"`
-	Kind       string                  `json:"kind" yaml:"kind"`
-	Gateway    Gateway                 `json:"gateway,omitempty" yaml:"gateway,omitempty"`
-	Providers  []ProviderAccount       `json:"providers,omitempty" yaml:"providers,omitempty"`
-	MCP        MCP                     `json:"mcp,omitempty" yaml:"mcp,omitempty"`
-	Routes     map[string]router.Route `json:"routes,omitempty" yaml:"routes,omitempty"`
+	APIVersion    string                  `json:"apiVersion" yaml:"apiVersion"`
+	Kind          string                  `json:"kind" yaml:"kind"`
+	Gateway       Gateway                 `json:"gateway,omitempty" yaml:"gateway,omitempty"`
+	Observability Observability           `json:"observability,omitempty" yaml:"observability,omitempty"`
+	Providers     []ProviderAccount       `json:"providers,omitempty" yaml:"providers,omitempty"`
+	MCP           MCP                     `json:"mcp,omitempty" yaml:"mcp,omitempty"`
+	Routes        map[string]router.Route `json:"routes,omitempty" yaml:"routes,omitempty"`
 }
 
 type Gateway struct {
@@ -43,10 +44,22 @@ type MCP struct {
 	Upstream string `json:"upstream,omitempty" yaml:"upstream,omitempty"`
 }
 
+type Observability struct {
+	OTelEnabled  *bool             `json:"otel_enabled,omitempty" yaml:"otel_enabled,omitempty"`
+	OTLPEndpoint string            `json:"otlp_endpoint,omitempty" yaml:"otlp_endpoint,omitempty"`
+	ServiceName  string            `json:"service_name,omitempty" yaml:"service_name,omitempty"`
+	Headers      map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	Insecure     *bool             `json:"insecure,omitempty" yaml:"insecure,omitempty"`
+	Timeout      *Duration         `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+}
+
 type ProviderAccount struct {
-	Name      string `json:"name" yaml:"name"`
-	Type      string `json:"type" yaml:"type"`
-	APIKeyEnv string `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+	Name         string            `json:"name" yaml:"name"`
+	Type         string            `json:"type" yaml:"type"`
+	APIKeyEnv    string            `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+	BaseURL      string            `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	Models       []string          `json:"models,omitempty" yaml:"models,omitempty"`
+	ExtraHeaders map[string]string `json:"extra_headers,omitempty" yaml:"extra_headers,omitempty"`
 }
 
 type Duration struct {
@@ -96,6 +109,9 @@ func Validate(cfg Config) error {
 	}
 	if cfg.Gateway.CacheTTL != nil && cfg.Gateway.CacheTTL.Duration < 0 {
 		return fmt.Errorf("gateway.cache_ttl must be non-negative")
+	}
+	if cfg.Observability.Timeout != nil && cfg.Observability.Timeout.Duration < 0 {
+		return fmt.Errorf("observability.timeout must be non-negative")
 	}
 	for i, account := range cfg.Providers {
 		if strings.TrimSpace(account.Name) == "" {

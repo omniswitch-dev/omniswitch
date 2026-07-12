@@ -66,6 +66,45 @@ Returns per-provider aggregate metrics.
 
 Returns registered provider names and exposed models.
 
+### `POST /api/virtual-keys`
+
+Stores an encrypted provider credential and exposes it as a virtual provider on next gateway startup.
+
+```json
+{
+  "name": "azure-prod",
+  "provider_type": "custom",
+  "provider_name": "azure-prod",
+  "base_url": "https://YOUR_RESOURCE.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21",
+  "provider_key": "real-provider-secret",
+  "metadata": {
+    "auth_header": "api-key",
+    "models": "gpt-4o,gpt-4o-mini"
+  }
+}
+```
+
+The response redacts `provider_key`. Use `SENTINEL_VAULT_KEY` to keep stored credentials decryptable across restarts.
+
+### `GET /api/virtual-keys`
+
+Lists virtual provider keys without decrypted provider credentials.
+
+### `POST /api/virtual-keys/rotate`
+
+Rotates the encrypted provider credential for an existing virtual key.
+
+```json
+{
+  "name": "azure-prod",
+  "provider_key": "new-real-provider-secret"
+}
+```
+
+### `DELETE /api/virtual-keys?name=<virtual_key_name>`
+
+Revokes a virtual key without deleting its audit history.
+
 ### `GET /api/feedback`
 
 Lists feedback entries.

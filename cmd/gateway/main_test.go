@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -63,6 +67,14 @@ gateway:
   cache_threshold: 0.72
   cache_ttl: 15m
   shadow_provider: anthropic
+observability:
+  otel_enabled: true
+  otlp_endpoint: http://localhost:4318/v1/traces
+  service_name: sentinel-test
+  insecure: true
+  timeout: 2s
+  headers:
+    x-api-key: otel-secret
 mcp:
   enabled: false
   policy: policies/custom.yaml
@@ -71,6 +83,10 @@ providers:
   - name: openai-prod
     type: openai
     api_key_env: OPENAI_PROD_KEY
+  - name: local-llm
+    type: custom
+    base_url: http://localhost:11434/v1
+    models: [llama3.2]
 routes:
   logical:
     provider: openai
@@ -94,11 +110,17 @@ routes:
 	if settings.shadowProvider != "anthropic" || settings.mcpEnabled {
 		t.Fatalf("settings shadow/mcp = %q/%v, want anthropic/false", settings.shadowProvider, settings.mcpEnabled)
 	}
+	if !settings.otelEnabled || settings.otelEndpoint != "http://localhost:4318/v1/traces" || settings.otelServiceName != "sentinel-test" || !settings.otelInsecure || settings.otelTimeout != 2*time.Second {
+		t.Fatalf("otel settings = %+v, want configured telemetry", settings)
+	}
+	if settings.otelHeaders["x-api-key"] != "otel-secret" {
+		t.Fatalf("otel headers = %+v, want configured header", settings.otelHeaders)
+	}
 	if settings.routes["logical"].Provider != "openai" || settings.routes["logical"].Fallbacks[0] != "anthropic" || settings.routes["logical"].MaxRetries != 2 {
 		t.Fatalf("route = %+v, want configured fallback route", settings.routes["logical"])
 	}
-	if len(settings.providerAccounts) != 1 || settings.providerAccounts[0].Name != "openai-prod" {
-		t.Fatalf("provider accounts = %+v, want openai-prod", settings.providerAccounts)
+	if len(settings.providerAccounts) != 2 || settings.providerAccounts[0].Name != "openai-prod" || settings.providerAccounts[1].BaseURL == "" {
+		t.Fatalf("provider accounts = %+v, want built-in and custom accounts", settings.providerAccounts)
 	}
 }
 
@@ -152,6 +174,65 @@ func TestRegisterProviderAccount(t *testing.T) {
 	}
 }
 
+func TestRegisterCustomProviderAccountExpandsHeaders(t *testing.T) {
+	t.Setenv("CUSTOM_PROVIDER_KEY", "secret-from-env")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("api-key") != "secret-from-env" {
+			t.Fatalf("api-key header = %q, want expanded env secret", r.Header.Get("api-key"))
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Fatalf("Authorization header = %q, want empty when api-key header is configured", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(provider.ChatResponse{
+			ID:      "chat_custom",
+			Object:  "chat.completion",
+			Created: 1,
+			Model:   "gpt-4o",
+			Choices: []provider.Choice{{Message: provider.Message{Role: "assistant", Content: "ok"}, FinishReason: "stop"}},
+		})
+	}))
+	defer server.Close()
+
+	registry := provider.NewRegistry()
+	registerProviderAccount(registry, gatewayconfig.ProviderAccount{
+		Name:      "azure",
+		Type:      "custom",
+		APIKeyEnv: "CUSTOM_PROVIDER_KEY",
+		BaseURL:   server.URL + "/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21",
+		Models:    []string{"gpt-4o"},
+		ExtraHeaders: map[string]string{
+			"api-key": "${CUSTOM_PROVIDER_KEY}",
+		},
+	})
+	registered, err := registry.Get("azure")
+	if err != nil {
+		t.Fatalf("registry.Get(custom) error = %v", err)
+	}
+	resp, _, err := registered.ChatCompletion(context.Background(), provider.ChatRequest{
+		Model:    "gpt-4o",
+		Messages: []provider.Message{{Role: "user", Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("ChatCompletion() error = %v", err)
+	}
+	if resp.ID != "chat_custom" {
+		t.Fatalf("response ID = %q, want chat_custom", resp.ID)
+	}
+}
+
+func TestParseHeaderListAndExpansion(t *testing.T) {
+	t.Setenv("HEADER_SECRET", "resolved")
+	headers := parseHeaderList("x-api-key=${HEADER_SECRET},x-team=ai,bad")
+	expanded := expandHeaderValues(headers)
+	if expanded["x-api-key"] != "resolved" || expanded["x-team"] != "ai" {
+		t.Fatalf("expanded headers = %+v, want env and literal values", expanded)
+	}
+	if _, ok := expanded["bad"]; ok {
+		t.Fatalf("expanded headers = %+v, want malformed entry ignored", expanded)
+	}
+}
+
 func clearGatewayEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
@@ -166,6 +247,13 @@ func clearGatewayEnv(t *testing.T) {
 		"SENTINEL_MCP_POLICY",
 		"SENTINEL_MCP_UPSTREAM",
 		"SENTINEL_AB_TEST",
+		"SENTINEL_OTEL_ENABLED",
+		"SENTINEL_OTEL_ENDPOINT",
+		"SENTINEL_OTEL_SERVICE_NAME",
+		"SENTINEL_OTEL_HEADERS",
+		"SENTINEL_OTEL_INSECURE",
+		"SENTINEL_OTEL_TIMEOUT",
+		"SENTINEL_VAULT_KEY",
 	} {
 		t.Setenv(key, "")
 	}

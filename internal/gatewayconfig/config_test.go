@@ -19,10 +19,25 @@ gateway:
   cache_threshold: 0.88
   cache_ttl: 2h
   shadow_provider: anthropic
+observability:
+  otel_enabled: true
+  otlp_endpoint: http://localhost:4318/v1/traces
+  service_name: sentinel-test
+  insecure: true
+  timeout: 5s
+  headers:
+    x-api-key: test
 providers:
   - name: openai-prod
     type: openai
     api_key_env: OPENAI_PROD_KEY
+  - name: deepseek
+    type: custom
+    api_key_env: DEEPSEEK_API_KEY
+    base_url: https://api.deepseek.com/v1
+    models: [deepseek-chat]
+    extra_headers:
+      x-team: ai
 mcp:
   enabled: true
   policy: policies/mcp.yaml
@@ -61,11 +76,17 @@ routes:
 	if cfg.Gateway.CacheTTL == nil || cfg.Gateway.CacheTTL.Duration != 2*time.Hour {
 		t.Fatalf("cache ttl = %v, want 2h", cfg.Gateway.CacheTTL)
 	}
+	if cfg.Observability.OTelEnabled == nil || !*cfg.Observability.OTelEnabled || cfg.Observability.OTLPEndpoint != "http://localhost:4318/v1/traces" || cfg.Observability.ServiceName != "sentinel-test" {
+		t.Fatalf("observability = %+v, want configured telemetry", cfg.Observability)
+	}
+	if cfg.Observability.Timeout == nil || cfg.Observability.Timeout.Duration != 5*time.Second || cfg.Observability.Headers["x-api-key"] != "test" {
+		t.Fatalf("observability timeout/headers = %+v, want configured values", cfg.Observability)
+	}
 	if cfg.MCP.Policy != "policies/mcp.yaml" || cfg.MCP.Upstream != "http://127.0.0.1:9000/mcp" {
 		t.Fatalf("mcp = %+v, want configured values", cfg.MCP)
 	}
-	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "openai-prod" || cfg.Providers[0].APIKeyEnv != "OPENAI_PROD_KEY" {
-		t.Fatalf("providers = %+v, want configured provider account", cfg.Providers)
+	if len(cfg.Providers) != 2 || cfg.Providers[0].Name != "openai-prod" || cfg.Providers[1].BaseURL != "https://api.deepseek.com/v1" || cfg.Providers[1].ExtraHeaders["x-team"] != "ai" {
+		t.Fatalf("providers = %+v, want built-in and custom provider accounts", cfg.Providers)
 	}
 	route := cfg.Routes["logical-model"]
 	if route.MaxRetries != 2 || len(route.Variants) != 2 || route.Variants[0].Weight != 90 {
@@ -120,5 +141,12 @@ func TestValidateRejectsInvalidCacheThreshold(t *testing.T) {
 	_, err := Parse([]byte(`gateway: {cache_threshold: 1.5}`), ".yaml")
 	if err == nil || !strings.Contains(err.Error(), "cache_threshold") {
 		t.Fatalf("Parse() error = %v, want cache threshold validation", err)
+	}
+}
+
+func TestValidateRejectsInvalidObservabilityTimeout(t *testing.T) {
+	_, err := Parse([]byte(`observability: {timeout: -1s}`), ".yaml")
+	if err == nil || !strings.Contains(err.Error(), "observability.timeout") {
+		t.Fatalf("Parse() error = %v, want observability timeout validation", err)
 	}
 }

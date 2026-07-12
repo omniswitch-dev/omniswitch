@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -25,6 +26,8 @@ import (
 	mcpproxy "sentinel/internal/proxy"
 	"sentinel/internal/router"
 	"sentinel/internal/store"
+	"sentinel/internal/telemetry"
+	"sentinel/internal/vault"
 )
 
 func main() {
@@ -35,6 +38,24 @@ func main() {
 	if settings.configPath != "" {
 		log.Printf("loaded gateway config: %s", settings.configPath)
 	}
+	shutdownTelemetry, err := telemetry.Init(context.Background(), telemetry.Config{
+		Enabled:     settings.otelEnabled,
+		Endpoint:    settings.otelEndpoint,
+		ServiceName: settings.otelServiceName,
+		Headers:     settings.otelHeaders,
+		Insecure:    settings.otelInsecure,
+		Timeout:     settings.otelTimeout,
+	})
+	if err != nil {
+		log.Fatalf("failed to initialize telemetry: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTelemetry(ctx); err != nil {
+			log.Printf("failed to shutdown telemetry: %v", err)
+		}
+	}()
 
 	// Initialize store.
 	st, err := store.New(settings.dataDir)
@@ -42,6 +63,10 @@ func main() {
 		log.Fatalf("failed to initialize store: %v", err)
 	}
 	defer st.Close()
+	vaultManager := vault.New(st, settings.vaultKey)
+	if settings.vaultKey == "" {
+		log.Println("WARNING: SENTINEL_VAULT_KEY is not set. Provider vault entries created in this process will not be decryptable after restart.")
+	}
 
 	// Initialize provider registry.
 	registry := provider.NewRegistry()
@@ -52,6 +77,7 @@ func main() {
 	for _, account := range settings.providerAccounts {
 		registerProviderAccount(registry, account)
 	}
+	registerVaultProviders(registry, vaultManager)
 
 	if len(registry.Names()) == 0 {
 		log.Println("WARNING: No provider API keys configured. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or GROQ_API_KEY.")
@@ -73,6 +99,7 @@ func main() {
 	promptHandler := prompt.New(st)
 	orgHandler := org.New(st)
 	evalHandler := eval.New()
+	vaultHandler := vault.NewHandler(vaultManager)
 	dash := dashboard.New(st)
 
 	// Build mux.
@@ -114,6 +141,25 @@ func main() {
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	})
+	mux.HandleFunc("/api/virtual-keys", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			vaultHandler.ListVirtualKeys(w, r)
+		case http.MethodPost:
+			vaultHandler.CreateVirtualKey(w, r)
+		case http.MethodDelete:
+			vaultHandler.RevokeVirtualKey(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/virtual-keys/rotate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		vaultHandler.RotateVirtualKey(w, r)
 	})
 
 	// Feedback API.
@@ -233,18 +279,27 @@ type runtimeSettings struct {
 	routes           map[string]router.Route
 	providerAccounts []gatewayconfig.ProviderAccount
 	configPath       string
+	otelEnabled      bool
+	otelEndpoint     string
+	otelServiceName  string
+	otelHeaders      map[string]string
+	otelInsecure     bool
+	otelTimeout      time.Duration
+	vaultKey         string
 }
 
 func loadRuntimeSettings() (runtimeSettings, error) {
 	settings := runtimeSettings{
-		listenAddr:     ":8080",
-		dataDir:        ".",
-		cacheThreshold: 0.95,
-		cacheTTL:       24 * time.Hour,
-		mcpEnabled:     true,
-		mcpPolicyPath:  "policies/production-delete.yaml",
-		mcpUpstreamURL: "http://127.0.0.1:8090/mcp",
-		routes:         map[string]router.Route{},
+		listenAddr:      ":8080",
+		dataDir:         ".",
+		cacheThreshold:  0.95,
+		cacheTTL:        24 * time.Hour,
+		mcpEnabled:      true,
+		mcpPolicyPath:   "policies/production-delete.yaml",
+		mcpUpstreamURL:  "http://127.0.0.1:8090/mcp",
+		routes:          map[string]router.Route{},
+		otelServiceName: "sentinel-gateway",
+		otelTimeout:     10 * time.Second,
 	}
 
 	if configPath := strings.TrimSpace(os.Getenv("SENTINEL_CONFIG")); configPath != "" {
@@ -265,6 +320,16 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 	settings.mcpEnabled = envBool("SENTINEL_MCP_ENABLED", settings.mcpEnabled)
 	settings.mcpPolicyPath = env("SENTINEL_MCP_POLICY", settings.mcpPolicyPath)
 	settings.mcpUpstreamURL = env("SENTINEL_MCP_UPSTREAM", settings.mcpUpstreamURL)
+	settings.otelEnabled = envBool("SENTINEL_OTEL_ENABLED", settings.otelEnabled)
+	settings.otelEndpoint = env("SENTINEL_OTEL_ENDPOINT", settings.otelEndpoint)
+	settings.otelServiceName = env("SENTINEL_OTEL_SERVICE_NAME", settings.otelServiceName)
+	settings.otelHeaders = mergeStringMaps(settings.otelHeaders, parseHeaderList(os.Getenv("SENTINEL_OTEL_HEADERS")))
+	settings.otelInsecure = envBool("SENTINEL_OTEL_INSECURE", settings.otelInsecure)
+	settings.otelTimeout = envDuration("SENTINEL_OTEL_TIMEOUT", settings.otelTimeout)
+	settings.vaultKey = env("SENTINEL_VAULT_KEY", settings.vaultKey)
+	if settings.otelEndpoint != "" {
+		settings.otelEnabled = true
+	}
 	for model, route := range parseABConfig(os.Getenv("SENTINEL_AB_TEST")) {
 		settings.routes[model] = mergeRoute(settings.routes[model], route)
 	}
@@ -289,6 +354,25 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 	}
 	if cfg.Gateway.ShadowProvider != "" {
 		settings.shadowProvider = cfg.Gateway.ShadowProvider
+	}
+	if cfg.Observability.OTelEnabled != nil {
+		settings.otelEnabled = *cfg.Observability.OTelEnabled
+	}
+	if cfg.Observability.OTLPEndpoint != "" {
+		settings.otelEndpoint = cfg.Observability.OTLPEndpoint
+		settings.otelEnabled = true
+	}
+	if cfg.Observability.ServiceName != "" {
+		settings.otelServiceName = cfg.Observability.ServiceName
+	}
+	if cfg.Observability.Headers != nil {
+		settings.otelHeaders = cfg.Observability.Headers
+	}
+	if cfg.Observability.Insecure != nil {
+		settings.otelInsecure = *cfg.Observability.Insecure
+	}
+	if cfg.Observability.Timeout != nil {
+		settings.otelTimeout = cfg.Observability.Timeout.Duration
 	}
 	if cfg.MCP.Enabled != nil {
 		settings.mcpEnabled = *cfg.MCP.Enabled
@@ -355,6 +439,62 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 	return fallback
 }
 
+func parseHeaderList(value string) map[string]string {
+	headers := map[string]string{}
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, val, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		headers[key] = strings.TrimSpace(val)
+	}
+	return headers
+}
+
+func parseCSV(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func mergeStringMaps(base, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	merged := map[string]string{}
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range override {
+		merged[key] = value
+	}
+	return merged
+}
+
+func expandHeaderValues(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	expanded := make(map[string]string, len(headers))
+	for key, value := range headers {
+		expanded[key] = os.ExpandEnv(value)
+	}
+	return expanded
+}
+
 func registerEnvProvider(registry *provider.Registry, providerType string, envKey string) {
 	if key := os.Getenv(envKey); key != "" {
 		if p := newProvider(providerType, key); p != nil {
@@ -365,6 +505,34 @@ func registerEnvProvider(registry *provider.Registry, providerType string, envKe
 }
 
 func registerProviderAccount(registry *provider.Registry, account gatewayconfig.ProviderAccount) {
+	providerType := strings.ToLower(strings.TrimSpace(account.Type))
+
+	// Custom or generic OpenAI-compatible provider with explicit base_url.
+	if providerType == "custom" || account.BaseURL != "" {
+		envKey := strings.TrimSpace(account.APIKeyEnv)
+		apiKey := ""
+		if envKey != "" {
+			apiKey = os.Getenv(envKey)
+		}
+		var opts []provider.CustomOption
+		if len(account.Models) > 0 {
+			opts = append(opts, provider.WithCustomModels(account.Models))
+		}
+		if len(account.ExtraHeaders) > 0 {
+			opts = append(opts, provider.WithCustomHeaders(expandHeaderValues(account.ExtraHeaders)))
+		}
+		baseURL := account.BaseURL
+		if baseURL == "" {
+			log.Printf("skipping custom provider %q: base_url is required for type=custom", account.Name)
+			return
+		}
+		custom := provider.NewCustom(account.Name, baseURL, apiKey, opts...)
+		registry.Register(custom)
+		log.Printf("registered custom provider: %s (%s)", custom.Name(), baseURL)
+		return
+	}
+
+	// Standard provider account with alias.
 	envKey := strings.TrimSpace(account.APIKeyEnv)
 	if envKey == "" {
 		envKey = defaultProviderKeyEnv(account.Type)
@@ -382,6 +550,53 @@ func registerProviderAccount(registry *provider.Registry, account gatewayconfig.
 	alias := provider.NewAlias(account.Name, inner)
 	registry.Register(alias)
 	log.Printf("registered provider account: %s (%s)", alias.Name(), inner.Name())
+}
+
+func registerVaultProviders(registry *provider.Registry, vaultManager *vault.Vault) {
+	if vaultManager == nil {
+		return
+	}
+	keys, err := vaultManager.List(context.Background())
+	if err != nil {
+		log.Printf("failed to list virtual provider keys: %v", err)
+		return
+	}
+	for _, key := range keys {
+		if !key.Enabled {
+			continue
+		}
+		providerKey, providerType, baseURL, err := vaultManager.Resolve(context.Background(), key.Name)
+		if err != nil {
+			log.Printf("skipping virtual key %q: %v", key.Name, err)
+			continue
+		}
+		providerName := key.ProviderName
+		if providerName == "" {
+			providerName = key.Name
+		}
+		providerType = strings.ToLower(strings.TrimSpace(providerType))
+		if baseURL != "" || providerType == "custom" {
+			opts := []provider.CustomOption{}
+			if models := parseCSV(key.Metadata["models"]); len(models) > 0 {
+				opts = append(opts, provider.WithCustomModels(models))
+			}
+			if authHeader := strings.TrimSpace(key.Metadata["auth_header"]); authHeader != "" && providerKey != "" {
+				opts = append(opts, provider.WithCustomHeaders(map[string]string{authHeader: providerKey}))
+			}
+			custom := provider.NewCustom(providerName, baseURL, providerKey, opts...)
+			registry.Register(custom)
+			log.Printf("registered vaulted provider: %s (%s)", custom.Name(), baseURL)
+			continue
+		}
+		inner := newProvider(providerType, providerKey)
+		if inner == nil {
+			log.Printf("skipping virtual key %q: unsupported provider type %q", key.Name, providerType)
+			continue
+		}
+		alias := provider.NewAlias(providerName, inner)
+		registry.Register(alias)
+		log.Printf("registered vaulted provider account: %s (%s)", alias.Name(), inner.Name())
+	}
 }
 
 func newProvider(providerType string, apiKey string) provider.Provider {

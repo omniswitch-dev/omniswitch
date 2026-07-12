@@ -180,6 +180,20 @@ type WorkspaceMember struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// VirtualKeyRecord stores an encrypted provider API key mapping.
+type VirtualKeyRecord struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	ProviderType string    `json:"provider_type"`
+	ProviderName string    `json:"provider_name"`
+	BaseURL      string    `json:"base_url,omitempty"`
+	EncryptedKey string    `json:"-"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Enabled      bool      `json:"enabled"`
+	MetadataJSON string    `json:"-"`
+}
+
 // New creates a new Store backed by a SQLite database at the given directory.
 func New(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -326,6 +340,18 @@ func (s *Store) migrate() error {
 			created_at TEXT NOT NULL,
 			PRIMARY KEY (workspace_id, user_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS virtual_keys (
+			id TEXT PRIMARY KEY,
+			name TEXT UNIQUE NOT NULL,
+			provider_type TEXT NOT NULL,
+			provider_name TEXT,
+			base_url TEXT,
+			encrypted_key TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			enabled INTEGER DEFAULT 1,
+			metadata TEXT
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_trace ON request_logs(trace_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_provider ON request_logs(provider)`,
@@ -337,6 +363,7 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_feedback_trace ON feedback(trace_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_workspaces_org ON workspaces(organization_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_virtual_keys_name ON virtual_keys(name)`,
 	}
 
 	for _, m := range migrations {
@@ -1128,6 +1155,118 @@ func (s *Store) ListWorkspaceMembers(ctx context.Context, workspaceID string) ([
 		members = append(members, member)
 	}
 	return members, rows.Err()
+}
+
+func (s *Store) InsertVirtualKey(ctx context.Context, key VirtualKeyRecord) error {
+	if key.CreatedAt.IsZero() {
+		key.CreatedAt = time.Now().UTC()
+	}
+	if key.UpdatedAt.IsZero() {
+		key.UpdatedAt = key.CreatedAt
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO virtual_keys (id, name, provider_type, provider_name, base_url, encrypted_key, created_at, updated_at, enabled, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET
+			provider_type = excluded.provider_type,
+			provider_name = excluded.provider_name,
+			base_url = excluded.base_url,
+			encrypted_key = excluded.encrypted_key,
+			updated_at = excluded.updated_at,
+			enabled = excluded.enabled,
+			metadata = excluded.metadata`,
+		key.ID,
+		key.Name,
+		key.ProviderType,
+		key.ProviderName,
+		key.BaseURL,
+		key.EncryptedKey,
+		key.CreatedAt.Format(time.RFC3339Nano),
+		key.UpdatedAt.Format(time.RFC3339Nano),
+		boolToInt(key.Enabled),
+		key.MetadataJSON,
+	)
+	return err
+}
+
+func (s *Store) GetVirtualKey(ctx context.Context, name string) (VirtualKeyRecord, error) {
+	var record VirtualKeyRecord
+	var createdAt, updatedAt string
+	var enabled int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, name, provider_type, COALESCE(provider_name, ''), COALESCE(base_url, ''), encrypted_key,
+			created_at, updated_at, enabled, COALESCE(metadata, '{}')
+		FROM virtual_keys WHERE name = ?`,
+		name,
+	).Scan(&record.ID, &record.Name, &record.ProviderType, &record.ProviderName, &record.BaseURL,
+		&record.EncryptedKey, &createdAt, &updatedAt, &enabled, &record.MetadataJSON)
+	if err != nil {
+		return record, err
+	}
+	record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	record.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	record.Enabled = enabled == 1
+	return record, nil
+}
+
+func (s *Store) ListVirtualKeys(ctx context.Context) ([]VirtualKeyRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, provider_type, COALESCE(provider_name, ''), COALESCE(base_url, ''), encrypted_key,
+			created_at, updated_at, enabled, COALESCE(metadata, '{}')
+		FROM virtual_keys ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []VirtualKeyRecord
+	for rows.Next() {
+		var record VirtualKeyRecord
+		var createdAt, updatedAt string
+		var enabled int
+		if err := rows.Scan(&record.ID, &record.Name, &record.ProviderType, &record.ProviderName, &record.BaseURL,
+			&record.EncryptedKey, &createdAt, &updatedAt, &enabled, &record.MetadataJSON); err != nil {
+			return nil, err
+		}
+		record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		record.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+		record.Enabled = enabled == 1
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+func (s *Store) RotateVirtualKey(ctx context.Context, name, encryptedKey string) error {
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE virtual_keys SET encrypted_key = ?, updated_at = ? WHERE name = ?",
+		encryptedKey,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		name,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err == nil && affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) DisableVirtualKey(ctx context.Context, name string) error {
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE virtual_keys SET enabled = 0, updated_at = ? WHERE name = ?",
+		time.Now().UTC().Format(time.RFC3339Nano),
+		name,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err == nil && affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // Close closes the database connection.

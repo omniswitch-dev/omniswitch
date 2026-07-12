@@ -11,6 +11,11 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
+
 	"sentinel/internal/cache"
 	"sentinel/internal/guardrail"
 	"sentinel/internal/provider"
@@ -55,13 +60,28 @@ func (h *Handler) SetShadowProvider(providerName string) {
 
 // ChatCompletions handles POST /v1/chat/completions.
 func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
+	ctx, span := otel.Tracer("sentinel/gateway").Start(
+		r.Context(),
+		"POST /v1/chat/completions",
+		oteltrace.WithSpanKind(oteltrace.SpanKindServer),
+		oteltrace.WithAttributes(
+			attribute.String("http.request.method", r.Method),
+			attribute.String("http.route", "/v1/chat/completions"),
+		),
+	)
+	defer span.End()
+	r = r.WithContext(ctx)
+
 	if r.Method != http.MethodPost {
+		span.SetStatus(codes.Error, "method not allowed")
 		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
 		return
 	}
 
 	var req provider.ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "invalid request body")
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
@@ -72,11 +92,22 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	providerHint := r.Header.Get("x-sentinel-provider")
 	shadowHint := firstNonEmpty(r.Header.Get("x-sentinel-shadow-provider"), h.shadowProvider)
 	apiKeyID := r.Header.Get("x-sentinel-key-id")
-	ctx := WithRequestID(r.Context(), reqID)
+	ctx = WithRequestID(r.Context(), reqID)
 	ctx = WithTraceID(ctx, traceID)
 	ctx = WithSessionID(ctx, sessionID)
+	span.SetAttributes(
+		attribute.String("sentinel.request_id", reqID),
+		attribute.String("sentinel.trace_id", traceID),
+		attribute.String("sentinel.session_id", sessionID),
+		attribute.String("llm.request.model", req.Model),
+		attribute.Bool("llm.request.stream", req.Stream),
+	)
 
 	if denied, reason := h.budgetExceeded(ctx, apiKeyID); denied {
+		span.SetAttributes(
+			attribute.String("sentinel.decision", "DENY"),
+			attribute.String("sentinel.decision_reason", reason),
+		)
 		h.logRequest(ctx, logContext{
 			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, APIKeyID: apiKeyID,
 			Status: "denied", ErrorMessage: reason,
@@ -94,6 +125,11 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		results := h.guardrails.EvaluateInput(req.Messages)
 		for _, gr := range results {
 			if gr.Action == "deny" {
+				span.SetAttributes(
+					attribute.String("sentinel.decision", "DENY"),
+					attribute.String("sentinel.guardrail.type", gr.Type),
+					attribute.String("sentinel.decision_reason", gr.Message),
+				)
 				h.logRequest(ctx, logContext{
 					ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, APIKeyID: apiKeyID,
 					Status: "denied", ErrorMessage: gr.Message,
@@ -113,6 +149,11 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	cacheProvider := firstNonEmpty(providerHint, "auto")
 	if cachedResp, ok := h.cachedResponse(ctx, cacheProvider, backendReq); ok {
 		meta := provider.ProviderMeta{Provider: "semantic-cache", Model: req.Model, Cached: true, Timestamp: time.Now().UTC()}
+		span.SetAttributes(
+			attribute.String("sentinel.decision", "ALLOW"),
+			attribute.Bool("sentinel.cache_hit", true),
+			attribute.String("llm.response.provider", meta.Provider),
+		)
 		h.logRequest(ctx, logContext{
 			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &cachedResp, Meta: &meta,
 			APIKeyID: apiKeyID, Status: "success", Cached: true,
@@ -139,6 +180,9 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Route to provider.
 	resp, meta, err := h.router.Execute(ctx, backendReq, providerHint)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "provider error")
+		span.SetAttributes(attribute.String("llm.response.provider", meta.Provider))
 		h.logRequest(ctx, logContext{
 			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Meta: &meta,
 			APIKeyID: apiKeyID, Status: "error", ErrorMessage: err.Error(),
@@ -154,6 +198,12 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		results := h.guardrails.EvaluateOutput(resp.Choices[0].Message.Content)
 		for _, gr := range results {
 			if gr.Action == "deny" {
+				span.SetAttributes(
+					attribute.String("sentinel.decision", "DENY"),
+					attribute.String("sentinel.guardrail.type", gr.Type),
+					attribute.String("sentinel.decision_reason", gr.Message),
+					attribute.String("llm.response.provider", meta.Provider),
+				)
 				h.logRequest(ctx, logContext{
 					ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &resp, Meta: &meta,
 					APIKeyID: apiKeyID, Status: "denied", ErrorMessage: gr.Message,
@@ -173,6 +223,17 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &resp, Meta: &meta,
 		APIKeyID: apiKeyID, Status: "success", Cached: meta.Cached,
 	})
+	span.SetStatus(codes.Ok, "")
+	span.SetAttributes(
+		attribute.String("sentinel.decision", "ALLOW"),
+		attribute.Bool("sentinel.cache_hit", meta.Cached),
+		attribute.String("llm.response.provider", meta.Provider),
+		attribute.String("llm.response.model", meta.Model),
+		attribute.Int("llm.usage.prompt_tokens", resp.Usage.PromptTokens),
+		attribute.Int("llm.usage.completion_tokens", resp.Usage.CompletionTokens),
+		attribute.Int("llm.usage.total_tokens", resp.Usage.TotalTokens),
+		attribute.Float64("llm.usage.cost_usd", meta.Cost),
+	)
 	h.shadow(ctx, reqID, traceID, meta.Provider, backendReq, shadowHint)
 
 	w.Header().Set("x-sentinel-trace-id", traceID)
@@ -269,8 +330,12 @@ func (h *Handler) logRequest(ctx context.Context, logCtx logContext) {
 }
 
 func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Context, streamCtx streamContext) {
+	span := oteltrace.SpanFromContext(ctx)
 	chunks, meta, err := h.router.ExecuteStream(ctx, streamCtx.BackendRequest, streamCtx.ProviderHint)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "provider stream error")
+		span.SetAttributes(attribute.String("llm.response.provider", meta.Provider))
 		h.logRequest(ctx, logContext{
 			ID: streamCtx.ID, TraceID: streamCtx.TraceID, SessionID: streamCtx.SessionID, Request: streamCtx.Request, Meta: &meta,
 			APIKeyID: streamCtx.APIKeyID, Status: "error", ErrorMessage: err.Error(),
@@ -335,6 +400,16 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 		ID: streamCtx.ID, TraceID: streamCtx.TraceID, SessionID: streamCtx.SessionID, Request: streamCtx.Request, Response: &aggregated, Meta: &meta,
 		APIKeyID: streamCtx.APIKeyID, Status: "success",
 	})
+	span.SetStatus(codes.Ok, "")
+	span.SetAttributes(
+		attribute.String("sentinel.decision", "ALLOW"),
+		attribute.String("llm.response.provider", meta.Provider),
+		attribute.String("llm.response.model", aggregated.Model),
+		attribute.Int("llm.usage.prompt_tokens", aggregated.Usage.PromptTokens),
+		attribute.Int("llm.usage.completion_tokens", aggregated.Usage.CompletionTokens),
+		attribute.Int("llm.usage.total_tokens", aggregated.Usage.TotalTokens),
+		attribute.Float64("llm.usage.cost_usd", meta.Cost),
+	)
 	h.shadow(ctx, streamCtx.ID, streamCtx.TraceID, meta.Provider, streamCtx.BackendRequest, streamCtx.ShadowHint)
 }
 

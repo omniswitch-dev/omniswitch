@@ -9,6 +9,11 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
+
 	"sentinel/internal/provider"
 )
 
@@ -88,6 +93,7 @@ func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, provider
 	for i, prov := range providers {
 		if !r.allowProvider(prov.Name()) {
 			lastErr = fmt.Errorf("provider %q circuit is open", prov.Name())
+			traceSkippedProvider(ctx, prov.Name(), req.Model, lastErr)
 			continue
 		}
 		maxRetries := 1
@@ -96,7 +102,8 @@ func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, provider
 		}
 
 		for attempt := 0; attempt < maxRetries; attempt++ {
-			resp, meta, err := prov.ChatCompletion(ctx, req)
+			callCtx, span := startProviderSpan(ctx, prov.Name(), req.Model, attempt, i > 0, false)
+			resp, meta, err := prov.ChatCompletion(callCtx, req)
 			if err == nil {
 				r.recordSuccess(prov.Name())
 				meta.Retries = attempt
@@ -104,8 +111,10 @@ func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, provider
 				if meta.Model == "" {
 					meta.Model = req.Model
 				}
+				finishProviderSpan(span, meta, nil)
 				return resp, meta, nil
 			}
+			finishProviderSpan(span, meta, err)
 			r.recordFailure(prov.Name())
 			lastErr = err
 			meta.Retries = attempt
@@ -150,15 +159,18 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 		}
 
 		if streamer, ok := prov.(provider.StreamProvider); ok {
-			chunks, meta, err := streamer.ChatCompletionStream(ctx, req)
+			callCtx, span := startProviderSpan(ctx, prov.Name(), req.Model, 0, i > 0, true)
+			chunks, meta, err := streamer.ChatCompletionStream(callCtx, req)
 			if err == nil {
 				r.recordSuccess(prov.Name())
 				meta.Fallback = i > 0
 				if meta.Model == "" {
 					meta.Model = req.Model
 				}
+				finishProviderSpan(span, meta, nil)
 				return chunks, meta, nil
 			}
+			finishProviderSpan(span, meta, err)
 			r.recordFailure(prov.Name())
 			lastErr = err
 			if ctx.Err() != nil {
@@ -167,15 +179,18 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 			continue
 		}
 
-		resp, meta, err := prov.ChatCompletion(ctx, req)
+		callCtx, span := startProviderSpan(ctx, prov.Name(), req.Model, 0, i > 0, false)
+		resp, meta, err := prov.ChatCompletion(callCtx, req)
 		if err == nil {
 			r.recordSuccess(prov.Name())
 			meta.Fallback = i > 0
 			if meta.Model == "" {
 				meta.Model = req.Model
 			}
+			finishProviderSpan(span, meta, nil)
 			return provider.StreamFromResponse(ctx, resp), meta, nil
 		}
+		finishProviderSpan(span, meta, err)
 		r.recordFailure(prov.Name())
 		lastErr = err
 		if ctx.Err() != nil {
@@ -184,6 +199,43 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 	}
 
 	return nil, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all providers exhausted: %w", lastErr)
+}
+
+func startProviderSpan(ctx context.Context, providerName, model string, attempt int, fallback bool, stream bool) (context.Context, oteltrace.Span) {
+	return otel.Tracer("sentinel/router").Start(
+		ctx,
+		"llm.provider.call",
+		oteltrace.WithSpanKind(oteltrace.SpanKindClient),
+		oteltrace.WithAttributes(
+			attribute.String("llm.provider", providerName),
+			attribute.String("llm.request.model", model),
+			attribute.Int("sentinel.retry_attempt", attempt),
+			attribute.Bool("sentinel.fallback", fallback),
+			attribute.Bool("llm.request.stream", stream),
+		),
+	)
+}
+
+func finishProviderSpan(span oteltrace.Span, meta provider.ProviderMeta, err error) {
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("llm.response.provider", meta.Provider),
+		attribute.String("llm.response.model", meta.Model),
+		attribute.Float64("llm.usage.cost_usd", meta.Cost),
+	)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return
+	}
+	span.SetStatus(codes.Ok, "")
+}
+
+func traceSkippedProvider(ctx context.Context, providerName, model string, err error) {
+	_, span := startProviderSpan(ctx, providerName, model, 0, false, false)
+	defer span.End()
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
 }
 
 func (r *Router) selectVariant(model string) (Variant, bool) {
@@ -312,7 +364,7 @@ func (r *Router) resolveProviders(model, hint string) []provider.Provider {
 func guessProvider(model string) string {
 	lower := strings.ToLower(model)
 	switch {
-	case strings.HasPrefix(lower, "gpt") || strings.HasPrefix(lower, "o1") || strings.HasPrefix(lower, "o3"):
+	case strings.HasPrefix(lower, "gpt") || strings.HasPrefix(lower, "o1") || strings.HasPrefix(lower, "o3") || strings.HasPrefix(lower, "chatgpt"):
 		return "openai"
 	case strings.HasPrefix(lower, "claude"):
 		return "anthropic"
@@ -320,6 +372,16 @@ func guessProvider(model string) string {
 		return "google"
 	case strings.HasPrefix(lower, "llama") || strings.HasPrefix(lower, "mixtral") || strings.HasPrefix(lower, "gemma"):
 		return "groq"
+	case strings.HasPrefix(lower, "deepseek"):
+		return "deepseek"
+	case strings.HasPrefix(lower, "mistral") || strings.HasPrefix(lower, "codestral") || strings.HasPrefix(lower, "pixtral"):
+		return "mistral"
+	case strings.HasPrefix(lower, "qwen"):
+		return "qwen"
+	case strings.HasPrefix(lower, "phi"):
+		return "phi"
+	case strings.HasPrefix(lower, "command"):
+		return "cohere"
 	default:
 		return "openai"
 	}
