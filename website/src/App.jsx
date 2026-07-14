@@ -40,7 +40,7 @@ function App() {
       <header>
         <a href="#" className="logo">
           <Shield className="logo-icon" size={28} />
-          Sentinel
+          OmniSwitch
         </a>
         <nav className="nav-links">
           <a href="#" onClick={() => setCurrentPage('home')} className={currentPage === 'home' ? 'nav-link active' : 'nav-link'}>Home</a>
@@ -66,7 +66,7 @@ function App() {
         <div className="footer-logo">
           <span style={{ fontFamily: 'Outfit', fontWeight: 700, color: 'white', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <Shield size={20} color="#8e2de2" />
-            Sentinel AI
+            OmniSwitch AI
           </span>
         </div>
         <div className="footer-links">
@@ -107,7 +107,7 @@ function Home() {
         <div className="hero-image-wrapper">
           <img 
             src="/dashboard-mockup.png" 
-            alt="Sentinel AI Gateway Dashboard" 
+            alt="OmniSwitch AI Gateway Dashboard" 
             className="hero-dashboard-img" 
           />
         </div>
@@ -159,7 +159,7 @@ function Home() {
       {/* Comparison Section */}
       <section id="comparison" className="comparison">
         <div className="section-header">
-          <h2 className="section-title">How Sentinel Compares</h2>
+          <h2 className="section-title">How OmniSwitch Compares</h2>
           <p className="section-subtitle">
             An open-source alternative designed for self-hosted simplicity.
           </p>
@@ -170,7 +170,7 @@ function Home() {
             <thead>
               <tr>
                 <th>Feature</th>
-                <th>Sentinel (OSS)</th>
+                <th>OmniSwitch (OSS)</th>
                 <th>Portkey</th>
                 <th>AgentGateway.dev</th>
               </tr>
@@ -228,7 +228,7 @@ function Home() {
         <div className="cta-content">
           <h2 className="cta-title">Ready to secure your AI agents?</h2>
           <p className="cta-desc">
-            Deploy Sentinel in minutes with a single binary. Take back control of your AI infrastructure today.
+            Deploy OmniSwitch in minutes with a single binary. Take back control of your AI infrastructure today.
           </p>
           <a href="https://github.com/onlychirag/sentinel-ai-gateway" className="btn-primary" style={{ padding: '1rem 2.5rem', fontSize: '1.1rem' }}>
             Get Started on GitHub <ArrowRight size={20} />

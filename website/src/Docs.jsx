@@ -17,12 +17,12 @@ export default function Docs() {
       </div>
       
       <div className="docs-content">
-        <h1 className="docs-title">Sentinel Documentation</h1>
-        <p className="docs-intro">Learn how to deploy, configure, and scale Sentinel AI Gateway.</p>
+        <h1 className="docs-title">OmniSwitch Documentation</h1>
+        <p className="docs-intro">Learn how to deploy, configure, and scale OmniSwitch AI Gateway.</p>
 
         <section id="quickstart" className="docs-section">
           <h2><Terminal size={24} className="section-icon" /> Quickstart</h2>
-          <p>Get up and running with Sentinel in minutes. You can run Sentinel either as a single Go binary or via Docker.</p>
+          <p>Get up and running with OmniSwitch in minutes. You can run OmniSwitch either as a single Go binary or via Docker.</p>
           
           <div className="code-block">
             <div className="code-header">Terminal</div>
@@ -39,7 +39,7 @@ OPENAI_API_KEY=sk-your-key go run ./cmd/gateway`}</code></pre>
 
         <section id="configuration" className="docs-section">
           <h2><Settings size={24} className="section-icon" /> Configuration</h2>
-          <p>Sentinel can be configured using a declarative YAML file. This allows you to check your configuration into version control (GitOps).</p>
+          <p>OmniSwitch can be configured using a declarative YAML file. This allows you to check your configuration into version control (GitOps).</p>
           
           <div className="code-block">
             <div className="code-header">gateway-config.yaml</div>
@@ -61,12 +61,12 @@ providers:
     models: [llama3.2, mistral]`}</code></pre>
           </div>
           
-          <p>Run the gateway with your config: <code>SENTINEL_CONFIG=gateway-config.yaml go run ./cmd/gateway</code></p>
+          <p>Run the gateway with your config: <code>OMNISWITCH_CONFIG=gateway-config.yaml go run ./cmd/gateway</code></p>
         </section>
 
         <section id="providers" className="docs-section">
           <h2><Globe size={24} className="section-icon" /> Supported Providers</h2>
-          <p>Sentinel comes with native adapters for the big four, plus a <code>custom</code> provider that lets you connect to any endpoint that follows the OpenAI specification.</p>
+          <p>OmniSwitch comes with native adapters for the big four, plus a <code>custom</code> provider that lets you connect to any endpoint that follows the OpenAI specification.</p>
           
           <ul className="docs-list">
             <li><strong>OpenAI:</strong> <code>type: openai</code></li>
@@ -79,7 +79,7 @@ providers:
 
         <section id="guardrails" className="docs-section">
           <h2><Shield size={24} className="section-icon" /> Guardrails</h2>
-          <p>Guardrails execute locally in microseconds to protect your agents and users. Sentinel includes built-in policies evaluated using CEL (Common Expression Language).</p>
+          <p>Guardrails execute locally in microseconds to protect your agents and users. OmniSwitch includes built-in policies evaluated using CEL (Common Expression Language).</p>
           <ul className="docs-list">
             <li><strong>Prompt Injection (Input):</strong> Blocks attempts to bypass system prompts.</li>
             <li><strong>SQL Injection (Input):</strong> Detects malicious SQL queries in user input.</li>
@@ -91,8 +91,8 @@ providers:
 
         <section id="vault" className="docs-section">
           <h2><Key size={24} className="section-icon" /> Virtual Key Vault</h2>
-          <p>Never hardcode provider API keys in your application. Sentinel's Virtual Key Vault encrypts your provider keys in SQLite using AES-256-GCM.</p>
-          <p>You can create virtual keys (e.g. <code>sk-sentinel-123</code>) and distribute those to your teams or agents. Each virtual key can have strict rate limits and token budgets.</p>
+          <p>Never hardcode provider API keys in your application. OmniSwitch's Virtual Key Vault encrypts your provider keys in SQLite using AES-256-GCM.</p>
+          <p>You can create virtual keys (e.g. <code>sk-omniswitch-123</code>) and distribute those to your teams or agents. Each virtual key can have strict rate limits and token budgets.</p>
           
           <div className="code-block">
             <div className="code-header">Terminal</div>

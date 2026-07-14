@@ -7,7 +7,7 @@ export default function ApiReference() {
     <div className="api-container">
       <div className="api-header">
         <h1>API Reference</h1>
-        <p>Sentinel provides a unified API that is 100% compatible with the OpenAI specification.</p>
+        <p>OmniSwitch provides a unified API that is 100% compatible with the OpenAI specification.</p>
       </div>
 
       <div className="api-endpoints">
@@ -21,9 +21,9 @@ export default function ApiReference() {
           <h4>Headers</h4>
           <ul className="api-list">
             <li><code>Authorization: Bearer &lt;token&gt;</code> <span className="optional">(Required if auth enabled)</span></li>
-            <li><code>x-sentinel-provider: &lt;provider_name&gt;</code> <span className="optional">(Optional)</span></li>
-            <li><code>x-sentinel-trace-id: &lt;string&gt;</code> <span className="optional">(Optional)</span></li>
-            <li><code>x-sentinel-session-id: &lt;string&gt;</code> <span className="optional">(Optional)</span></li>
+            <li><code>x-omniswitch-provider: &lt;provider_name&gt;</code> <span className="optional">(Optional)</span></li>
+            <li><code>x-omniswitch-trace-id: &lt;string&gt;</code> <span className="optional">(Optional)</span></li>
+            <li><code>x-omniswitch-session-id: &lt;string&gt;</code> <span className="optional">(Optional)</span></li>
           </ul>
 
           <h4>Example Request</h4>
