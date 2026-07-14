@@ -18,24 +18,52 @@ import './index.css';
 
 function App() {
   const [currentPage, setCurrentPage] = useState('home');
-  // Parallax effect for the hero image
+
+  // Interactive glowing cursor & scroll animations
   useEffect(() => {
+    // 1. Mouse Tracking for 3D card & Glow Blob
+    const blob = document.getElementById('glow-blob');
+    
     const handleMouseMove = (e) => {
+      // Glow Blob
+      if (blob) {
+        blob.animate({
+          left: `${e.clientX}px`,
+          top: `${e.clientY + window.scrollY}px`
+        }, { duration: 3000, fill: "forwards" });
+      }
+
+      // 3D Card
       const img = document.querySelector('.hero-dashboard-img');
       if (!img) return;
-      
       const xAxis = (window.innerWidth / 2 - e.pageX) / 50;
       const yAxis = (window.innerHeight / 2 - e.pageY) / 50;
-      
       img.style.transform = `perspective(1000px) rotateY(${xAxis}deg) rotateX(${yAxis}deg)`;
     };
-
+    
     document.addEventListener('mousemove', handleMouseMove);
-    return () => document.removeEventListener('mousemove', handleMouseMove);
-  }, []);
+
+    // 2. Intersection Observer for Scroll Reveals
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('active');
+        }
+      });
+    }, { threshold: 0.1 });
+
+    document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      observer.disconnect();
+    };
+  }, [currentPage]);
 
   return (
     <div className="app-container">
+      <div id="glow-blob"></div>
+      
       {/* Header */}
       <header>
         <a href="#" className="logo">
@@ -115,7 +143,7 @@ function Home() {
 
       {/* Features Section */}
       <section id="features" className="features">
-        <div className="section-header">
+        <div className="section-header reveal">
           <h2 className="section-title">Production-Ready Infrastructure</h2>
           <p className="section-subtitle">
             Everything you need to move AI logic out of your application code and into a managed data plane.
@@ -123,49 +151,61 @@ function Home() {
         </div>
         
         <div className="features-grid">
-          <FeatureCard 
-            icon={<Globe />}
-            title="Universal Provider API"
-            description="Connect to OpenAI, Anthropic, Google, Groq, or any OpenAI-compatible endpoint (Ollama, vLLM, DeepSeek) through a single unified interface."
-          />
-          <FeatureCard 
-            icon={<Shield />}
-            title="Real-Time Guardrails"
-            description="Block prompt injections, SQL injections, toxic content, and secret leakages before they ever reach the model or the user."
-          />
-          <FeatureCard 
-            icon={<Lock />}
-            title="Virtual Key Vault"
-            description="Securely store and manage encrypted provider API keys with zero-downtime rotation. Enforce token and cost budgets per virtual key."
-          />
-          <FeatureCard 
-            icon={<Zap />}
-            title="High-Performance Caching"
-            description="Built-in exact-match and semantic caching using SQLite to drastically reduce latency and API costs for recurring agent queries."
-          />
-          <FeatureCard 
-            icon={<Activity />}
-            title="Full Observability"
-            description="Trace every request, monitor token usage, track costs, and debug agent workflows with a beautiful built-in dark mode dashboard."
-          />
-          <FeatureCard 
-            icon={<Code2 />}
-            title="Lightweight & Portable"
-            description="Written in Go. Deploys as a single binary with an embedded SQLite database. Zero external dependencies required."
-          />
+          <div className="reveal delay-1">
+            <FeatureCard 
+              icon={<Globe />}
+              title="Universal Provider API"
+              description="Connect to OpenAI, Anthropic, Google, Groq, or any OpenAI-compatible endpoint (Ollama, vLLM, DeepSeek) through a single unified interface."
+            />
+          </div>
+          <div className="reveal delay-2">
+            <FeatureCard 
+              icon={<Shield />}
+              title="Real-Time Guardrails"
+              description="Block prompt injections, SQL injections, toxic content, and secret leakages before they ever reach the model or the user."
+            />
+          </div>
+          <div className="reveal delay-3">
+            <FeatureCard 
+              icon={<Lock />}
+              title="Virtual Key Vault"
+              description="Securely store and manage encrypted provider API keys with zero-downtime rotation. Enforce token and cost budgets per virtual key."
+            />
+          </div>
+          <div className="reveal delay-1">
+            <FeatureCard 
+              icon={<Zap />}
+              title="High-Performance Caching"
+              description="Built-in exact-match and semantic caching using SQLite to drastically reduce latency and API costs for recurring agent queries."
+            />
+          </div>
+          <div className="reveal delay-2">
+            <FeatureCard 
+              icon={<Activity />}
+              title="Full Observability"
+              description="Trace every request, monitor token usage, track costs, and debug agent workflows with a beautiful built-in dark mode dashboard."
+            />
+          </div>
+          <div className="reveal delay-3">
+            <FeatureCard 
+              icon={<Code2 />}
+              title="Lightweight & Portable"
+              description="Written in Go. Deploys as a single binary with an embedded SQLite database. Zero external dependencies required."
+            />
+          </div>
         </div>
       </section>
 
       {/* Comparison Section */}
       <section id="comparison" className="comparison">
-        <div className="section-header">
+        <div className="section-header reveal">
           <h2 className="section-title">How OmniSwitch Compares</h2>
           <p className="section-subtitle">
             An open-source alternative designed for self-hosted simplicity.
           </p>
         </div>
         
-        <div className="comparison-table-wrapper">
+        <div className="comparison-table-wrapper reveal delay-2">
           <table className="comparison-table">
             <thead>
               <tr>
@@ -225,7 +265,7 @@ function Home() {
 
       {/* CTA Section */}
       <section className="cta">
-        <div className="cta-content">
+        <div className="cta-content reveal">
           <h2 className="cta-title">Ready to secure your AI agents?</h2>
           <p className="cta-desc">
             Deploy OmniSwitch in minutes with a single binary. Take back control of your AI infrastructure today.

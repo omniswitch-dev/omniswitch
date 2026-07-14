@@ -24,9 +24,34 @@ body {
   line-height: 1.6;
   overflow-x: hidden;
   background-image: 
-    radial-gradient(circle at 15% 50%, rgba(142, 45, 226, 0.15), transparent 40%),
-    radial-gradient(circle at 85% 30%, rgba(74, 0, 224, 0.15), transparent 40%);
+    radial-gradient(circle at 15% 50%, rgba(142, 45, 226, 0.08), transparent 40%),
+    radial-gradient(circle at 85% 30%, rgba(74, 0, 224, 0.08), transparent 40%);
   background-attachment: fixed;
+}
+
+/* Glowing Cursor Blob */
+#glow-blob {
+  background-color: white;
+  height: 400px;
+  aspect-ratio: 1;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  border-radius: 50%;
+  background: linear-gradient(to right, #4a00e0, #8e2de2);
+  animation: rotate 20s infinite;
+  opacity: 0.15;
+  filter: blur(150px);
+  z-index: 0;
+  pointer-events: none;
+  transition: opacity 0.5s ease;
+}
+
+@keyframes rotate {
+  from { transform: rotate(0deg); }
+  50% { scale: 1 1.5; }
+  to { transform: rotate(360deg); }
 }
 
 h1, h2, h3, h4, h5, h6 {
@@ -413,13 +438,29 @@ footer {
 @keyframes fadeUp {
   from {
     opacity: 0;
-    transform: translateY(20px);
+    transform: translateY(30px);
   }
   to {
     opacity: 1;
     transform: translateY(0);
   }
 }
+
+.reveal {
+  opacity: 0;
+  transform: translateY(30px);
+  transition: all 0.8s cubic-bezier(0.5, 0, 0, 1);
+}
+
+.reveal.active {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.reveal.delay-1 { transition-delay: 0.1s; }
+.reveal.delay-2 { transition-delay: 0.2s; }
+.reveal.delay-3 { transition-delay: 0.3s; }
+.reveal.delay-4 { transition-delay: 0.4s; }
 
 /* Responsive */
 @media (max-width: 1024px) {
