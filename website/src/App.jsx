@@ -36,9 +36,16 @@ function App() {
       // 3D Card
       const img = document.querySelector('.hero-dashboard-img');
       if (!img) return;
-      const xAxis = (window.innerWidth / 2 - e.pageX) / 50;
-      const yAxis = (window.innerHeight / 2 - e.pageY) / 50;
-      img.style.transform = `perspective(1000px) rotateY(${xAxis}deg) rotateX(${yAxis}deg)`;
+      
+      // Calculate from center of the viewport
+      const centerX = window.innerWidth / 2;
+      const centerY = window.innerHeight / 2;
+      
+      // Calculate rotation (inverted for natural feel)
+      const rotateY = (e.clientX - centerX) / 40;
+      const rotateX = (centerY - e.clientY) / 40;
+      
+      img.style.transform = `perspective(1000px) rotateX(${rotateX}deg) rotateY(${rotateY}deg)`;
     };
     
     document.addEventListener('mousemove', handleMouseMove);

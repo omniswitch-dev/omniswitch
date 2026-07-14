@@ -263,11 +263,7 @@ header {
   box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.8), 0 0 40px rgba(142, 45, 226, 0.3);
   border: 1px solid var(--glass-border);
   transform: perspective(1000px) rotateY(-5deg) rotateX(5deg);
-  transition: transform 0.5s ease;
-}
-
-.hero-dashboard-img:hover {
-  transform: perspective(1000px) rotateY(0deg) rotateX(0deg);
+  transition: transform 0.1s ease-out;
 }
 
 /* Features Section */
