@@ -550,23 +550,117 @@ footer {
   .hero-actions {
     justify-content: center;
   }
+
+  .hero-stats {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 1rem;
+    padding: 1rem;
+  }
   
   header {
-    padding: 1.5rem 2rem;
+    padding: 1rem 1.5rem;
+  }
+
+  .docs-container {
+    flex-direction: column;
+    padding: 2rem;
+    gap: 2rem;
+  }
+
+  .docs-sidebar {
+    width: 100%;
+    position: relative;
+    top: 0;
+    border-right: none;
+    border-bottom: 1px solid var(--glass-border);
+    padding-bottom: 2rem;
+    padding-right: 0;
+  }
+
+  .docs-sidebar ul {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.5rem;
+  }
+
+  .api-container {
+    padding: 2rem;
   }
 }
 
 @media (max-width: 768px) {
   .hero-title {
-    font-size: 3rem;
+    font-size: 2.5rem;
   }
   
+  .hero-description {
+    font-size: 1.1rem;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
   .nav-links {
     display: none;
   }
   
   .features, .comparison, .cta {
-    padding: 4rem 2rem;
+    padding: 4rem 1.5rem;
+  }
+
+  .section-title {
+    font-size: 2rem;
+  }
+
+  .feature-card {
+    padding: 1.5rem;
+  }
+
+  .stat-value {
+    font-size: 1.2rem;
+  }
+
+  .api-header h1 {
+    font-size: 2.5rem;
+  }
+
+  .endpoint-card {
+    padding: 1.5rem;
+  }
+
+  .path {
+    font-size: 1rem;
+    word-break: break-all;
+  }
+
+  .btn-primary, .btn-secondary {
+    padding: 0.5rem 1rem;
+    font-size: 0.9rem;
+  }
+
+  footer {
+    flex-direction: column;
+    gap: 1.5rem;
+    text-align: center;
+    padding: 2rem 1.5rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .hero-actions {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .hero-actions a {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .endpoint-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
   }
 }
 
