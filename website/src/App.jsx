@@ -62,6 +62,7 @@ function App() {
 
   return (
     <div className="app-container">
+      <div className="bg-grid"></div>
       <div id="glow-blob"></div>
       
       {/* Header */}
@@ -127,9 +128,23 @@ function Home() {
               <GitBranch size={20} />
               View on GitHub
             </a>
-            <a href="#docs" className="btn-secondary">
+            <a href="#docs" onClick={() => setCurrentPage('docs')} className="btn-secondary">
               Read the Docs
             </a>
+          </div>
+          <div className="hero-stats reveal delay-3">
+            <div className="stat-item">
+              <span className="stat-value">&lt;2ms</span>
+              <span className="stat-label">Latency Add</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-value">1600+</span>
+              <span className="stat-label">Models</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-value">Local</span>
+              <span className="stat-label">SQLite Cache</span>
+            </div>
           </div>
         </div>
         <div className="hero-image-wrapper">
