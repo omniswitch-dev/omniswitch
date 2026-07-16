@@ -1,258 +1,94 @@
-# Sentinel
+# <p align="center"><img src="https://raw.githubusercontent.com/onlychirag/sentinel-ai-gateway/main/website/public/favicon.svg" width="48" height="48" alt="OmniSwitch Logo" /><br/>OmniSwitch</p>
 
-Sentinel is an open-source AI gateway and policy enforcement layer. It provides a unified OpenAI-compatible API across any LLM provider, including OpenAI, Anthropic, Google Gemini, Groq, and **any OpenAI-compatible endpoint** (Ollama, vLLM, DeepSeek, Together AI, Mistral, Azure OpenAI, and more).
+<p align="center">
+  <strong>The Open-Source, Zero-Dependency AI Gateway & Guardrail Layer for Production Teams</strong>
+</p>
 
-Sentinel is open source under the Apache-2.0 license.
+<p align="center">
+  <a href="https://github.com/onlychirag/sentinel-ai-gateway/actions"><img src="https://img.shields.io/github/actions/workflow/status/onlychirag/sentinel-ai-gateway/build.yml?branch=main&style=flat-square" alt="Build Status" /></a>
+  <a href="https://golang.org"><img src="https://img.shields.io/github/go-mod/go-version/onlychirag/sentinel-ai-gateway?style=flat-square&color=blue" alt="Go Version" /></a>
+  <a href="https://github.com/onlychirag/sentinel-ai-gateway/blob/main/LICENSE"><img src="https://img.shields.io/github/license/onlychirag/sentinel-ai-gateway?style=flat-square&color=emerald" alt="License" /></a>
+  <a href="https://omniswitch.dev"><img src="https://img.shields.io/badge/website-omniswitch.dev-purple?style=flat-square" alt="Website" /></a>
+</p>
 
-The repository currently exposes two runnable surfaces:
+---
 
-- `cmd/sentinel`: Git-like policy and decision-trace tooling.
-- `cmd/gateway`: OpenAI-compatible AI gateway with providers, guardrails, API keys, prompts, SQLite logs, and a local dashboard.
-- `cmd/proxy`: MCP policy proxy for tool execution requests.
+OmniSwitch is a high-performance, single-binary AI gateway designed to route, secure, cache, and observe all your LLM traffic across 1,600+ models. 
 
-## Quickstart
+Unlike SaaS-only alternatives or heavy microservice proxies, OmniSwitch runs completely locally with **zero external dependencies** (no Redis, Postgres, or external vector DB required), utilizing an embedded high-concurrency **SQLite** engine for key management, semantic vector caching, policy auditing, and request logging.
 
-```bash
-go run ./cmd/sentinel validate policies/production-delete.yaml
-go run ./cmd/sentinel test policies/production-delete.yaml examples/requests/delete-prod.json
-go run ./cmd/sentinel trace policies/production-delete.yaml examples/requests/delete-prod.json
+## 🚀 Key Capabilities
+
+*   **Unified OpenAI-Compatible API:** Single endpoint to query OpenAI, Anthropic, Gemini, Groq, or any local custom deployment (Ollama, vLLM, DeepSeek, Together AI).
+*   **Zero-Overhead Semantic Caching:** Local SQLite-backed exact-match and semantic similarity vector caching to slash token bills and latency.
+*   **Sub-Millisecond Guardrails:** Local input/output guardrails executing CEL (Common Expression Language) and regex to block prompt injection, toxic content, SQL injection, and PII leaks.
+*   **Virtual Key Vault:** Securely map and rotate upstream API keys behind locally generated Virtual Keys encrypted via AES-256-GCM.
+*   **Advanced Routing & Split-Testing:** Declarative config for model retries, fallback options, status-code routing, shadow routing (async compare), and weighted A/B routes.
+*   **Model Context Protocol (MCP) Integration:** Built-in HTTP tool federation and policy-governed tool execution for autonomous AI agents.
+*   **OTel Tracing & Prometheus:** Built-in OpenTelemetry trace exporting and Prometheus `/metrics` endpoint for enterprise-grade observability.
+*   **Built-in Local Dashboard:** Responsive React dashboard served directly from the gateway binary to monitor usage, cost, and audit logs.
+
+---
+
+## 🗺️ Architectural Flow
+
+```mermaid
+graph TD
+    A[Your App / SDK] -->|REST API / SSE| B(OmniSwitch Gateway)
+    B -->|1. AES Key Vault| C{Auth & Limits}
+    B -->|2. Exact/Semantic| D[Local SQLite Cache]
+    B -->|3. Input Check| E[CEL & Pattern Guardrails]
+    
+    C -->|If Allowed & Cache Miss| F{Router Engine}
+    F -->|Weighted Split / shadow| G[OpenAI]
+    F -->|Fallback Route| H[Anthropic]
+    F -->|Custom Endpoint| I[Ollama / DeepSeek]
+    
+    G & H & I -->|4. Output Check| J[Redact / Deny Filter]
+    J -->|5. OTel Traces / Logs| K[Prometheus & SQLite DB]
+    J -->|Response| A
 ```
 
-Start the MCP proxy:
+---
+
+## ⚡ Quickstart
+
+### 1. Build and Run Natively
+
+OmniSwitch is written in Go and compiles to a single binary:
 
 ```bash
-go run ./cmd/proxy
+# Clone the repository
+git clone https://github.com/onlychirag/sentinel-ai-gateway.git
+cd sentinel-ai-gateway
+
+# Start the Gateway with your API keys
+OPENAI_API_KEY=your_key_here go run ./cmd/gateway
 ```
 
-Defaults:
+The gateway will start on `http://localhost:8080` and host the built-in developer dashboard at `http://localhost:8080/`.
 
-- Listens on `:8080`
-- Loads `policies/production-delete.yaml`
-- Forwards allowed MCP calls to `http://127.0.0.1:8090/mcp`
+### 2. Run with Docker Compose
 
-Override with `SENTINEL_LISTEN`, `SENTINEL_POLICY`, and `SENTINEL_UPSTREAM`.
-
-## Documentation
-
-- [API Reference](docs/API.md)
-- [Configuration](docs/CONFIGURATION.md)
-- [Deployment](docs/DEPLOYMENT.md)
-- [Architecture](docs/architecture.md)
-- [Portkey Comparison](docs/PORTKEY_COMPARISON.md)
-- [Portkey & AgentGateway Feature Matrix](docs/PORTKEY_COMPARISON.md#feature-availability-matrix)
-- [Policy Standard](docs/standard.md)
-- [Roadmap](ROADMAP.md)
-- [Security Policy](SECURITY.md)
-- [Contributing](CONTRIBUTING.md)
-
-## Git-Like Workflow
+Spin up the gateway in seconds:
 
 ```bash
-go run ./cmd/sentinel verify policies/production-delete.yaml
-go run ./cmd/sentinel trace policies/production-delete.yaml examples/requests/delete-prod.json > trace.yaml
-go run ./cmd/sentinel replay trace.yaml
-go run ./cmd/sentinel diff before.yaml after.yaml
+docker compose up -d
 ```
 
-## AI Gateway
+---
 
-Start the OpenAI-compatible gateway and dashboard:
+## 🛠️ Declarative Configuration
 
-```bash
-OPENAI_API_KEY=... go run ./cmd/gateway
-```
-
-Run with a declarative gateway config:
-
-```bash
-SENTINEL_CONFIG=examples/gateway-config.yaml OPENAI_API_KEY=... go run ./cmd/gateway
-```
-
-Useful environment variables:
-
-- `SENTINEL_CONFIG`: YAML or JSON gateway config file. Explicit env vars override file values.
-- `SENTINEL_LISTEN`: listen address, default `:8080`
-- `SENTINEL_DATA`: directory for `sentinel.db`, default `.`
-- `SENTINEL_AUTH`: set to `true` to require Sentinel API keys
-- `SENTINEL_BOOTSTRAP_API_KEY`: first owner/admin key for an empty auth-enabled database; use a secret manager and remove it after provisioning
-- `SENTINEL_CACHE_THRESHOLD`: semantic cache similarity threshold, default `0.95`; set `0` to disable
-- `SENTINEL_CACHE_TTL`: cache expiration duration, default `24h`
-- `SENTINEL_CACHE_SCOPE`: cache-sharing boundary: `api_key` (default), `workspace`, `organization`, or `global`
-- `SENTINEL_LOG_PAYLOADS`: persist raw prompts/completions only when explicitly `true`; defaults to `false`
-- `SENTINEL_CORS_ORIGINS`: comma-separated browser allow-list; unset disables cross-origin access
-- `SENTINEL_GUARDRAIL_STREAM_BUFFER`: buffer SSE before emitting so output guardrails can apply, default `true`
-- `SENTINEL_MAX_REQUEST_BYTES`, `SENTINEL_READ_HEADER_TIMEOUT`, `SENTINEL_READ_TIMEOUT`, `SENTINEL_WRITE_TIMEOUT`, `SENTINEL_IDLE_TIMEOUT`: production request/server limits
-- `SENTINEL_CIRCUIT_BREAKER_FAILURES`, `SENTINEL_CIRCUIT_BREAKER_COOLDOWN`: provider circuit-breaker tuning
-- `SENTINEL_SHADOW_PROVIDER`: provider to call asynchronously for shadow comparisons
-- `SENTINEL_AB_TEST`: weighted model/provider split, for example `logical=openai:gpt-4o-mini:90,anthropic:claude-3-5-haiku-20241022:10`
-- `SENTINEL_MCP_ENABLED`: set to `false` to disable MCP proxy endpoints in `cmd/gateway`
-- `SENTINEL_MCP_POLICY`: MCP policy file mounted at `/mcp`, default `policies/production-delete.yaml`
-- `SENTINEL_MCP_UPSTREAM`: MCP upstream for allowed tool calls, default `http://127.0.0.1:8090/mcp`
-- `SENTINEL_VAULT_KEY`: passphrase used to encrypt stored provider credentials
-- `SENTINEL_OTEL_ENABLED`: set to `true` to enable OpenTelemetry trace export
-- `SENTINEL_OTEL_ENDPOINT`: OTLP HTTP traces endpoint, for example `http://localhost:4318/v1/traces`
-- `SENTINEL_OTEL_SERVICE_NAME`: OpenTelemetry service name, default `sentinel-gateway`
-- `SENTINEL_OTEL_HEADERS`: comma-separated OTLP headers, for example `x-api-key=...`
-- `SENTINEL_OTEL_INSECURE`: allow insecure OTLP transport when needed
-- `SENTINEL_OTEL_TIMEOUT`: OTLP exporter timeout, default `10s`
-- `SENTINEL_PROMETHEUS_ENABLED`: enable `GET /metrics`, default `true`
-- `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`: built-in provider credentials
-- Any custom provider keys (e.g. `DEEPSEEK_API_KEY`, `TOGETHER_API_KEY`) referenced via `api_key_env` in config
-
-### Custom Providers (Ollama, vLLM, DeepSeek, etc.)
-
-Connect any OpenAI-compatible endpoint by adding it to your config:
+Define gateway routes, caching, fallbacks, and security guardrails using a simple `config.yaml` file:
 
 ```yaml
-providers:
-  - name: ollama
-    type: custom
-    base_url: http://localhost:11434/v1
-    models: [llama3.2, codellama, mistral]
-
-  - name: deepseek
-    type: custom
-    base_url: https://api.deepseek.com/v1
-    api_key_env: DEEPSEEK_API_KEY
-    models: [deepseek-chat, deepseek-coder]
-
-  - name: together
-    type: custom
-    base_url: https://api.together.xyz/v1
-    api_key_env: TOGETHER_API_KEY
-    models: [meta-llama/Llama-3.3-70B-Instruct-Turbo]
-
-  - name: azure-gpt4o
-    type: custom
-    base_url: https://YOUR_RESOURCE.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21
-    api_key_env: AZURE_OPENAI_API_KEY
-    extra_headers:
-      api-key: "${AZURE_OPENAI_API_KEY}"
-    models: [gpt-4o]
-```
-
-Then query them via the unified API:
-
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "x-sentinel-provider: ollama" \
-  -d '{"model": "llama3.2", "messages": [{"role": "user", "content": "Hello!"}]}'
-```
-
-## SDKs
-
-### Python
-
-```bash
-pip install openai  # sentinel-ai wraps the official openai package
-```
-
-```python
-from sentinel import Sentinel
-
-client = Sentinel(gateway_url="http://localhost:8080")
-response = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[{"role": "user", "content": "Hello!"}],
-)
-print(response.choices[0].message.content)
-
-# Force a provider
-client = Sentinel(provider="anthropic")
-
-# With observability
-client = Sentinel(trace_id="agent-run-001", session_id="conv-abc")
-
-# Streaming
-stream = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[{"role": "user", "content": "Tell a story"}],
-    stream=True,
-)
-for chunk in stream:
-    print(chunk.choices[0].delta.content or "", end="")
-```
-
-### Node.js / TypeScript
-
-```bash
-npm install openai  # sentinel-ai wraps the official openai package
-```
-
-```javascript
-const { Sentinel } = require('./sdk/node');
-
-const client = new Sentinel({ gatewayUrl: 'http://localhost:8080' });
-const response = await client.chat.completions.create({
-  model: 'gpt-4o-mini',
-  messages: [{ role: 'user', content: 'Hello!' }],
-});
-console.log(response.choices[0].message.content);
-
-// Streaming
-const stream = await client.chat.completions.create({
-  model: 'gpt-4o-mini',
-  messages: [{ role: 'user', content: 'Tell a story' }],
-  stream: true,
-});
-for await (const chunk of stream) {
-  process.stdout.write(chunk.choices[0]?.delta?.content || '');
-}
-```
-
-Gateway endpoints:
-
-- `POST /v1/chat/completions`
-- `GET /v1/models`
-- `GET /api/health`
-- `GET /api/logs`
-- `GET /api/metrics`
-- `POST /api/keys`
-- `POST /api/orgs`
-- `POST /api/workspaces`
-- `POST /api/users`
-- `POST /api/workspace-members`
-- `GET /api/providers`
-- `GET /api/virtual-keys`
-- `POST /api/virtual-keys`
-- `POST /api/virtual-keys/rotate`
-- `POST /api/feedback`
-- `POST /api/prompts`
-- `POST /api/evals/policy`
-
-The dashboard is served from `/`.
-
-Advanced gateway behavior:
-
-- **Streaming:** `POST /v1/chat/completions` supports `stream: true` and emits OpenAI-compatible SSE chunks.
-- **Caching:** exact prompt/provider/model matches are hashed and cached first; semantic similarity is used as a fallback. Hits return `x-sentinel-cache: HIT`.
-- **Agent observability:** pass `x-sentinel-trace-id` and `x-sentinel-session-id` to group calls across an agent run.
-- **Raw observability logs:** request and response payloads are persisted with size-capped raw log entries for incident review and replay.
-- **Budgets:** API keys can carry `budget_usd`, `monthly_cost_budget`, and `monthly_token_budget`; exceeded keys receive `budget_exceeded`.
-- **Workspace governance:** organizations, workspaces, users, roles, workspace memberships, and workspace-scoped API keys are available through the management API.
-- **Circuit breakers:** failing providers are opened after consecutive errors and skipped until their cooldown expires.
-- **Config-as-code:** use `SENTINEL_CONFIG` with `examples/gateway-config.yaml` to define cache, MCP, fallback, retry, and weighted routing behavior.
-- **Provider catalog:** define provider accounts in config without embedding secrets. Accounts are exposed as virtual providers such as `@openai-prod/gpt-4o-mini`.
-- **Feedback loop:** `POST /api/feedback` records thumbs-up/down style feedback against a `trace_id` or `request_id`.
-- **Prompt versions:** creating a prompt with an existing name creates the next immutable version; `/api/prompts/versions` returns version history.
-- **Policy eval replay:** `/api/evals/policy` replays batches of tool requests against one or more policy files to estimate future allow/deny impact.
-- **Multimodal compatibility:** OpenAI-style message content arrays with text and image URL parts are accepted and preserved for OpenAI-compatible providers.
-- **A/B routing:** use config routes or `SENTINEL_AB_TEST` to split a logical model across provider/model variants.
-- **Shadow routing:** use `SENTINEL_SHADOW_PROVIDER` or `x-sentinel-shadow-provider` to compare a second provider without affecting the user response.
-- **MCP Gateway:** `/mcp` and `/v1/mcp/tools/call` use Sentinel CEL policies to govern agent tool calls in the same process as LLM traffic.
-- **OpenTelemetry:** export gateway and provider spans to any OTLP-compatible backend.
-- **Provider credential vault:** store encrypted provider credentials and expose them as virtual providers with rotation and revoke workflows.
-
-Example config:
-
-```yaml
-apiVersion: sentinel.dev/v1
+apiVersion: omniswitch.dev/v1
 kind: GatewayConfig
 
 gateway:
   listen: ":8080"
-  cache_threshold: 0.95
+  cache_threshold: 0.95        # Semantic vector similarity threshold
   cache_ttl: 24h
 
 providers:
@@ -266,12 +102,111 @@ mcp:
   upstream: http://127.0.0.1:8090/mcp
 
 routes:
-  canary-chat:
+  gpt-4o-logical:
+    fallbacks: ["@anthropic-prod"]
+    max_retries: 2
+    retry_codes: [429, 500, 502, 503, 504]
+    shadow_provider: "@openai-shadow"
     variants:
-      - provider: openai
+      - provider: openai-prod
         model: gpt-4o-mini
         weight: 90
-      - provider: anthropic
-        model: claude-3-5-haiku-20241022
+      - provider: anthropic-prod
+        model: claude-3-5-haiku-latest
         weight: 10
 ```
+
+Run the gateway using this configuration file:
+```bash
+SENTINEL_CONFIG=config.yaml go run ./cmd/gateway
+```
+
+---
+
+## 📦 Client Integrations
+
+OmniSwitch provides lightweight SDK wrappers that extend the official OpenAI SDKs to support tracing, provider overrides, and key vault routing.
+
+### Python SDK
+
+```bash
+pip install openai  # OmniSwitch wraps the official SDK
+```
+
+```python
+from sdk.python import OmniSwitch
+
+client = OmniSwitch(
+    gateway_url="http://localhost:8080",
+    api_key="your-omniswitch-key",
+    trace_id="user-session-99",     # Observability mapping
+    session_id="conv-flow-abc"
+)
+
+# Route request automatically
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "How does semantic caching work?"}]
+)
+print(response.choices[0].message.content)
+```
+
+### Node.js SDK
+
+```bash
+npm install openai
+```
+
+```javascript
+const { OmniSwitch } = require('./sdk/node');
+
+const client = new OmniSwitch({
+  gatewayUrl: 'http://localhost:8080',
+  apiKey: 'your-omniswitch-key'
+});
+
+async function main() {
+  const stream = await client.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [{ role: 'user', content: 'Explain shadow routing.' }],
+    stream: true
+  });
+  
+  for await (const chunk of stream) {
+    process.stdout.write(chunk.choices[0]?.delta?.content || '');
+  }
+}
+main();
+```
+
+---
+
+## 📊 Feature Parity Map
+
+| Operational Capability | Portkey AI Gateway | AgentGateway (Solo.io) | OmniSwitch |
+| :--- | :--- | :--- | :--- |
+| **Philosophy** | Commercial SaaS (OSS SDK) | Enterprise K8s/Envoy | **Open-source, self-hosted single binary** |
+| **Dependencies** | Requires Redis, Postgres, vector DB | Requires Envoy control plane | **Zero external dependencies (SQLite embedded)** |
+| **Unified inference API** | Yes | Yes | **Yes** (`/v1/chat/completions`, `/v1/models`, `/v1/embeddings`) |
+| **Shadow Routing** | No (open source) | No | **Yes** (Asynchronous mirror execution) |
+| **Semantic Caching** | Yes | No | **Yes** (Built-in cosine-similarity cache) |
+| **Real-time Guardrails** | Yes (managed cloud) | Yes (Envoy filters) | **Yes** (CEL & local pattern scanner) |
+| **Model Context Protocol** | Yes | Yes | **Yes** (Gated HTTP tool execution) |
+| **Local Admin Dashboard** | No (hosted cloud console) | No | **Yes** (Built-in React dashboard) |
+
+---
+
+## 📖 Directory Structure
+
+*   [`cmd/gateway`](cmd/gateway/): Main gateway proxy server and local dashboard server.
+*   [`internal/gateway`](internal/gateway/): Proxy handler, route resolution, and token bucketing.
+*   [`internal/cache`](internal/cache/): Cosine similarity semantic caching and exact-match cache logic.
+*   [`internal/guardrail`](internal/guardrail/): CEL validator, SQL injection detector, and toxic content checker.
+*   [`internal/store`](internal/store/): SQLite database connection pool, migration files, and audit log handlers.
+*   [`website/`](website/): Product landing page, comparison matrix, and developer docs.
+
+---
+
+## 🛡️ License
+
+OmniSwitch is distributed under the Apache-2.0 License. See [LICENSE](LICENSE) for more details.
