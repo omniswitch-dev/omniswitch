@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 // Handler serves prompt management API endpoints.

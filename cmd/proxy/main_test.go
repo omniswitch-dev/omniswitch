@@ -10,8 +10,8 @@ func TestEnv(t *testing.T) {
 		fallback string
 		want     string
 	}{
-		{name: "uses fallback", key: "SENTINEL_TEST_EMPTY", fallback: ":8080", want: ":8080"},
-		{name: "uses value", key: "SENTINEL_TEST_VALUE", value: ":9090", fallback: ":8080", want: ":9090"},
+		{name: "uses fallback", key: "OMNISWITCH_TEST_EMPTY", fallback: ":8080", want: ":8080"},
+		{name: "uses value", key: "OMNISWITCH_TEST_VALUE", value: ":9090", fallback: ":8080", want: ":9090"},
 	}
 
 	for _, tt := range tests {

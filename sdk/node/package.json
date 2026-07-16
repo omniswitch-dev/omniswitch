@@ -1,14 +1,14 @@
 {
   "name": "sentinel-ai",
   "version": "0.1.0",
-  "description": "Node.js/TypeScript SDK for the Sentinel AI Gateway - route, cache, guard, and observe LLM traffic",
+  "description": "Node.js/TypeScript SDK for the OmniSwitch AI Gateway - route, cache, guard, and observe LLM traffic",
   "main": "index.js",
   "types": "index.d.ts",
   "license": "Apache-2.0",
   "keywords": ["ai", "gateway", "openai", "llm", "sentinel", "anthropic", "router", "observability"],
   "repository": {
     "type": "git",
-    "url": "https://github.com/onlychirag/sentinel-ai-gateway"
+    "url": "https://github.com/omniswitch-dev/omniswitch"
   },
   "peerDependencies": {
     "openai": ">=4.0.0"

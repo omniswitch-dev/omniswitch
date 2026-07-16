@@ -15,7 +15,7 @@ func TestLoadPolicy(t *testing.T) {
 	}{
 		{
 			name: "match policy",
-			content: `apiVersion: sentinel.dev/v1
+			content: `apiVersion: omniswitch.dev/v1
 kind: Policy
 metadata:
   name: production-delete
@@ -32,7 +32,7 @@ spec:
 		},
 		{
 			name: "cel policy",
-			content: `apiVersion: sentinel.dev/v1
+			content: `apiVersion: omniswitch.dev/v1
 kind: Policy
 metadata:
   name: custom-cel

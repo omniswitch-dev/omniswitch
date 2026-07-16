@@ -8,11 +8,11 @@ import (
 	"net/http"
 	"strings"
 
-	"sentinel/internal/provider"
+	"github.com/omniswitch-dev/omniswitch/internal/provider"
 )
 
 // Responses provides a pragmatic OpenAI Responses compatibility layer. It
-// translates the text/message subset to Sentinel's common chat pipeline, so
+// translates the text/message subset to OmniSwitch's common chat pipeline, so
 // budgets, guardrails, cache isolation, logging, and routing are identical.
 func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -66,7 +66,7 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 }
 
 // Messages accepts the core Anthropic Messages shape and returns its response
-// shape while using the same provider-neutral Sentinel request pipeline.
+// shape while using the same provider-neutral OmniSwitch request pipeline.
 func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")

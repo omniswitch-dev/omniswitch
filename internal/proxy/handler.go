@@ -11,14 +11,14 @@ import (
 	"strings"
 	"time"
 
-	"sentinel/internal/adapter/mcp"
-	"sentinel/internal/audit"
-	"sentinel/internal/model"
-	"sentinel/internal/policy"
+	"github.com/omniswitch-dev/omniswitch/internal/adapter/mcp"
+	"github.com/omniswitch-dev/omniswitch/internal/audit"
+	"github.com/omniswitch-dev/omniswitch/internal/model"
+	"github.com/omniswitch-dev/omniswitch/internal/policy"
 )
 
 // TargetConfig defines a named upstream MCP server. A configured target is
-// exposed through the shared Sentinel MCP endpoint; its tools are prefixed
+// exposed through the shared OmniSwitch MCP endpoint; its tools are prefixed
 // with "<target>__" in tools/list responses.
 type TargetConfig struct {
 	Name     string
@@ -241,9 +241,9 @@ func (h *Handler) callTarget(ctx context.Context, target target, body []byte, in
 
 func requestIdentity(r *http.Request) model.Agent {
 	return model.Agent{
-		ID:         r.Header.Get("x-sentinel-key-id"),
-		Department: r.Header.Get("x-sentinel-workspace-id"),
-		Role:       r.Header.Get("x-sentinel-role"),
+		ID:         r.Header.Get("x-omniswitch-key-id"),
+		Department: r.Header.Get("x-omniswitch-workspace-id"),
+		Role:       r.Header.Get("x-omniswitch-role"),
 	}
 }
 

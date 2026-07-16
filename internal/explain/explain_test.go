@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"sentinel/internal/model"
+	"github.com/omniswitch-dev/omniswitch/internal/model"
 )
 
 func TestFormat(t *testing.T) {

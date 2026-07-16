@@ -16,11 +16,11 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
-	"sentinel/internal/cache"
-	"sentinel/internal/guardrail"
-	"sentinel/internal/provider"
-	"sentinel/internal/router"
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/cache"
+	"github.com/omniswitch-dev/omniswitch/internal/guardrail"
+	"github.com/omniswitch-dev/omniswitch/internal/provider"
+	"github.com/omniswitch-dev/omniswitch/internal/router"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 // Handler serves the OpenAI-compatible /v1/chat/completions API.
@@ -132,11 +132,11 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	req = transformed
 
 	reqID := newRequestID()
-	traceID := requestHeaderOrNew(r, "x-sentinel-trace-id", "trace")
-	sessionID := r.Header.Get("x-sentinel-session-id")
-	providerHint := r.Header.Get("x-sentinel-provider")
-	shadowHint := firstNonEmpty(r.Header.Get("x-sentinel-shadow-provider"), h.router.ShadowProviderForModel(req.Model), h.shadowProvider)
-	apiKeyID := r.Header.Get("x-sentinel-key-id")
+	traceID := requestHeaderOrNew(r, "x-omniswitch-trace-id", "trace")
+	sessionID := r.Header.Get("x-omniswitch-session-id")
+	providerHint := r.Header.Get("x-omniswitch-provider")
+	shadowHint := firstNonEmpty(r.Header.Get("x-omniswitch-shadow-provider"), h.router.ShadowProviderForModel(req.Model), h.shadowProvider)
+	apiKeyID := r.Header.Get("x-omniswitch-key-id")
 	tenantCacheScope := h.tenantCacheScope(r)
 	ctx = WithRequestID(r.Context(), reqID)
 	ctx = WithTraceID(ctx, traceID)
@@ -158,8 +158,8 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, APIKeyID: apiKeyID,
 			Status: "denied", ErrorMessage: reason,
 		})
-		w.Header().Set("x-sentinel-trace-id", traceID)
-		w.Header().Set("x-sentinel-session-id", sessionID)
+		w.Header().Set("x-omniswitch-trace-id", traceID)
+		w.Header().Set("x-omniswitch-session-id", sessionID)
 		writeJSON(w, http.StatusPaymentRequired, map[string]any{
 			"error": map[string]string{"message": reason, "type": "budget_exceeded", "code": "budget_exceeded"},
 		})
@@ -181,8 +181,8 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 					ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, APIKeyID: apiKeyID,
 					Status: "denied", ErrorMessage: gr.Message,
 				})
-				w.Header().Set("x-sentinel-trace-id", traceID)
-				w.Header().Set("x-sentinel-session-id", sessionID)
+				w.Header().Set("x-omniswitch-trace-id", traceID)
+				w.Header().Set("x-omniswitch-session-id", sessionID)
 				writeJSON(w, http.StatusForbidden, map[string]any{
 					"error": map[string]string{"message": gr.Message, "type": gr.Type, "code": "guardrail_triggered"},
 				})
@@ -200,8 +200,8 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 				ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &cachedResp,
 				APIKeyID: apiKeyID, Status: "denied", ErrorMessage: reason, Cached: true,
 			})
-			w.Header().Set("x-sentinel-trace-id", traceID)
-			w.Header().Set("x-sentinel-session-id", sessionID)
+			w.Header().Set("x-omniswitch-trace-id", traceID)
+			w.Header().Set("x-omniswitch-session-id", sessionID)
 			writeJSON(w, http.StatusForbidden, map[string]any{
 				"error": map[string]string{"message": reason, "type": "guardrail", "code": "guardrail_triggered"},
 			})
@@ -217,9 +217,9 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &cachedResp, Meta: &meta,
 			APIKeyID: apiKeyID, Status: "success", Cached: true,
 		})
-		w.Header().Set("x-sentinel-trace-id", traceID)
-		w.Header().Set("x-sentinel-session-id", sessionID)
-		w.Header().Set("x-sentinel-cache", "HIT")
+		w.Header().Set("x-omniswitch-trace-id", traceID)
+		w.Header().Set("x-omniswitch-session-id", sessionID)
+		w.Header().Set("x-omniswitch-cache", "HIT")
 		if req.Stream {
 			writeStream(w, cachedResp)
 			return
@@ -246,8 +246,8 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Meta: &meta,
 			APIKeyID: apiKeyID, Status: "error", ErrorMessage: err.Error(),
 		})
-		w.Header().Set("x-sentinel-trace-id", traceID)
-		w.Header().Set("x-sentinel-session-id", sessionID)
+		w.Header().Set("x-omniswitch-trace-id", traceID)
+		w.Header().Set("x-omniswitch-session-id", sessionID)
 		writeError(w, http.StatusBadGateway, "provider error: "+err.Error())
 		return
 	}
@@ -264,8 +264,8 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &resp, Meta: &meta,
 			APIKeyID: apiKeyID, Status: "denied", ErrorMessage: reason,
 		})
-		w.Header().Set("x-sentinel-trace-id", traceID)
-		w.Header().Set("x-sentinel-session-id", sessionID)
+		w.Header().Set("x-omniswitch-trace-id", traceID)
+		w.Header().Set("x-omniswitch-session-id", sessionID)
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"error": map[string]string{"message": reason, "type": "guardrail", "code": "guardrail_triggered"},
 		})
@@ -290,9 +290,9 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	)
 	h.shadow(ctx, reqID, traceID, meta.Provider, backendReq, shadowHint)
 
-	w.Header().Set("x-sentinel-trace-id", traceID)
-	w.Header().Set("x-sentinel-session-id", sessionID)
-	w.Header().Set("x-sentinel-cache", "MISS")
+	w.Header().Set("x-omniswitch-trace-id", traceID)
+	w.Header().Set("x-omniswitch-session-id", sessionID)
+	w.Header().Set("x-omniswitch-cache", "MISS")
 	if req.Stream {
 		writeStream(w, resp)
 		return
@@ -399,8 +399,8 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 			ID: streamCtx.ID, TraceID: streamCtx.TraceID, SessionID: streamCtx.SessionID, Request: streamCtx.Request, Meta: &meta,
 			APIKeyID: streamCtx.APIKeyID, Status: "error", ErrorMessage: err.Error(),
 		})
-		w.Header().Set("x-sentinel-trace-id", streamCtx.TraceID)
-		w.Header().Set("x-sentinel-session-id", streamCtx.SessionID)
+		w.Header().Set("x-omniswitch-trace-id", streamCtx.TraceID)
+		w.Header().Set("x-omniswitch-session-id", streamCtx.SessionID)
 		writeError(w, http.StatusBadGateway, "provider stream error: "+err.Error())
 		return
 	}
@@ -463,8 +463,8 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 				ID: streamCtx.ID, TraceID: streamCtx.TraceID, SessionID: streamCtx.SessionID, Request: streamCtx.Request, Response: &aggregated, Meta: &meta,
 				APIKeyID: streamCtx.APIKeyID, Status: "denied", ErrorMessage: reason,
 			})
-			w.Header().Set("x-sentinel-trace-id", streamCtx.TraceID)
-			w.Header().Set("x-sentinel-session-id", streamCtx.SessionID)
+			w.Header().Set("x-omniswitch-trace-id", streamCtx.TraceID)
+			w.Header().Set("x-omniswitch-session-id", streamCtx.SessionID)
 			writeJSON(w, http.StatusForbidden, map[string]any{
 				"error": map[string]string{"message": reason, "type": "guardrail", "code": "guardrail_triggered"},
 			})
@@ -509,9 +509,9 @@ func setStreamHeaders(w http.ResponseWriter, traceID, sessionID string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("x-sentinel-trace-id", traceID)
-	w.Header().Set("x-sentinel-session-id", sessionID)
-	w.Header().Set("x-sentinel-cache", "MISS")
+	w.Header().Set("x-omniswitch-trace-id", traceID)
+	w.Header().Set("x-omniswitch-session-id", sessionID)
+	w.Header().Set("x-omniswitch-cache", "MISS")
 }
 
 // outputGuardrailDisposition evaluates every generated choice. A redaction
@@ -676,15 +676,15 @@ func (h *Handler) tenantCacheScope(r *http.Request) string {
 	case "global":
 		return "global"
 	case "organization":
-		if id := strings.TrimSpace(r.Header.Get("x-sentinel-organization-id")); id != "" {
+		if id := strings.TrimSpace(r.Header.Get("x-omniswitch-organization-id")); id != "" {
 			return "organization:" + id
 		}
 	case "workspace":
-		if id := strings.TrimSpace(r.Header.Get("x-sentinel-workspace-id")); id != "" {
+		if id := strings.TrimSpace(r.Header.Get("x-omniswitch-workspace-id")); id != "" {
 			return "workspace:" + id
 		}
 	}
-	if id := strings.TrimSpace(r.Header.Get("x-sentinel-key-id")); id != "" {
+	if id := strings.TrimSpace(r.Header.Get("x-omniswitch-key-id")); id != "" {
 		return "api_key:" + id
 	}
 	return "anonymous"

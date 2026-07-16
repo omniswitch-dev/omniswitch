@@ -3,7 +3,7 @@ package audit
 import (
 	"context"
 
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 type MultiLogger struct {

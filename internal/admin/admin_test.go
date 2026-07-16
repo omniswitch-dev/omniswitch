@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 func TestCreateListDeleteAPIKey(t *testing.T) {

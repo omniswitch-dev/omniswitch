@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"sentinel/internal/model"
+	"github.com/omniswitch-dev/omniswitch/internal/model"
 )
 
 type Event struct {

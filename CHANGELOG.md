@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Sentinel will be documented in this file.
+All notable changes to OmniSwitch will be documented in this file.
 
 The format is based on Keep a Changelog, and this project follows semantic versioning once tagged releases begin.
 
@@ -14,7 +14,7 @@ The format is based on Keep a Changelog, and this project follows semantic versi
 - Provider catalog aliases such as `@openai-prod/gpt-4o-mini`.
 - Encrypted provider credential vault with virtual providers, rotation, and revoke workflows.
 - Exact and semantic caching backed by SQLite.
-- Config-as-code with `sentinel.dev/v1` `GatewayConfig`.
+- Config-as-code with `omniswitch.dev/v1` `GatewayConfig`.
 - OpenTelemetry trace export for gateway and provider spans.
 - Circuit breakers, retries, fallbacks, A/B routing, and shadow routing.
 - Cost and token budgets for API keys.

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"sentinel/internal/audit"
-	"sentinel/internal/policy"
+	"github.com/omniswitch-dev/omniswitch/internal/audit"
+	"github.com/omniswitch-dev/omniswitch/internal/policy"
 )
 
 func TestHandlerServeHTTP(t *testing.T) {

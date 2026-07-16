@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 // Handler serves organization and workspace management APIs.

@@ -15,8 +15,8 @@ import (
 
 	"github.com/google/cel-go/cel"
 
-	"sentinel/internal/model"
-	"sentinel/internal/spec"
+	"github.com/omniswitch-dev/omniswitch/internal/model"
+	"github.com/omniswitch-dev/omniswitch/internal/spec"
 )
 
 type Engine interface {

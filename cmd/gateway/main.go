@@ -13,23 +13,23 @@ import (
 	"strings"
 	"time"
 
-	"sentinel/internal/admin"
-	"sentinel/internal/audit"
-	"sentinel/internal/dashboard"
-	"sentinel/internal/eval"
-	"sentinel/internal/feedback"
-	"sentinel/internal/gateway"
-	"sentinel/internal/gatewayconfig"
-	"sentinel/internal/guardrail"
-	"sentinel/internal/org"
-	"sentinel/internal/policy"
-	"sentinel/internal/prompt"
-	"sentinel/internal/provider"
-	mcpproxy "sentinel/internal/proxy"
-	"sentinel/internal/router"
-	"sentinel/internal/store"
-	"sentinel/internal/telemetry"
-	"sentinel/internal/vault"
+	"github.com/omniswitch-dev/omniswitch/internal/admin"
+	"github.com/omniswitch-dev/omniswitch/internal/audit"
+	"github.com/omniswitch-dev/omniswitch/internal/dashboard"
+	"github.com/omniswitch-dev/omniswitch/internal/eval"
+	"github.com/omniswitch-dev/omniswitch/internal/feedback"
+	"github.com/omniswitch-dev/omniswitch/internal/gateway"
+	"github.com/omniswitch-dev/omniswitch/internal/gatewayconfig"
+	"github.com/omniswitch-dev/omniswitch/internal/guardrail"
+	"github.com/omniswitch-dev/omniswitch/internal/org"
+	"github.com/omniswitch-dev/omniswitch/internal/policy"
+	"github.com/omniswitch-dev/omniswitch/internal/prompt"
+	"github.com/omniswitch-dev/omniswitch/internal/provider"
+	mcpproxy "github.com/omniswitch-dev/omniswitch/internal/proxy"
+	"github.com/omniswitch-dev/omniswitch/internal/router"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/telemetry"
+	"github.com/omniswitch-dev/omniswitch/internal/vault"
 )
 
 func main() {
@@ -70,7 +70,7 @@ func main() {
 	}
 	vaultManager := vault.New(st, settings.vaultKey)
 	if settings.vaultKey == "" {
-		log.Println("WARNING: SENTINEL_VAULT_KEY is not set. Provider vault entries created in this process will not be decryptable after restart.")
+		log.Println("WARNING: OMNISWITCH_VAULT_KEY is not set. Provider vault entries created in this process will not be decryptable after restart.")
 	}
 
 	// Initialize provider registry.
@@ -277,7 +277,7 @@ func main() {
 
 	// Print startup banner.
 	fmt.Println(banner())
-	log.Printf("Sentinel AI Gateway listening on %s", settings.listenAddr)
+	log.Printf("OmniSwitch AI Gateway listening on %s", settings.listenAddr)
 	log.Printf("Dashboard: http://localhost%s", settings.listenAddr)
 	log.Printf("Gateway:   http://localhost%s/v1/chat/completions", settings.listenAddr)
 	if settings.mcpEnabled {
@@ -358,12 +358,12 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 		mcpPolicyPath:     "policies/production-delete.yaml",
 		mcpUpstreamURL:    "http://127.0.0.1:8090/mcp",
 		routes:            map[string]router.Route{},
-		otelServiceName:   "sentinel-gateway",
+		otelServiceName:   "omniswitch-gateway",
 		otelTimeout:       10 * time.Second,
 		prometheusEnabled: true,
 	}
 
-	if configPath := strings.TrimSpace(os.Getenv("SENTINEL_CONFIG")); configPath != "" {
+	if configPath := strings.TrimSpace(os.Getenv("OMNISWITCH_CONFIG")); configPath != "" {
 		cfg, err := gatewayconfig.LoadFile(configPath)
 		if err != nil {
 			return settings, err
@@ -372,45 +372,45 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 		applyGatewayConfig(&settings, cfg)
 	}
 
-	settings.listenAddr = env("SENTINEL_LISTEN", settings.listenAddr)
-	settings.dataDir = env("SENTINEL_DATA", settings.dataDir)
-	settings.authEnabled = envBool("SENTINEL_AUTH", settings.authEnabled)
-	settings.cacheThreshold = envFloat("SENTINEL_CACHE_THRESHOLD", settings.cacheThreshold)
-	settings.cacheTTL = envDuration("SENTINEL_CACHE_TTL", settings.cacheTTL)
-	settings.cacheScope = env("SENTINEL_CACHE_SCOPE", settings.cacheScope)
-	settings.logPayloads = envBool("SENTINEL_LOG_PAYLOADS", settings.logPayloads)
-	settings.guardrailStreamBuffer = envBool("SENTINEL_GUARDRAIL_STREAM_BUFFER", settings.guardrailStreamBuffer)
-	settings.maxRequestBytes = envInt64("SENTINEL_MAX_REQUEST_BYTES", settings.maxRequestBytes)
-	settings.readHeaderTimeout = envDuration("SENTINEL_READ_HEADER_TIMEOUT", settings.readHeaderTimeout)
-	settings.readTimeout = envDuration("SENTINEL_READ_TIMEOUT", settings.readTimeout)
-	settings.writeTimeout = envDuration("SENTINEL_WRITE_TIMEOUT", settings.writeTimeout)
-	settings.idleTimeout = envDuration("SENTINEL_IDLE_TIMEOUT", settings.idleTimeout)
-	settings.circuitBreakerFailures = envInt("SENTINEL_CIRCUIT_BREAKER_FAILURES", settings.circuitBreakerFailures)
-	settings.circuitBreakerCooldown = envDuration("SENTINEL_CIRCUIT_BREAKER_COOLDOWN", settings.circuitBreakerCooldown)
-	if value := strings.TrimSpace(os.Getenv("SENTINEL_CORS_ORIGINS")); value != "" {
+	settings.listenAddr = env("OMNISWITCH_LISTEN", settings.listenAddr)
+	settings.dataDir = env("OMNISWITCH_DATA", settings.dataDir)
+	settings.authEnabled = envBool("OMNISWITCH_AUTH", settings.authEnabled)
+	settings.cacheThreshold = envFloat("OMNISWITCH_CACHE_THRESHOLD", settings.cacheThreshold)
+	settings.cacheTTL = envDuration("OMNISWITCH_CACHE_TTL", settings.cacheTTL)
+	settings.cacheScope = env("OMNISWITCH_CACHE_SCOPE", settings.cacheScope)
+	settings.logPayloads = envBool("OMNISWITCH_LOG_PAYLOADS", settings.logPayloads)
+	settings.guardrailStreamBuffer = envBool("OMNISWITCH_GUARDRAIL_STREAM_BUFFER", settings.guardrailStreamBuffer)
+	settings.maxRequestBytes = envInt64("OMNISWITCH_MAX_REQUEST_BYTES", settings.maxRequestBytes)
+	settings.readHeaderTimeout = envDuration("OMNISWITCH_READ_HEADER_TIMEOUT", settings.readHeaderTimeout)
+	settings.readTimeout = envDuration("OMNISWITCH_READ_TIMEOUT", settings.readTimeout)
+	settings.writeTimeout = envDuration("OMNISWITCH_WRITE_TIMEOUT", settings.writeTimeout)
+	settings.idleTimeout = envDuration("OMNISWITCH_IDLE_TIMEOUT", settings.idleTimeout)
+	settings.circuitBreakerFailures = envInt("OMNISWITCH_CIRCUIT_BREAKER_FAILURES", settings.circuitBreakerFailures)
+	settings.circuitBreakerCooldown = envDuration("OMNISWITCH_CIRCUIT_BREAKER_COOLDOWN", settings.circuitBreakerCooldown)
+	if value := strings.TrimSpace(os.Getenv("OMNISWITCH_CORS_ORIGINS")); value != "" {
 		settings.corsOrigins = parseCSV(value)
 	}
-	settings.shadowProvider = env("SENTINEL_SHADOW_PROVIDER", settings.shadowProvider)
-	settings.mcpEnabled = envBool("SENTINEL_MCP_ENABLED", settings.mcpEnabled)
-	settings.mcpPolicyPath = env("SENTINEL_MCP_POLICY", settings.mcpPolicyPath)
-	settings.mcpUpstreamURL = env("SENTINEL_MCP_UPSTREAM", settings.mcpUpstreamURL)
-	settings.otelEnabled = envBool("SENTINEL_OTEL_ENABLED", settings.otelEnabled)
-	settings.otelEndpoint = env("SENTINEL_OTEL_ENDPOINT", settings.otelEndpoint)
-	settings.otelServiceName = env("SENTINEL_OTEL_SERVICE_NAME", settings.otelServiceName)
-	settings.otelHeaders = mergeStringMaps(settings.otelHeaders, parseHeaderList(os.Getenv("SENTINEL_OTEL_HEADERS")))
-	settings.otelInsecure = envBool("SENTINEL_OTEL_INSECURE", settings.otelInsecure)
-	settings.otelTimeout = envDuration("SENTINEL_OTEL_TIMEOUT", settings.otelTimeout)
-	settings.prometheusEnabled = envBool("SENTINEL_PROMETHEUS_ENABLED", settings.prometheusEnabled)
-	settings.vaultKey = env("SENTINEL_VAULT_KEY", settings.vaultKey)
+	settings.shadowProvider = env("OMNISWITCH_SHADOW_PROVIDER", settings.shadowProvider)
+	settings.mcpEnabled = envBool("OMNISWITCH_MCP_ENABLED", settings.mcpEnabled)
+	settings.mcpPolicyPath = env("OMNISWITCH_MCP_POLICY", settings.mcpPolicyPath)
+	settings.mcpUpstreamURL = env("OMNISWITCH_MCP_UPSTREAM", settings.mcpUpstreamURL)
+	settings.otelEnabled = envBool("OMNISWITCH_OTEL_ENABLED", settings.otelEnabled)
+	settings.otelEndpoint = env("OMNISWITCH_OTEL_ENDPOINT", settings.otelEndpoint)
+	settings.otelServiceName = env("OMNISWITCH_OTEL_SERVICE_NAME", settings.otelServiceName)
+	settings.otelHeaders = mergeStringMaps(settings.otelHeaders, parseHeaderList(os.Getenv("OMNISWITCH_OTEL_HEADERS")))
+	settings.otelInsecure = envBool("OMNISWITCH_OTEL_INSECURE", settings.otelInsecure)
+	settings.otelTimeout = envDuration("OMNISWITCH_OTEL_TIMEOUT", settings.otelTimeout)
+	settings.prometheusEnabled = envBool("OMNISWITCH_PROMETHEUS_ENABLED", settings.prometheusEnabled)
+	settings.vaultKey = env("OMNISWITCH_VAULT_KEY", settings.vaultKey)
 	// Bootstrap credentials must not live in config-as-code, so they are only
 	// accepted through the process environment or a secret manager injection.
-	settings.bootstrapAPIKey = env("SENTINEL_BOOTSTRAP_API_KEY", settings.bootstrapAPIKey)
-	settings.bootstrapWorkspaceID = env("SENTINEL_BOOTSTRAP_WORKSPACE", settings.bootstrapWorkspaceID)
-	settings.bootstrapRole = env("SENTINEL_BOOTSTRAP_ROLE", settings.bootstrapRole)
+	settings.bootstrapAPIKey = env("OMNISWITCH_BOOTSTRAP_API_KEY", settings.bootstrapAPIKey)
+	settings.bootstrapWorkspaceID = env("OMNISWITCH_BOOTSTRAP_WORKSPACE", settings.bootstrapWorkspaceID)
+	settings.bootstrapRole = env("OMNISWITCH_BOOTSTRAP_ROLE", settings.bootstrapRole)
 	if settings.otelEndpoint != "" {
 		settings.otelEnabled = true
 	}
-	for model, route := range parseABConfig(os.Getenv("SENTINEL_AB_TEST")) {
+	for model, route := range parseABConfig(os.Getenv("OMNISWITCH_AB_TEST")) {
 		settings.routes[model] = mergeRoute(settings.routes[model], route)
 	}
 	return settings, nil
@@ -430,7 +430,7 @@ func ensureBootstrapKey(ctx context.Context, st *store.Store, settings runtimeSe
 			role = "owner"
 		}
 		if role != "owner" && role != "admin" {
-			return fmt.Errorf("SENTINEL_BOOTSTRAP_ROLE must be owner or admin")
+			return fmt.Errorf("OMNISWITCH_BOOTSTRAP_ROLE must be owner or admin")
 		}
 		prefix := secret
 		if len(prefix) > 12 {
@@ -454,7 +454,7 @@ func ensureBootstrapKey(ctx context.Context, st *store.Store, settings runtimeSe
 		return fmt.Errorf("list existing API keys: %w", err)
 	}
 	if len(keys) == 0 {
-		return fmt.Errorf("authentication is enabled but no API keys exist; set SENTINEL_BOOTSTRAP_API_KEY for first startup")
+		return fmt.Errorf("authentication is enabled but no API keys exist; set OMNISWITCH_BOOTSTRAP_API_KEY for first startup")
 	}
 	return nil
 }

@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 // Handler serves admin API endpoints.

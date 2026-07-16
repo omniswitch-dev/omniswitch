@@ -1,10 +1,10 @@
-apiVersion: sentinel.dev/v1
+apiVersion: omniswitch.dev/v1
 kind: GatewayConfig
 
 gateway:
   listen: ":8080"
-  data_dir: ".sentinel"
-  # Set true in production, along with SENTINEL_BOOTSTRAP_API_KEY on the first run.
+  data_dir: ".omniswitch"
+  # Set true in production, along with OMNISWITCH_BOOTSTRAP_API_KEY on the first run.
   auth: true
   cache_threshold: 0.95
   cache_ttl: 24h
@@ -41,7 +41,7 @@ guardrails:
 observability:
   otel_enabled: false
   otlp_endpoint: ""
-  service_name: sentinel-gateway
+  service_name: omniswitch-gateway
   insecure: true
   timeout: 10s
   prometheus_enabled: true
@@ -94,7 +94,7 @@ mcp:
   enabled: true
   policy: policies/production-delete.yaml
   upstream: http://127.0.0.1:8090/mcp
-  # HTTP MCP targets are federated at /mcp. Sentinel prefixes tools as
+  # HTTP MCP targets are federated at /mcp. OmniSwitch prefixes tools as
   # <target>__<tool> to avoid collisions and applies the target policy.
   targets:
     - name: github

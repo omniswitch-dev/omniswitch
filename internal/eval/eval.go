@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"sentinel/internal/model"
-	"sentinel/internal/policy"
+	"github.com/omniswitch-dev/omniswitch/internal/model"
+	"github.com/omniswitch-dev/omniswitch/internal/policy"
 )
 
 type Handler struct{}

@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 // AuthMiddleware validates API keys from the Authorization header.
@@ -79,11 +79,11 @@ func (a *AuthMiddleware) Wrap(next http.Handler) http.Handler {
 		}
 		// These headers are internal identity attributes. Always overwrite them
 		// so a caller cannot choose another tenant's cache scope or role.
-		r.Header.Set("x-sentinel-key-id", apiKey.ID)
-		r.Header.Set("x-sentinel-rate-limit", strconv.Itoa(apiKey.RateLimit))
-		r.Header.Set("x-sentinel-workspace-id", apiKey.WorkspaceID)
-		r.Header.Set("x-sentinel-organization-id", organizationID)
-		r.Header.Set("x-sentinel-role", normalizeRole(apiKey.Role))
+		r.Header.Set("x-omniswitch-key-id", apiKey.ID)
+		r.Header.Set("x-omniswitch-rate-limit", strconv.Itoa(apiKey.RateLimit))
+		r.Header.Set("x-omniswitch-workspace-id", apiKey.WorkspaceID)
+		r.Header.Set("x-omniswitch-organization-id", organizationID)
+		r.Header.Set("x-omniswitch-role", normalizeRole(apiKey.Role))
 		next.ServeHTTP(w, r.WithContext(withIdentity(r.Context(), Identity{
 			APIKeyID:       apiKey.ID,
 			WorkspaceID:    apiKey.WorkspaceID,
@@ -93,7 +93,7 @@ func (a *AuthMiddleware) Wrap(next http.Handler) http.Handler {
 	})
 }
 
-// AuthorizationMiddleware protects Sentinel's control plane. Inference and
+// AuthorizationMiddleware protects OmniSwitch's control plane. Inference and
 // MCP requests remain available to any valid workload key, while destructive
 // management actions require an administrator key.
 type AuthorizationMiddleware struct {
@@ -192,12 +192,12 @@ func NewRateLimiter(limit int, interval time.Duration) *RateLimiter {
 
 func (rl *RateLimiter) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := r.Header.Get("x-sentinel-key-id")
+		key := r.Header.Get("x-omniswitch-key-id")
 		if key == "" {
 			key = remoteHost(r.RemoteAddr)
 		}
 		limit := rl.limit
-		if header := r.Header.Get("x-sentinel-rate-limit"); header != "" {
+		if header := r.Header.Get("x-omniswitch-rate-limit"); header != "" {
 			if parsed, err := strconv.Atoi(header); err == nil && parsed > 0 {
 				limit = parsed
 			}
@@ -283,7 +283,7 @@ func CORSMiddlewareWithOrigins(origins []string, next http.Handler) http.Handler
 		}
 		if allowAny || origin != "" {
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-sentinel-provider, x-sentinel-trace-id, x-sentinel-session-id")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-omniswitch-provider, x-omniswitch-trace-id, x-omniswitch-session-id")
 		}
 		if r.Method == http.MethodOptions {
 			if !allowAny {

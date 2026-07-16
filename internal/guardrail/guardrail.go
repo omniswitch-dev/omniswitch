@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"sentinel/internal/provider"
+	"github.com/omniswitch-dev/omniswitch/internal/provider"
 )
 
 type Result struct {

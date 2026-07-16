@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 func TestVaultLifecycle(t *testing.T) {

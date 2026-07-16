@@ -1,4 +1,4 @@
-module sentinel
+module github.com/omniswitch-dev/omniswitch
 
 go 1.24
 

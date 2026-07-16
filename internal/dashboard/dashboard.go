@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 //go:embed static
@@ -125,11 +125,11 @@ func (h *Handler) getProviderMetrics(w http.ResponseWriter, r *http.Request) {
 // authentication middleware owns these internal headers; callers cannot set
 // them when authentication is enabled because it overwrites their values.
 func scopedAPIKeyID(r *http.Request) string {
-	role := r.Header.Get("x-sentinel-role")
+	role := r.Header.Get("x-omniswitch-role")
 	if role == "admin" || role == "owner" {
 		return ""
 	}
-	return r.Header.Get("x-sentinel-key-id")
+	return r.Header.Get("x-omniswitch-key-id")
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {

@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"sentinel/internal/provider"
+	"github.com/omniswitch-dev/omniswitch/internal/provider"
 )
 
 type Cache interface {

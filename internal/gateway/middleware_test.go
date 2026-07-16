@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 func TestAuthMiddlewareSetsKeyHeaders(t *testing.T) {
@@ -30,8 +30,8 @@ func TestAuthMiddlewareSetsKeyHeaders(t *testing.T) {
 
 	var gotKeyID, gotRateLimit string
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotKeyID = r.Header.Get("x-sentinel-key-id")
-		gotRateLimit = r.Header.Get("x-sentinel-rate-limit")
+		gotKeyID = r.Header.Get("x-omniswitch-key-id")
+		gotRateLimit = r.Header.Get("x-omniswitch-rate-limit")
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -64,12 +64,12 @@ func TestAuthMiddlewareDerivesOrganizationAndRejectsSpoofedHeader(t *testing.T) 
 
 	var organizationID string
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		organizationID = r.Header.Get("x-sentinel-organization-id")
+		organizationID = r.Header.Get("x-omniswitch-organization-id")
 		w.WriteHeader(http.StatusNoContent)
 	})
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+rawKey)
-	req.Header.Set("x-sentinel-organization-id", "org_spoofed")
+	req.Header.Set("x-omniswitch-organization-id", "org_spoofed")
 	rec := httptest.NewRecorder()
 	NewAuthMiddleware(st, true).Wrap(next).ServeHTTP(rec, req)
 
@@ -86,8 +86,8 @@ func TestRateLimiterUsesHeaderOverride(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.Header.Set("x-sentinel-key-id", "key_1")
-		req.Header.Set("x-sentinel-rate-limit", "1")
+		req.Header.Set("x-omniswitch-key-id", "key_1")
+		req.Header.Set("x-omniswitch-rate-limit", "1")
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 

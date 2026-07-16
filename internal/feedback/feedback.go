@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 type Handler struct {

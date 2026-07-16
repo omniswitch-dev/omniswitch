@@ -5,9 +5,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/onlychirag/sentinel-ai-gateway/actions"><img src="https://img.shields.io/github/actions/workflow/status/onlychirag/sentinel-ai-gateway/build.yml?branch=main&style=flat-square" alt="Build Status" /></a>
+  <a href="https://github.com/omniswitch-dev/omniswitch/actions"><img src="https://img.shields.io/github/actions/workflow/status/onlychirag/sentinel-ai-gateway/build.yml?branch=main&style=flat-square" alt="Build Status" /></a>
   <a href="https://golang.org"><img src="https://img.shields.io/github/go-mod/go-version/onlychirag/sentinel-ai-gateway?style=flat-square&color=blue" alt="Go Version" /></a>
-  <a href="https://github.com/onlychirag/sentinel-ai-gateway/blob/main/LICENSE"><img src="https://img.shields.io/github/license/onlychirag/sentinel-ai-gateway?style=flat-square&color=emerald" alt="License" /></a>
+  <a href="https://github.com/omniswitch-dev/omniswitch/blob/main/LICENSE"><img src="https://img.shields.io/github/license/onlychirag/sentinel-ai-gateway?style=flat-square&color=emerald" alt="License" /></a>
   <a href="https://omniswitch.dev"><img src="https://img.shields.io/badge/website-omniswitch.dev-purple?style=flat-square" alt="Website" /></a>
 </p>
 
@@ -59,7 +59,7 @@ OmniSwitch is written in Go and compiles to a single binary:
 
 ```bash
 # Clone the repository
-git clone https://github.com/onlychirag/sentinel-ai-gateway.git
+git clone https://github.com/omniswitch-dev/omniswitch.git
 cd sentinel-ai-gateway
 
 # Start the Gateway with your API keys
@@ -118,7 +118,7 @@ routes:
 
 Run the gateway using this configuration file:
 ```bash
-SENTINEL_CONFIG=config.yaml go run ./cmd/gateway
+OMNISWITCH_CONFIG=config.yaml go run ./cmd/gateway
 ```
 
 ---

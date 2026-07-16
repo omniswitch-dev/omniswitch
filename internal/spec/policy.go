@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	APIVersion = "sentinel.dev/v1"
+	APIVersion = "omniswitch.dev/v1"
 	KindPolicy = "Policy"
 	EffectDeny = "deny"
 )

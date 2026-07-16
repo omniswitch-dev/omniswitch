@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 // Vault manages encrypted provider API keys, mapping virtual keys to real

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"sentinel/internal/model"
+	"github.com/omniswitch-dev/omniswitch/internal/model"
 )
 
 func TestEvaluate(t *testing.T) {

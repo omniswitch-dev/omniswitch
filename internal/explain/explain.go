@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"sentinel/internal/model"
+	"github.com/omniswitch-dev/omniswitch/internal/model"
 )
 
 func Format(decision model.Decision) string {

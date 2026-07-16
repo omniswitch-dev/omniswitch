@@ -28,7 +28,7 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 		return func(context.Context) error { return nil }, nil
 	}
 	if cfg.ServiceName == "" {
-		cfg.ServiceName = "sentinel-gateway"
+		cfg.ServiceName = "omniswitch-gateway"
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second

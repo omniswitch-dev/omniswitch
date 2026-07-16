@@ -11,16 +11,16 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"sentinel/internal/explain"
-	"sentinel/internal/model"
-	"sentinel/internal/policy"
-	"sentinel/internal/trace"
+	"github.com/omniswitch-dev/omniswitch/internal/explain"
+	"github.com/omniswitch-dev/omniswitch/internal/model"
+	"github.com/omniswitch-dev/omniswitch/internal/policy"
+	"github.com/omniswitch-dev/omniswitch/internal/trace"
 )
 
 func NewRootCommand(name string) *cobra.Command {
 	root := &cobra.Command{
 		Use:           name,
-		Short:         "Evaluate and inspect Sentinel policies",
+		Short:         "Evaluate and inspect OmniSwitch policies",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -38,7 +38,7 @@ func NewRootCommand(name string) *cobra.Command {
 func newValidateCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "validate <policy_file>",
-		Short: "Compile a Sentinel CEL or sentinel.dev/v1 policy",
+		Short: "Compile a OmniSwitch CEL or omniswitch.dev/v1 policy",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rule, err := policy.RuleFromFile(args[0])

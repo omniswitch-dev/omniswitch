@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"sentinel/internal/model"
+	"github.com/omniswitch-dev/omniswitch/internal/model"
 )
 
 func TestToToolRequest(t *testing.T) {

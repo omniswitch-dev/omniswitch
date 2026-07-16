@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"sentinel/internal/model"
+	"github.com/omniswitch-dev/omniswitch/internal/model"
 )
 
 func TestStdoutLoggerLog(t *testing.T) {

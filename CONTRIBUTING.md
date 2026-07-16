@@ -1,6 +1,6 @@
-# Contributing to Sentinel
+# Contributing to OmniSwitch
 
-Thanks for helping make Sentinel better. This project aims to be a small, understandable, self-hostable AI gateway and agent policy layer.
+Thanks for helping make OmniSwitch better. This project aims to be a small, understandable, self-hostable AI gateway and agent policy layer.
 
 ## Development Setup
 
@@ -19,14 +19,14 @@ Run the gateway locally:
 
 ```bash
 cp .env.example .env
-SENTINEL_CONFIG=examples/gateway-config.yaml go run ./cmd/gateway
+OMNISWITCH_CONFIG=examples/gateway-config.yaml go run ./cmd/gateway
 ```
 
 Run the policy CLI:
 
 ```bash
-go run ./cmd/sentinel validate policies/production-delete.yaml
-go run ./cmd/sentinel test policies/production-delete.yaml examples/requests/delete-prod.json
+go run ./cmd/omniswitch validate policies/production-delete.yaml
+go run ./cmd/omniswitch test policies/production-delete.yaml examples/requests/delete-prod.json
 ```
 
 ## Pull Requests
@@ -41,7 +41,7 @@ Before opening a pull request:
 
 ## Project Boundaries
 
-Sentinel prefers:
+OmniSwitch prefers:
 
 - Local-first operation.
 - OpenAI-compatible APIs where practical.

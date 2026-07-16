@@ -16,7 +16,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
-	"sentinel/internal/provider"
+	"github.com/omniswitch-dev/omniswitch/internal/provider"
 )
 
 // Strategy defines how the router selects a provider.

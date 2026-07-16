@@ -9,8 +9,8 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"sentinel/internal/model"
-	"sentinel/internal/spec"
+	"github.com/omniswitch-dev/omniswitch/internal/model"
+	"github.com/omniswitch-dev/omniswitch/internal/spec"
 )
 
 const KindDecisionTrace = "DecisionTrace"

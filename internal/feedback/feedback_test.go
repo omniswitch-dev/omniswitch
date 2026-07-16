@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 func TestCreateAndListFeedback(t *testing.T) {

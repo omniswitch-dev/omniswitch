@@ -4,9 +4,9 @@ services:
     ports:
       - "8080:8080"
     environment:
-      SENTINEL_CONFIG: examples/gateway-config.yaml
-      SENTINEL_DATA: /data
-      SENTINEL_AUTH: "false"
+      OMNISWITCH_CONFIG: examples/gateway-config.yaml
+      OMNISWITCH_DATA: /data
+      OMNISWITCH_AUTH: "false"
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}

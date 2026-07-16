@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	if err := cli.NewRootCommand("agentctl").Execute(); err != nil {
+	if err := cli.NewRootCommand("omniswitch").Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

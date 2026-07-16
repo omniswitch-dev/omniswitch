@@ -55,7 +55,7 @@ func TestRootCommandTrace(t *testing.T) {
 	dir := t.TempDir()
 	policyPath := filepath.Join(dir, "policy.yaml")
 	requestPath := filepath.Join(dir, "request.json")
-	if err := os.WriteFile(policyPath, []byte(`apiVersion: sentinel.dev/v1
+	if err := os.WriteFile(policyPath, []byte(`apiVersion: omniswitch.dev/v1
 kind: Policy
 metadata:
   name: production-delete
@@ -78,7 +78,7 @@ spec:
 	}
 
 	var output strings.Builder
-	cmd := NewRootCommand("sentinel")
+	cmd := NewRootCommand("omniswitch")
 	cmd.SetOut(&output)
 	cmd.SetArgs([]string{"trace", policyPath, requestPath})
 	if err := cmd.Execute(); err != nil {
@@ -86,7 +86,7 @@ spec:
 	}
 
 	got := output.String()
-	for _, want := range []string{"apiVersion: sentinel.dev/v1", "kind: DecisionTrace", "decisionId:", "production-delete"} {
+	for _, want := range []string{"apiVersion: omniswitch.dev/v1", "kind: DecisionTrace", "decisionId:", "production-delete"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("trace output = %q, want substring %q", got, want)
 		}

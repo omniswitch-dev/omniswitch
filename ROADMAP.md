@@ -1,6 +1,6 @@
 # Roadmap
 
-Sentinel's goal is to become a local-first, open-source control plane for AI gateways and agent systems.
+OmniSwitch's goal is to become a local-first, open-source control plane for AI gateways and agent systems.
 
 ## Near Term
 

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 func TestDashboardAPIRoutes(t *testing.T) {
@@ -39,7 +39,7 @@ func TestDashboardAPIRoutes(t *testing.T) {
 		{name: "metrics", path: "/api/metrics?window=1h", wantStatus: http.StatusOK, wantBody: `"total_requests":1`},
 		{name: "provider metrics", path: "/api/metrics/providers", wantStatus: http.StatusOK, wantBody: `"provider":"openai"`},
 		{name: "health", path: "/api/health", wantStatus: http.StatusOK, wantBody: `"status":"healthy"`},
-		{name: "static dashboard", path: "/", wantStatus: http.StatusOK, wantBody: "<title>Sentinel"},
+		{name: "static dashboard", path: "/", wantStatus: http.StatusOK, wantBody: "<title>OmniSwitch"},
 	}
 
 	for _, tt := range tests {

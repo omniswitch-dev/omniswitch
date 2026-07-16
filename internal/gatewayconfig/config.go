@@ -10,13 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"sentinel/internal/router"
+	"github.com/omniswitch-dev/omniswitch/internal/router"
 
 	"go.yaml.in/yaml/v3"
 )
 
 const (
-	APIVersion = "sentinel.dev/v1"
+	APIVersion = "omniswitch.dev/v1"
 	Kind       = "GatewayConfig"
 )
 
@@ -61,7 +61,7 @@ type MCP struct {
 	Targets  []MCPTarget `json:"targets,omitempty" yaml:"targets,omitempty"`
 }
 
-// Guardrails configures Sentinel's built-in checks and declarative regex
+// Guardrails configures OmniSwitch's built-in checks and declarative regex
 // rules. Actions are keyed by built-in check type, for example injection:
 // deny or pii: redact.
 type Guardrails struct {
@@ -79,7 +79,7 @@ type GuardrailRule struct {
 }
 
 // MCPTarget is a named remote MCP server. Multiple targets are exposed through
-// one Sentinel endpoint and tool names are prefixed with the target name.
+// one OmniSwitch endpoint and tool names are prefixed with the target name.
 type MCPTarget struct {
 	Name     string            `json:"name" yaml:"name"`
 	Upstream string            `json:"upstream" yaml:"upstream"`

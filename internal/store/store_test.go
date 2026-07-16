@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"sentinel/internal/provider"
+	"github.com/omniswitch-dev/omniswitch/internal/provider"
 )
 
 func TestStoreLogsAndMetrics(t *testing.T) {

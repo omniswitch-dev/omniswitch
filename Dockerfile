@@ -5,7 +5,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/sentinel ./cmd/sentinel
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/sentinel ./cmd/omniswitch
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/gateway ./cmd/gateway
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/proxy ./cmd/proxy
 
@@ -19,7 +19,7 @@ COPY policies ./policies
 COPY examples ./examples
 
 EXPOSE 8080
-ENV SENTINEL_LISTEN=:8080
-ENV SENTINEL_DATA=/data
+ENV OMNISWITCH_LISTEN=:8080
+ENV OMNISWITCH_DATA=/data
 
 ENTRYPOINT ["/usr/local/bin/gateway"]

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"sentinel/internal/provider"
+	"github.com/omniswitch-dev/omniswitch/internal/provider"
 
 	_ "modernc.org/sqlite"
 )

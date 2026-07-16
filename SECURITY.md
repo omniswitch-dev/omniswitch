@@ -1,6 +1,6 @@
 # Security Policy
 
-Sentinel is security-sensitive software because it can proxy model traffic, provider credentials, and agent tool calls.
+OmniSwitch is security-sensitive software because it can proxy model traffic, provider credentials, and agent tool calls.
 
 ## Supported Versions
 
@@ -21,6 +21,6 @@ Please include:
 
 ## Secret Handling
 
-Do not commit provider API keys, Sentinel API keys, `.env` files, SQLite data files, decision traces containing secrets, or production policy files with confidential details.
+Do not commit provider API keys, OmniSwitch API keys, `.env` files, SQLite data files, decision traces containing secrets, or production policy files with confidential details.
 
 Provider account config should reference environment variables with `api_key_env` rather than embedding secrets directly.

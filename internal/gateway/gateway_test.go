@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"sentinel/internal/guardrail"
-	"sentinel/internal/provider"
-	"sentinel/internal/router"
-	"sentinel/internal/store"
+	"github.com/omniswitch-dev/omniswitch/internal/guardrail"
+	"github.com/omniswitch-dev/omniswitch/internal/provider"
+	"github.com/omniswitch-dev/omniswitch/internal/router"
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 func TestChatCompletionsAllowPath(t *testing.T) {
@@ -27,8 +27,8 @@ func TestChatCompletionsAllowPath(t *testing.T) {
 		"model":"test-model",
 		"messages":[{"role":"user","content":"hello"}]
 	}`))
-	req.Header.Set("x-sentinel-trace-id", "trace_1")
-	req.Header.Set("x-sentinel-session-id", "session_1")
+	req.Header.Set("x-omniswitch-trace-id", "trace_1")
+	req.Header.Set("x-omniswitch-session-id", "session_1")
 	handler.ChatCompletions(rec, req)
 
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"chat_test"`) {
@@ -48,8 +48,8 @@ func TestChatCompletionsAllowPath(t *testing.T) {
 	if !strings.Contains(logs[0].RequestBody, `"model":"test-model"`) || !strings.Contains(logs[0].ResponseBody, `"id":"chat_test"`) {
 		t.Fatalf("raw log bodies = request %q response %q, want request and response JSON", logs[0].RequestBody, logs[0].ResponseBody)
 	}
-	if rec.Header().Get("x-sentinel-trace-id") != "trace_1" {
-		t.Fatalf("trace response header = %q, want trace_1", rec.Header().Get("x-sentinel-trace-id"))
+	if rec.Header().Get("x-omniswitch-trace-id") != "trace_1" {
+		t.Fatalf("trace response header = %q, want trace_1", rec.Header().Get("x-omniswitch-trace-id"))
 	}
 }
 
@@ -148,8 +148,8 @@ func TestChatCompletionsSemanticCacheHit(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("request %d status = %d, body = %s", i, rec.Code, rec.Body.String())
 		}
-		if i == 1 && rec.Header().Get("x-sentinel-cache") != "HIT" {
-			t.Fatalf("second cache header = %q, want HIT", rec.Header().Get("x-sentinel-cache"))
+		if i == 1 && rec.Header().Get("x-omniswitch-cache") != "HIT" {
+			t.Fatalf("second cache header = %q, want HIT", rec.Header().Get("x-omniswitch-cache"))
 		}
 	}
 	if calls != 1 {
@@ -170,13 +170,13 @@ func TestChatCompletionsCacheIsolatedByAPIKey(t *testing.T) {
 			"model":"test-model",
 			"messages":[{"role":"user","content":"same tenant-sensitive prompt"}]
 		}`))
-		req.Header.Set("x-sentinel-key-id", keyID)
+		req.Header.Set("x-omniswitch-key-id", keyID)
 		handler.ChatCompletions(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("request for %s status = %d, body = %s", keyID, rec.Code, rec.Body.String())
 		}
-		if rec.Header().Get("x-sentinel-cache") != "MISS" {
-			t.Fatalf("request for %s cache = %q, want MISS because cache scope differs", keyID, rec.Header().Get("x-sentinel-cache"))
+		if rec.Header().Get("x-omniswitch-cache") != "MISS" {
+			t.Fatalf("request for %s cache = %q, want MISS because cache scope differs", keyID, rec.Header().Get("x-omniswitch-cache"))
 		}
 	}
 	if calls != 2 {
@@ -286,7 +286,7 @@ func TestChatCompletionsBudgetExceeded(t *testing.T) {
 		"model":"test-model",
 		"messages":[{"role":"user","content":"hello"}]
 	}`))
-	req.Header.Set("x-sentinel-key-id", "key_budget")
+	req.Header.Set("x-omniswitch-key-id", "key_budget")
 	handler.ChatCompletions(rec, req)
 
 	if rec.Code != http.StatusPaymentRequired || !strings.Contains(rec.Body.String(), "budget_exceeded") {

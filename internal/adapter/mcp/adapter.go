@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"sentinel/internal/explain"
-	"sentinel/internal/model"
+	"github.com/omniswitch-dev/omniswitch/internal/explain"
+	"github.com/omniswitch-dev/omniswitch/internal/model"
 )
 
 type Request struct {

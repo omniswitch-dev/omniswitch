@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"sentinel/internal/provider"
+	"github.com/omniswitch-dev/omniswitch/internal/provider"
 )
 
 func TestVectorizeSimilarity(t *testing.T) {

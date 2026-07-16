@@ -10,7 +10,7 @@ import (
 
 func TestParseYAMLConfig(t *testing.T) {
 	threshold := 0.88
-	data := []byte(`apiVersion: sentinel.dev/v1
+	data := []byte(`apiVersion: omniswitch.dev/v1
 kind: GatewayConfig
 gateway:
   listen: ":9090"
@@ -99,7 +99,7 @@ routes:
 
 func TestParseJSONConfig(t *testing.T) {
 	data := []byte(`{
-		"apiVersion": "sentinel.dev/v1",
+		"apiVersion": "omniswitch.dev/v1",
 		"kind": "GatewayConfig",
 		"gateway": {"cache_ttl": "30m"},
 		"routes": {"logical": {"provider": "openai"}}

@@ -1,13 +1,13 @@
 # Configuration
 
-Sentinel can be configured with environment variables or a declarative config file.
+OmniSwitch can be configured with environment variables or a declarative config file.
 
 ## Gateway Config
 
-Set `SENTINEL_CONFIG` to a YAML or JSON file:
+Set `OMNISWITCH_CONFIG` to a YAML or JSON file:
 
 ```bash
-SENTINEL_CONFIG=examples/gateway-config.yaml go run ./cmd/gateway
+OMNISWITCH_CONFIG=examples/gateway-config.yaml go run ./cmd/gateway
 ```
 
 Environment variables are applied after the config file and override file values.
@@ -15,12 +15,12 @@ Environment variables are applied after the config file and override file values
 ## Example
 
 ```yaml
-apiVersion: sentinel.dev/v1
+apiVersion: omniswitch.dev/v1
 kind: GatewayConfig
 
 gateway:
   listen: ":8080"
-  data_dir: ".sentinel"
+  data_dir: ".omniswitch"
   auth: true
   cache_threshold: 0.95
   cache_ttl: 24h
@@ -50,7 +50,7 @@ guardrails:
 observability:
   otel_enabled: true
   otlp_endpoint: http://localhost:4318/v1/traces
-  service_name: sentinel-gateway
+  service_name: omniswitch-gateway
   insecure: true
   timeout: 10s
   prometheus_enabled: true
@@ -138,18 +138,18 @@ providers:
 
 ## Observability
 
-Sentinel can export gateway and provider spans to any OTLP-compatible backend.
+OmniSwitch can export gateway and provider spans to any OTLP-compatible backend.
 
 ```yaml
 observability:
   otel_enabled: true
   otlp_endpoint: http://localhost:4318/v1/traces
-  service_name: sentinel-gateway
+  service_name: omniswitch-gateway
   headers:
     x-api-key: observability-secret
 ```
 
-Setting `SENTINEL_OTEL_ENDPOINT` also enables tracing.
+Setting `OMNISWITCH_OTEL_ENDPOINT` also enables tracing.
 
 Set `prometheus_enabled: true` (the runtime default) to expose the lightweight
 Prometheus endpoint at `GET /metrics`. When authentication is enabled, this
@@ -170,11 +170,11 @@ limits. The write timeout defaults to `0s` so long-running SSE streams are not
 cut off; set a positive value only when streaming is not required.
 
 When `auth: true` is used on an empty database, set
-`SENTINEL_BOOTSTRAP_API_KEY` for the first process start. Sentinel stores only
+`OMNISWITCH_BOOTSTRAP_API_KEY` for the first process start. OmniSwitch stores only
 its SHA-256 hash and creates the `bootstrap-admin` owner key. Store the secret
 in an environment-injection or secret-manager mechanism, then rotate it into a
-normal key and remove the bootstrap variable. `SENTINEL_BOOTSTRAP_ROLE` may be
-`owner` (default) or `admin`; `SENTINEL_BOOTSTRAP_WORKSPACE` is optional.
+normal key and remove the bootstrap variable. `OMNISWITCH_BOOTSTRAP_ROLE` may be
+`owner` (default) or `admin`; `OMNISWITCH_BOOTSTRAP_WORKSPACE` is optional.
 
 ## Routing
 
@@ -202,13 +202,13 @@ stream output a trusted-provider trade-off.
 The legacy `upstream` is a default HTTP MCP upstream. `targets` adds federated
 HTTP MCP servers. `tools/list` combines allowed target tools under stable
 `target__tool` names, and `tools/call` dispatches the prefixed tool to the
-matching upstream with the target's policy and configured headers. Sentinel
+matching upstream with the target's policy and configured headers. OmniSwitch
 currently supports HTTP MCP transport here; stdio, SSE/streamable transport,
 OAuth delegation, and A2A are not implemented.
 
 ## Provider Vault
 
-Set `SENTINEL_VAULT_KEY` before creating virtual keys so encrypted provider credentials remain decryptable after restart.
+Set `OMNISWITCH_VAULT_KEY` before creating virtual keys so encrypted provider credentials remain decryptable after restart.
 
 ```bash
 curl -X POST http://localhost:8080/api/virtual-keys \
@@ -225,38 +225,38 @@ curl -X POST http://localhost:8080/api/virtual-keys \
 
 ## Environment Variables
 
-- `SENTINEL_LISTEN`
-- `SENTINEL_DATA`
-- `SENTINEL_AUTH`
-- `SENTINEL_BOOTSTRAP_API_KEY`
-- `SENTINEL_BOOTSTRAP_WORKSPACE`
-- `SENTINEL_BOOTSTRAP_ROLE`
-- `SENTINEL_CACHE_THRESHOLD`
-- `SENTINEL_CACHE_TTL`
-- `SENTINEL_CACHE_SCOPE`
-- `SENTINEL_LOG_PAYLOADS`
-- `SENTINEL_CORS_ORIGINS`
-- `SENTINEL_GUARDRAIL_STREAM_BUFFER`
-- `SENTINEL_MAX_REQUEST_BYTES`
-- `SENTINEL_READ_HEADER_TIMEOUT`
-- `SENTINEL_READ_TIMEOUT`
-- `SENTINEL_WRITE_TIMEOUT`
-- `SENTINEL_IDLE_TIMEOUT`
-- `SENTINEL_CIRCUIT_BREAKER_FAILURES`
-- `SENTINEL_CIRCUIT_BREAKER_COOLDOWN`
-- `SENTINEL_SHADOW_PROVIDER`
-- `SENTINEL_AB_TEST`
-- `SENTINEL_OTEL_ENABLED`
-- `SENTINEL_OTEL_ENDPOINT`
-- `SENTINEL_OTEL_SERVICE_NAME`
-- `SENTINEL_OTEL_HEADERS`
-- `SENTINEL_OTEL_INSECURE`
-- `SENTINEL_OTEL_TIMEOUT`
-- `SENTINEL_PROMETHEUS_ENABLED`
-- `SENTINEL_VAULT_KEY`
-- `SENTINEL_MCP_ENABLED`
-- `SENTINEL_MCP_POLICY`
-- `SENTINEL_MCP_UPSTREAM`
+- `OMNISWITCH_LISTEN`
+- `OMNISWITCH_DATA`
+- `OMNISWITCH_AUTH`
+- `OMNISWITCH_BOOTSTRAP_API_KEY`
+- `OMNISWITCH_BOOTSTRAP_WORKSPACE`
+- `OMNISWITCH_BOOTSTRAP_ROLE`
+- `OMNISWITCH_CACHE_THRESHOLD`
+- `OMNISWITCH_CACHE_TTL`
+- `OMNISWITCH_CACHE_SCOPE`
+- `OMNISWITCH_LOG_PAYLOADS`
+- `OMNISWITCH_CORS_ORIGINS`
+- `OMNISWITCH_GUARDRAIL_STREAM_BUFFER`
+- `OMNISWITCH_MAX_REQUEST_BYTES`
+- `OMNISWITCH_READ_HEADER_TIMEOUT`
+- `OMNISWITCH_READ_TIMEOUT`
+- `OMNISWITCH_WRITE_TIMEOUT`
+- `OMNISWITCH_IDLE_TIMEOUT`
+- `OMNISWITCH_CIRCUIT_BREAKER_FAILURES`
+- `OMNISWITCH_CIRCUIT_BREAKER_COOLDOWN`
+- `OMNISWITCH_SHADOW_PROVIDER`
+- `OMNISWITCH_AB_TEST`
+- `OMNISWITCH_OTEL_ENABLED`
+- `OMNISWITCH_OTEL_ENDPOINT`
+- `OMNISWITCH_OTEL_SERVICE_NAME`
+- `OMNISWITCH_OTEL_HEADERS`
+- `OMNISWITCH_OTEL_INSECURE`
+- `OMNISWITCH_OTEL_TIMEOUT`
+- `OMNISWITCH_PROMETHEUS_ENABLED`
+- `OMNISWITCH_VAULT_KEY`
+- `OMNISWITCH_MCP_ENABLED`
+- `OMNISWITCH_MCP_POLICY`
+- `OMNISWITCH_MCP_UPSTREAM`
 - `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`
 - `GOOGLE_API_KEY`

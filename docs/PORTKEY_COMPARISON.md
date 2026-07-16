@@ -4,11 +4,11 @@ This is a capability map, not a claim of commercial or protocol parity. It
 captures the options exposed by [Portkey's AI Gateway](https://portkey.ai/docs/product/ai-gateway),
 [Portkey Guardrails](https://portkey.ai/docs/product/guardrails), and the
 [AgentGateway project](https://github.com/agentgateway/agentgateway), then
-states exactly what Sentinel implements today.
+states exactly what OmniSwitch implements today.
 
 ## Feature Availability Matrix
 
-| Area | Portkey options | AgentGateway options | Sentinel status and option |
+| Area | Portkey options | AgentGateway options | OmniSwitch status and option |
 | --- | --- | --- | --- |
 | Unified inference API | Universal REST/SDK API across models and multimodal endpoints | OpenAI-compatible routing to cloud and local providers | **Partial:** `/v1/chat/completions`, `/v1/models`, `/v1/responses` text subset, `/v1/messages` core subset, and `/v1/embeddings` |
 | Provider coverage | Large managed provider/model catalog, virtual keys, custom hosts | OpenAI, Anthropic, Gemini, Bedrock and provider backends | **Partial:** native OpenAI, Anthropic, Google, Groq; any OpenAI-compatible `custom` endpoint and aliases. No native Bedrock/Vertex/Cohere adapter yet |
@@ -25,7 +25,7 @@ states exactly what Sentinel implements today.
 | Kubernetes/control plane | Hosted and self-hosted gateway configuration | Standalone plus Kubernetes Gateway API/controller and inference extensions | **Missing:** single-process self-hosted runtime only; no controller, CRDs, or inference-aware routing |
 | High availability/data plane | Managed platform plus self-hosted gateway | Rust proxy/control plane deployment model | **Missing:** SQLite and local in-memory rate limiting; no shared database, config hot reload, or HA control plane |
 
-## Sentinel Configuration Options Added for This Comparison
+## OmniSwitch Configuration Options Added for This Comparison
 
 ```yaml
 gateway:
@@ -75,15 +75,15 @@ mcp:
       headers: {x-api-key: "${GITHUB_MCP_TOKEN}"}
 ```
 
-Environment-only production options include `SENTINEL_BOOTSTRAP_API_KEY`,
-`SENTINEL_CACHE_SCOPE`, `SENTINEL_LOG_PAYLOADS`, `SENTINEL_CORS_ORIGINS`,
-`SENTINEL_GUARDRAIL_STREAM_BUFFER`, request/server timeout variables, circuit
-breaker variables, and `SENTINEL_PROMETHEUS_ENABLED`. See
+Environment-only production options include `OMNISWITCH_BOOTSTRAP_API_KEY`,
+`OMNISWITCH_CACHE_SCOPE`, `OMNISWITCH_LOG_PAYLOADS`, `OMNISWITCH_CORS_ORIGINS`,
+`OMNISWITCH_GUARDRAIL_STREAM_BUFFER`, request/server timeout variables, circuit
+breaker variables, and `OMNISWITCH_PROMETHEUS_ENABLED`. See
 [Configuration](CONFIGURATION.md) for the complete list.
 
 ## Important Parity Boundaries
 
-Sentinel now covers the highest-leverage gateway baseline—safe cache tenancy,
+OmniSwitch now covers the highest-leverage gateway baseline—safe cache tenancy,
 auth bootstrap/RBAC, declarative routing and request shaping, core compatibility
 endpoints, deterministic guardrails, and HTTP MCP federation. It is still not a
 drop-in replacement for either larger platform. The largest gaps are native

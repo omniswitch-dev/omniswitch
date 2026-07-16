@@ -1,11 +1,11 @@
-# sentinel.dev/v1
+# omniswitch.dev/v1
 
-Sentinel's long-term moat is a portable policy and decision format. The current MVP supports two document kinds.
+OmniSwitch's long-term moat is a portable policy and decision format. The current MVP supports two document kinds.
 
 ## Policy
 
 ```yaml
-apiVersion: sentinel.dev/v1
+apiVersion: omniswitch.dev/v1
 kind: Policy
 metadata:
   name: production-delete
@@ -24,7 +24,7 @@ spec:
 ## DecisionTrace
 
 ```yaml
-apiVersion: sentinel.dev/v1
+apiVersion: omniswitch.dev/v1
 kind: DecisionTrace
 metadata:
   decisionId: dec_...
@@ -46,4 +46,4 @@ spec:
       effect: deny
 ```
 
-This is the basis for `sentinel replay`, `sentinel diff`, incident investigation, policy simulation, and future compliance evidence.
+This is the basis for `omniswitch replay`, `omniswitch diff`, incident investigation, policy simulation, and future compliance evidence.

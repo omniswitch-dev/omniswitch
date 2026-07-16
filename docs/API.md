@@ -1,6 +1,6 @@
 # API Reference
 
-Sentinel exposes OpenAI-compatible inference endpoints and Sentinel management endpoints.
+OmniSwitch exposes OpenAI-compatible inference endpoints and OmniSwitch management endpoints.
 
 ## OpenAI-Compatible Gateway
 
@@ -21,13 +21,13 @@ Supported request features:
 
 Headers:
 
-- `Authorization: Bearer <sentinel-api-key>` when `SENTINEL_AUTH=true`
-- `x-sentinel-provider`: force a provider or provider alias
-- `x-sentinel-shadow-provider`: run a secondary provider asynchronously
-- `x-sentinel-trace-id`: group calls into a trace
-- `x-sentinel-session-id`: group calls into an agent session
+- `Authorization: Bearer <omniswitch-api-key>` when `OMNISWITCH_AUTH=true`
+- `x-omniswitch-provider`: force a provider or provider alias
+- `x-omniswitch-shadow-provider`: run a secondary provider asynchronously
+- `x-omniswitch-trace-id`: group calls into a trace
+- `x-omniswitch-session-id`: group calls into an agent session
 
-Streaming is available on this endpoint with `stream: true`. Sentinel's default
+Streaming is available on this endpoint with `stream: true`. OmniSwitch's default
 guardrail mode buffers stream output before emitting SSE so output policies can
 be enforced.
 
@@ -43,7 +43,7 @@ background mode, and other advanced Responses features are not yet supported.
 
 Accepts the core Anthropic Messages shape (`model`, `messages`, `system`,
 `max_tokens`, `temperature`, `top_p`) and returns an Anthropic-style message
-result through the common Sentinel path. Streaming and Anthropic tool use are
+result through the common OmniSwitch path. Streaming and Anthropic tool use are
 not yet supported.
 
 ### `POST /v1/embeddings`
@@ -118,7 +118,7 @@ Stores an encrypted provider credential and exposes it as a virtual provider on 
 }
 ```
 
-The response redacts `provider_key`. Use `SENTINEL_VAULT_KEY` to keep stored credentials decryptable across restarts.
+The response redacts `provider_key`. Use `OMNISWITCH_VAULT_KEY` to keep stored credentials decryptable across restarts.
 
 ### `GET /api/virtual-keys`
 
@@ -170,7 +170,7 @@ Records human feedback.
 
 ### `POST /api/keys`
 
-Creates a Sentinel API key.
+Creates a OmniSwitch API key.
 
 ```json
 {
@@ -272,7 +272,7 @@ Renders a prompt template with variables.
 
 ### `POST /api/evals/policy`
 
-Replays a batch of tool requests against one or more Sentinel policy files.
+Replays a batch of tool requests against one or more OmniSwitch policy files.
 
 ```json
 {
@@ -298,7 +298,7 @@ The response includes aggregate `allowed`, `denied`, and `errors` counts plus ea
 
 ### `POST /mcp`
 
-Evaluates MCP JSON-RPC `tools/call` requests through Sentinel policy and forwards allowed requests upstream. With `mcp.targets` configured, `tools/list` federates tools from each target under `target__tool` names and `tools/call` dispatches the prefixed name to its owning target. Target headers are configured server-side and Sentinel credentials are not forwarded upstream.
+Evaluates MCP JSON-RPC `tools/call` requests through OmniSwitch policy and forwards allowed requests upstream. With `mcp.targets` configured, `tools/list` federates tools from each target under `target__tool` names and `tools/call` dispatches the prefixed name to its owning target. Target headers are configured server-side and OmniSwitch credentials are not forwarded upstream.
 
 ### `POST /v1/mcp/tools/call`
 
@@ -309,7 +309,7 @@ It does not yet implement stdio, SSE/streamable HTTP, OAuth delegation, or A2A.
 
 ## Roles and Scopes
 
-When `SENTINEL_AUTH=true`, API-key roles are `viewer`, `member`, `admin`, and
+When `OMNISWITCH_AUTH=true`, API-key roles are `viewer`, `member`, `admin`, and
 `owner`. All valid keys can call inference and MCP. Viewers can read dashboard
 data (scoped to their own key); members can change prompts and run policy evals;
 admins/owners can mutate keys, virtual keys, and organization/workspace data.

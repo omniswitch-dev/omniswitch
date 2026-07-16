@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"sentinel/internal/provider"
+	"github.com/omniswitch-dev/omniswitch/internal/provider"
 )
 
 func TestEvaluateInput(t *testing.T) {
