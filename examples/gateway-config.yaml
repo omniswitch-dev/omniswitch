@@ -4,10 +4,39 @@ kind: GatewayConfig
 gateway:
   listen: ":8080"
   data_dir: ".sentinel"
-  auth: false
+  # Set true in production, along with SENTINEL_BOOTSTRAP_API_KEY on the first run.
+  auth: true
   cache_threshold: 0.95
   cache_ttl: 24h
+  # api_key is the safest default. workspace allows a workspace to share cache;
+  # global must only be used for strictly public, tenant-independent prompts.
+  cache_scope: api_key
+  # Keep request and completion text out of SQLite unless explicitly needed.
+  log_payloads: false
+  cors_origins:
+    - https://app.example.com
+  circuit_breaker_failures: 5
+  circuit_breaker_cooldown: 60s
+  max_request_bytes: 10485760
+  read_header_timeout: 5s
+  read_timeout: 30s
+  write_timeout: 0s
+  idle_timeout: 60s
   shadow_provider: ""
+
+guardrails:
+  # Supported actions: deny, redact, warn, and log. deny/redact change the
+  # response; warn/log create structured guardrail audit events.
+  actions:
+    injection: deny
+    pii: redact
+  stream_buffer: true
+  rules:
+    - name: block-internal-secret-marker
+      stage: both
+      pattern: '(?i)internal-secret'
+      action: deny
+      message: Sensitive marker detected
 
 observability:
   otel_enabled: false
@@ -15,6 +44,7 @@ observability:
   service_name: sentinel-gateway
   insecure: true
   timeout: 10s
+  prometheus_enabled: true
 
 providers:
   # Built-in providers (auto-detected type)
@@ -64,9 +94,27 @@ mcp:
   enabled: true
   policy: policies/production-delete.yaml
   upstream: http://127.0.0.1:8090/mcp
+  # HTTP MCP targets are federated at /mcp. Sentinel prefixes tools as
+  # <target>__<tool> to avoid collisions and applies the target policy.
+  targets:
+    - name: github
+      upstream: http://127.0.0.1:8091/mcp
+      policy: policies/production-delete.yaml
+      headers:
+        x-api-key: "${GITHUB_MCP_TOKEN}"
 
 routes:
   fast-chat:
+    default_params:
+      temperature: 0.2
+    override_params:
+      max_tokens: 1000
+    drop_params: [logprobs]
+    timeout: 30s
+    max_retries: 2
+    retry_backoff: 500ms
+    retry_codes: [429, 500, 502, 503, 504]
+    fallbacks: ["@anthropic-prod"]
     variants:
       - name: openai-prod
         provider: "@openai-prod"
@@ -83,3 +131,5 @@ routes:
         provider: "@anthropic-prod"
         model: "@anthropic-prod/claude-3-5-haiku-20241022"
         weight: 10
+        # CEL variables: model and prompt
+        condition: 'model == "canary-chat"'

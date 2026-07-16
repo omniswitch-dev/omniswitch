@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,7 @@ import (
 
 	"sentinel/internal/gatewayconfig"
 	"sentinel/internal/provider"
+	"sentinel/internal/store"
 )
 
 func TestEnvFloat(t *testing.T) {
@@ -233,6 +236,40 @@ func TestParseHeaderListAndExpansion(t *testing.T) {
 	}
 }
 
+func TestEnsureBootstrapKey(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New() error = %v", err)
+	}
+	defer st.Close()
+
+	settings := runtimeSettings{authEnabled: true, bootstrapAPIKey: "sk-sentinel-bootstrap-secret"}
+	if err := ensureBootstrapKey(context.Background(), st, settings); err != nil {
+		t.Fatalf("ensureBootstrapKey() error = %v", err)
+	}
+	key, err := st.GetAPIKeyByHash(context.Background(), sha256Hex(settings.bootstrapAPIKey))
+	if err != nil {
+		t.Fatalf("bootstrap key lookup error = %v", err)
+	}
+	if key.ID != "bootstrap-admin" || key.Role != "owner" || !key.Enabled {
+		t.Fatalf("bootstrap key = %+v, want enabled owner", key)
+	}
+
+	empty, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New(empty) error = %v", err)
+	}
+	defer empty.Close()
+	if err := ensureBootstrapKey(context.Background(), empty, runtimeSettings{authEnabled: true}); err == nil {
+		t.Fatal("ensureBootstrapKey() error = nil, want missing bootstrap key error")
+	}
+}
+
+func sha256Hex(value string) string {
+	hash := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(hash[:])
+}
+
 func clearGatewayEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
@@ -254,6 +291,9 @@ func clearGatewayEnv(t *testing.T) {
 		"SENTINEL_OTEL_INSECURE",
 		"SENTINEL_OTEL_TIMEOUT",
 		"SENTINEL_VAULT_KEY",
+		"SENTINEL_BOOTSTRAP_API_KEY",
+		"SENTINEL_BOOTSTRAP_WORKSPACE",
+		"SENTINEL_BOOTSTRAP_ROLE",
 	} {
 		t.Setenv(key, "")
 	}

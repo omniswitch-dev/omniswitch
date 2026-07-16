@@ -130,6 +130,17 @@ func TestLoadFile(t *testing.T) {
 	}
 }
 
+func TestRepositoryExampleConfig(t *testing.T) {
+	path := filepath.Join("..", "..", "examples", "gateway-config.yaml")
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile(example) error = %v", err)
+	}
+	if cfg.Gateway.CacheScope != "api_key" || len(cfg.MCP.Targets) != 1 || cfg.Routes["fast-chat"].Timeout != "30s" {
+		t.Fatalf("example config = %+v, want expanded production options", cfg)
+	}
+}
+
 func TestValidateRejectsInvalidRoute(t *testing.T) {
 	_, err := Parse([]byte(`routes: {logical: {variants: [{provider: openai, weight: 0}]}}`), ".yaml")
 	if err == nil || !strings.Contains(err.Error(), "weight must be positive") {
@@ -148,5 +159,12 @@ func TestValidateRejectsInvalidObservabilityTimeout(t *testing.T) {
 	_, err := Parse([]byte(`observability: {timeout: -1s}`), ".yaml")
 	if err == nil || !strings.Contains(err.Error(), "observability.timeout") {
 		t.Fatalf("Parse() error = %v, want observability timeout validation", err)
+	}
+}
+
+func TestValidateRejectsUnsupportedGuardrailAction(t *testing.T) {
+	_, err := Parse([]byte(`guardrails: {rules: [{name: test, pattern: test, action: retry}]}`), ".yaml")
+	if err == nil || !strings.Contains(err.Error(), "action must be deny, redact, warn, or log") {
+		t.Fatalf("Parse() error = %v, want guardrail action validation", err)
 	}
 }

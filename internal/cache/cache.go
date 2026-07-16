@@ -20,8 +20,16 @@ type Cache interface {
 var tokenPattern = regexp.MustCompile(`[a-z0-9]+`)
 
 func Key(providerName string, req provider.ChatRequest) (string, error) {
+	return KeyWithScope("", providerName, req)
+}
+
+// KeyWithScope derives an exact-cache key that is isolated to the supplied
+// tenant scope. Keeping scope in the key prevents identical prompts from
+// different workspaces or API keys sharing a cached completion.
+func KeyWithScope(scope, providerName string, req provider.ChatRequest) (string, error) {
 	req.Stream = false
 	payload := struct {
+		Scope       string             `json:"scope,omitempty"`
 		Provider    string             `json:"provider"`
 		Model       string             `json:"model"`
 		Messages    []provider.Message `json:"messages"`
@@ -30,6 +38,7 @@ func Key(providerName string, req provider.ChatRequest) (string, error) {
 		TopP        *float64           `json:"top_p,omitempty"`
 		Stop        []string           `json:"stop,omitempty"`
 	}{
+		Scope:       scope,
 		Provider:    providerName,
 		Model:       req.Model,
 		Messages:    req.Messages,

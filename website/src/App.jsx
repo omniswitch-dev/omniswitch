@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import Docs from './Docs';
 import ApiReference from './ApiReference';
+import Comparison from './Comparison';
 import './index.css';
 
 function App() {
@@ -78,6 +79,7 @@ function App() {
           <a href="#" onClick={() => navigate('home')} className={currentPage === 'home' ? 'nav-link active-link' : 'nav-link'}>Product</a>
           <a href="#" onClick={() => navigate('docs')} className={currentPage === 'docs' ? 'nav-link active-link' : 'nav-link'}>Docs</a>
           <a href="#" onClick={() => navigate('api')} className={currentPage === 'api' ? 'nav-link active-link' : 'nav-link'}>API Reference</a>
+          <a href="#" onClick={() => navigate('comparison')} className={currentPage === 'comparison' ? 'nav-link active-link' : 'nav-link'}>Compare</a>
           <a href="#" onClick={() => navigate('about')} className={currentPage === 'about' ? 'nav-link active-link' : 'nav-link'}>About</a>
           <a href="https://github.com/onlychirag/sentinel-ai-gateway" target="_blank" rel="noreferrer" className="nav-link">GitHub <ExternalLink size={12} /></a>
           <a href="https://github.com/onlychirag/sentinel-ai-gateway" target="_blank" rel="noreferrer" className="btn-primary mobile-only-btn">
@@ -98,6 +100,7 @@ function App() {
       {currentPage === 'home' && <Home navigate={navigate} />}
       {currentPage === 'docs' && <Docs />}
       {currentPage === 'api' && <ApiReference />}
+      {currentPage === 'comparison' && <Comparison />}
       {currentPage === 'about' && <About />}
 
       {/* Footer */}
@@ -114,7 +117,7 @@ function App() {
           <div className="footer-col">
             <h4>Product</h4>
             <a href="#" onClick={() => navigate('home')}>Features</a>
-            <a href="#" onClick={() => navigate('home')}>Comparison</a>
+            <a href="#" onClick={() => navigate('comparison')}>Comparison</a>
             <a href="#" onClick={() => navigate('api')}>API Reference</a>
             <a href="https://github.com/onlychirag/sentinel-ai-gateway/releases" target="_blank" rel="noreferrer">Changelog</a>
           </div>

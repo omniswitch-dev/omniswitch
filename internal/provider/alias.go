@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"strings"
 )
 
@@ -75,6 +76,23 @@ func (p *AliasProvider) ChatCompletionStream(ctx context.Context, req ChatReques
 		resp.Model = originalModel
 	}
 	return StreamFromResponse(ctx, resp), meta, nil
+}
+
+func (p *AliasProvider) Embeddings(ctx context.Context, req EmbeddingRequest) (EmbeddingResponse, ProviderMeta, error) {
+	provider, ok := p.inner.(EmbeddingProvider)
+	if !ok {
+		return EmbeddingResponse{}, ProviderMeta{Provider: p.name, Model: req.Model}, fmt.Errorf("provider %q does not support embeddings", p.inner.Name())
+	}
+	originalModel := req.Model
+	req.Model = p.stripModel(req.Model)
+	response, meta, err := provider.Embeddings(ctx, req)
+	meta.ProviderType = p.inner.Name()
+	meta.Provider = p.name
+	meta.Model = originalModel
+	if response.Model != "" {
+		response.Model = originalModel
+	}
+	return response, meta, err
 }
 
 func (p *AliasProvider) stripModel(model string) string {

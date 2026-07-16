@@ -148,6 +148,34 @@ type StreamProvider interface {
 	ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan ChatResponseChunk, ProviderMeta, error)
 }
 
+// EmbeddingRequest and EmbeddingResponse mirror the OpenAI embeddings API.
+// Input intentionally remains JSON-compatible because providers accept either
+// one string, token IDs, or an array of strings.
+type EmbeddingRequest struct {
+	Model          string `json:"model"`
+	Input          any    `json:"input"`
+	EncodingFormat string `json:"encoding_format,omitempty"`
+	Dimensions     *int   `json:"dimensions,omitempty"`
+	User           string `json:"user,omitempty"`
+}
+
+type Embedding struct {
+	Object    string    `json:"object"`
+	Index     int       `json:"index"`
+	Embedding []float64 `json:"embedding"`
+}
+
+type EmbeddingResponse struct {
+	Object string      `json:"object"`
+	Data   []Embedding `json:"data"`
+	Model  string      `json:"model"`
+	Usage  Usage       `json:"usage"`
+}
+
+type EmbeddingProvider interface {
+	Embeddings(ctx context.Context, req EmbeddingRequest) (EmbeddingResponse, ProviderMeta, error)
+}
+
 type ChatResponseChunk struct {
 	ID      string        `json:"id"`
 	Object  string        `json:"object"`

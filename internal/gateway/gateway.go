@@ -25,13 +25,17 @@ import (
 
 // Handler serves the OpenAI-compatible /v1/chat/completions API.
 type Handler struct {
-	registry       *provider.Registry
-	router         *router.Router
-	store          *store.Store
-	guardrails     *guardrail.Engine
-	cacheThreshold float64
-	cacheTTL       time.Duration
-	shadowProvider string
+	registry              *provider.Registry
+	router                *router.Router
+	store                 *store.Store
+	guardrails            *guardrail.Engine
+	cacheThreshold        float64
+	cacheTTL              time.Duration
+	cacheScope            string
+	logPayloads           bool
+	streamGuardrailBuffer bool
+	maxRequestBytes       int64
+	shadowProvider        string
 }
 
 // New creates a new gateway handler.
@@ -43,6 +47,12 @@ func New(registry *provider.Registry, rtr *router.Router, st *store.Store, gr *g
 		guardrails:     gr,
 		cacheThreshold: 0.95,
 		cacheTTL:       24 * time.Hour,
+		cacheScope:     "api_key",
+		// Preserve the previous package-level behavior for embedders. The gateway
+		// binary explicitly disables this unless configured otherwise.
+		logPayloads:           true,
+		streamGuardrailBuffer: true,
+		maxRequestBytes:       10 << 20,
 	}
 }
 
@@ -52,6 +62,32 @@ func (h *Handler) SetSemanticCache(threshold float64) {
 
 func (h *Handler) SetCacheTTL(ttl time.Duration) {
 	h.cacheTTL = ttl
+}
+
+func (h *Handler) SetCacheScope(scope string) {
+	switch strings.TrimSpace(scope) {
+	case "workspace", "organization", "global", "api_key":
+		h.cacheScope = scope
+	default:
+		h.cacheScope = "api_key"
+	}
+}
+
+func (h *Handler) SetLogPayloads(enabled bool) {
+	h.logPayloads = enabled
+}
+
+// SetStreamGuardrailBuffer prevents output from being emitted before output
+// guardrails have inspected it. Disabling it trades protection for lower
+// first-token latency and is therefore only appropriate for trusted traffic.
+func (h *Handler) SetStreamGuardrailBuffer(enabled bool) {
+	h.streamGuardrailBuffer = enabled
+}
+
+func (h *Handler) SetMaxRequestBytes(limit int64) {
+	if limit > 0 {
+		h.maxRequestBytes = limit
+	}
 }
 
 func (h *Handler) SetShadowProvider(providerName string) {
@@ -78,6 +114,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxRequestBytes)
 	var req provider.ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
@@ -85,13 +122,22 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
+	transformed, err := h.router.TransformRequest(req)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "invalid route transformation")
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req = transformed
 
 	reqID := newRequestID()
 	traceID := requestHeaderOrNew(r, "x-sentinel-trace-id", "trace")
 	sessionID := r.Header.Get("x-sentinel-session-id")
 	providerHint := r.Header.Get("x-sentinel-provider")
-	shadowHint := firstNonEmpty(r.Header.Get("x-sentinel-shadow-provider"), h.shadowProvider)
+	shadowHint := firstNonEmpty(r.Header.Get("x-sentinel-shadow-provider"), h.router.ShadowProviderForModel(req.Model), h.shadowProvider)
 	apiKeyID := r.Header.Get("x-sentinel-key-id")
+	tenantCacheScope := h.tenantCacheScope(r)
 	ctx = WithRequestID(r.Context(), reqID)
 	ctx = WithTraceID(ctx, traceID)
 	ctx = WithSessionID(ctx, sessionID)
@@ -123,6 +169,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Input guardrails.
 	if h.guardrails != nil {
 		results := h.guardrails.EvaluateInput(req.Messages)
+		h.recordGuardrailResults(ctx, reqID, results)
 		for _, gr := range results {
 			if gr.Action == "deny" {
 				span.SetAttributes(
@@ -147,7 +194,19 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	backendReq := req
 	backendReq.Stream = false
 	cacheProvider := firstNonEmpty(providerHint, "auto")
-	if cachedResp, ok := h.cachedResponse(ctx, cacheProvider, backendReq); ok {
+	if cachedResp, ok := h.cachedResponse(ctx, tenantCacheScope, cacheProvider, backendReq); ok {
+		if denied, _, reason := h.outputGuardrailDisposition(ctx, reqID, cachedResp); denied {
+			h.logRequest(ctx, logContext{
+				ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &cachedResp,
+				APIKeyID: apiKeyID, Status: "denied", ErrorMessage: reason, Cached: true,
+			})
+			w.Header().Set("x-sentinel-trace-id", traceID)
+			w.Header().Set("x-sentinel-session-id", sessionID)
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error": map[string]string{"message": reason, "type": "guardrail", "code": "guardrail_triggered"},
+			})
+			return
+		}
 		meta := provider.ProviderMeta{Provider: "semantic-cache", Model: req.Model, Cached: true, Timestamp: time.Now().UTC()}
 		span.SetAttributes(
 			attribute.String("sentinel.decision", "ALLOW"),
@@ -172,7 +231,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if req.Stream {
 		h.streamProviderResponse(w, ctx, streamContext{
 			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, BackendRequest: backendReq,
-			ProviderHint: providerHint, ShadowHint: shadowHint, APIKeyID: apiKeyID, CacheProvider: cacheProvider,
+			ProviderHint: providerHint, ShadowHint: shadowHint, APIKeyID: apiKeyID, CacheProvider: cacheProvider, CacheScope: tenantCacheScope,
 		})
 		return
 	}
@@ -193,32 +252,27 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Output guardrails.
-	if h.guardrails != nil && len(resp.Choices) > 0 {
-		results := h.guardrails.EvaluateOutput(resp.Choices[0].Message.Content)
-		for _, gr := range results {
-			if gr.Action == "deny" {
-				span.SetAttributes(
-					attribute.String("sentinel.decision", "DENY"),
-					attribute.String("sentinel.guardrail.type", gr.Type),
-					attribute.String("sentinel.decision_reason", gr.Message),
-					attribute.String("llm.response.provider", meta.Provider),
-				)
-				h.logRequest(ctx, logContext{
-					ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &resp, Meta: &meta,
-					APIKeyID: apiKeyID, Status: "denied", ErrorMessage: gr.Message,
-				})
-				w.Header().Set("x-sentinel-trace-id", traceID)
-				w.Header().Set("x-sentinel-session-id", sessionID)
-				writeJSON(w, http.StatusForbidden, map[string]any{
-					"error": map[string]string{"message": gr.Message, "type": gr.Type, "code": "guardrail_triggered"},
-				})
-				return
-			}
-		}
+	// Output guardrails inspect every completion choice. Redacted output is what
+	// gets cached and logged, so a later cache hit cannot restore sensitive data.
+	if denied, _, reason := h.outputGuardrailDisposition(ctx, reqID, resp); denied {
+		span.SetAttributes(
+			attribute.String("sentinel.decision", "DENY"),
+			attribute.String("sentinel.decision_reason", reason),
+			attribute.String("llm.response.provider", meta.Provider),
+		)
+		h.logRequest(ctx, logContext{
+			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &resp, Meta: &meta,
+			APIKeyID: apiKeyID, Status: "denied", ErrorMessage: reason,
+		})
+		w.Header().Set("x-sentinel-trace-id", traceID)
+		w.Header().Set("x-sentinel-session-id", sessionID)
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error": map[string]string{"message": reason, "type": "guardrail", "code": "guardrail_triggered"},
+		})
+		return
 	}
 
-	h.storeCache(ctx, cacheProvider, backendReq, resp)
+	h.storeCache(ctx, tenantCacheScope, cacheProvider, backendReq, resp)
 	h.logRequest(ctx, logContext{
 		ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &resp, Meta: &meta,
 		APIKeyID: apiKeyID, Status: "success", Cached: meta.Cached,
@@ -256,6 +310,7 @@ type streamContext struct {
 	ShadowHint     string
 	APIKeyID       string
 	CacheProvider  string
+	CacheScope     string
 }
 
 // ListModels handles GET /v1/models.
@@ -283,16 +338,18 @@ func (h *Handler) logRequest(ctx context.Context, logCtx logContext) {
 	}
 
 	entry := store.RequestLog{
-		ID:          logCtx.ID,
-		Timestamp:   time.Now().UTC(),
-		TraceID:     logCtx.TraceID,
-		SessionID:   logCtx.SessionID,
-		Model:       logCtx.Request.Model,
-		APIKeyID:    logCtx.APIKeyID,
-		Status:      logCtx.Status,
-		RequestBody: marshalLogBody(logCtx.Request),
-		Decision:    "ALLOW",
-		Cached:      logCtx.Cached,
+		ID:        logCtx.ID,
+		Timestamp: time.Now().UTC(),
+		TraceID:   logCtx.TraceID,
+		SessionID: logCtx.SessionID,
+		Model:     logCtx.Request.Model,
+		APIKeyID:  logCtx.APIKeyID,
+		Status:    logCtx.Status,
+		Decision:  "ALLOW",
+		Cached:    logCtx.Cached,
+	}
+	if h.logPayloads {
+		entry.RequestBody = marshalLogBody(logCtx.Request)
 	}
 
 	if logCtx.Status == "denied" {
@@ -316,7 +373,9 @@ func (h *Handler) logRequest(ctx context.Context, logCtx logContext) {
 		entry.InputTokens = logCtx.Response.Usage.PromptTokens
 		entry.OutputTokens = logCtx.Response.Usage.CompletionTokens
 		entry.TotalTokens = logCtx.Response.Usage.TotalTokens
-		entry.ResponseBody = marshalLogBody(logCtx.Response)
+		if h.logPayloads {
+			entry.ResponseBody = marshalLogBody(logCtx.Response)
+		}
 	}
 
 	if err := h.store.InsertLog(ctx, entry); err != nil {
@@ -351,13 +410,11 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 		writeError(w, http.StatusInternalServerError, "streaming is not supported by this server")
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("x-sentinel-trace-id", streamCtx.TraceID)
-	w.Header().Set("x-sentinel-session-id", streamCtx.SessionID)
-	w.Header().Set("x-sentinel-cache", "MISS")
-	w.WriteHeader(http.StatusOK)
+	bufferOutput := h.streamGuardrailBuffer && h.guardrails != nil
+	if !bufferOutput {
+		setStreamHeaders(w, streamCtx.TraceID, streamCtx.SessionID)
+		w.WriteHeader(http.StatusOK)
+	}
 
 	aggregated := provider.ChatResponse{
 		ID:      newID("chat"),
@@ -370,6 +427,7 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 			FinishReason: "stop",
 		}},
 	}
+	var buffered []provider.ChatResponseChunk
 	for chunk := range chunks {
 		if chunk.ID != "" {
 			aggregated.ID = chunk.ID
@@ -389,13 +447,47 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 			aggregated.Usage = *chunk.Usage
 			meta.Cost = provider.EstimateCost(firstNonEmpty(meta.ProviderType, meta.Provider), aggregated.Model, aggregated.Usage)
 		}
-		writeSSE(w, chunk)
+		if bufferOutput {
+			buffered = append(buffered, chunk)
+		} else {
+			writeSSE(w, chunk)
+			flusher.Flush()
+		}
+	}
+
+	if bufferOutput {
+		denied, redacted, reason := h.outputGuardrailDisposition(ctx, streamCtx.ID, aggregated)
+		if denied {
+			span.SetStatus(codes.Error, "stream output guardrail denied")
+			h.logRequest(ctx, logContext{
+				ID: streamCtx.ID, TraceID: streamCtx.TraceID, SessionID: streamCtx.SessionID, Request: streamCtx.Request, Response: &aggregated, Meta: &meta,
+				APIKeyID: streamCtx.APIKeyID, Status: "denied", ErrorMessage: reason,
+			})
+			w.Header().Set("x-sentinel-trace-id", streamCtx.TraceID)
+			w.Header().Set("x-sentinel-session-id", streamCtx.SessionID)
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error": map[string]string{"message": reason, "type": "guardrail", "code": "guardrail_triggered"},
+			})
+			return
+		}
+		setStreamHeaders(w, streamCtx.TraceID, streamCtx.SessionID)
+		if redacted {
+			writeStream(w, aggregated)
+		} else {
+			w.WriteHeader(http.StatusOK)
+			for _, chunk := range buffered {
+				writeSSE(w, chunk)
+				flusher.Flush()
+			}
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			flusher.Flush()
+		}
+	} else {
+		fmt.Fprint(w, "data: [DONE]\n\n")
 		flusher.Flush()
 	}
-	fmt.Fprint(w, "data: [DONE]\n\n")
-	flusher.Flush()
 
-	h.storeCache(ctx, streamCtx.CacheProvider, streamCtx.BackendRequest, aggregated)
+	h.storeCache(ctx, streamCtx.CacheScope, streamCtx.CacheProvider, streamCtx.BackendRequest, aggregated)
 	h.logRequest(ctx, logContext{
 		ID: streamCtx.ID, TraceID: streamCtx.TraceID, SessionID: streamCtx.SessionID, Request: streamCtx.Request, Response: &aggregated, Meta: &meta,
 		APIKeyID: streamCtx.APIKeyID, Status: "success",
@@ -411,6 +503,61 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 		attribute.Float64("llm.usage.cost_usd", meta.Cost),
 	)
 	h.shadow(ctx, streamCtx.ID, streamCtx.TraceID, meta.Provider, streamCtx.BackendRequest, streamCtx.ShadowHint)
+}
+
+func setStreamHeaders(w http.ResponseWriter, traceID, sessionID string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("x-sentinel-trace-id", traceID)
+	w.Header().Set("x-sentinel-session-id", sessionID)
+	w.Header().Set("x-sentinel-cache", "MISS")
+}
+
+// outputGuardrailDisposition evaluates every generated choice. A redaction
+// replaces the affected output before it is logged, cached, or returned.
+func (h *Handler) outputGuardrailDisposition(ctx context.Context, requestID string, resp provider.ChatResponse) (denied, redacted bool, reason string) {
+	if h.guardrails == nil {
+		return false, false, ""
+	}
+	for index := range resp.Choices {
+		results := h.guardrails.EvaluateOutput(resp.Choices[index].Message.Content)
+		h.recordGuardrailResults(ctx, requestID, results)
+		for _, result := range results {
+			switch result.Action {
+			case "deny":
+				return true, false, result.Message
+			case "redact":
+				resp.Choices[index].Message.Content = "[REDACTED BY SENTINEL]"
+				redacted = true
+			}
+		}
+	}
+	return false, redacted, ""
+}
+
+// recordGuardrailResults keeps a structured audit trail for both enforced and
+// non-blocking results without persisting the prompt or completion itself.
+func (h *Handler) recordGuardrailResults(ctx context.Context, requestID string, results []guardrail.Result) {
+	if h.store == nil || requestID == "" {
+		return
+	}
+	for _, result := range results {
+		if !result.Triggered {
+			continue
+		}
+		if err := h.store.InsertGuardrailEvent(ctx, store.GuardrailEvent{
+			ID:        newID("gr"),
+			RequestID: requestID,
+			Timestamp: time.Now().UTC(),
+			Type:      result.Type,
+			Action:    result.Action,
+			Matched:   true,
+			Details:   result.Details,
+		}); err != nil {
+			log.Printf("failed to store guardrail event: %v", err)
+		}
+	}
 }
 
 func (h *Handler) budgetExceeded(ctx context.Context, apiKeyID string) (bool, string) {
@@ -448,11 +595,11 @@ func (h *Handler) budgetExceeded(ctx context.Context, apiKeyID string) (bool, st
 	return false, ""
 }
 
-func (h *Handler) cachedResponse(ctx context.Context, providerName string, req provider.ChatRequest) (provider.ChatResponse, bool) {
+func (h *Handler) cachedResponse(ctx context.Context, tenantScope, providerName string, req provider.ChatRequest) (provider.ChatResponse, bool) {
 	if h.store == nil || h.cacheThreshold <= 0 || len(req.Messages) == 0 {
 		return provider.ChatResponse{}, false
 	}
-	key, err := cache.Key(providerName, req)
+	key, err := cache.KeyWithScope(tenantScope, providerName, req)
 	if err != nil {
 		log.Printf("exact cache key failed: %v", err)
 	} else if entry, ok, err := h.store.GetExactCache(ctx, key); err != nil {
@@ -462,7 +609,7 @@ func (h *Handler) cachedResponse(ctx context.Context, providerName string, req p
 	}
 
 	vector := cache.Vectorize(cache.PromptText(req.Messages))
-	entry, ok, err := h.store.FindSemanticCache(ctx, cacheScope(req), vector, h.cacheThreshold)
+	entry, ok, err := h.store.FindSemanticCache(ctx, semanticCacheScope(tenantScope, providerName, req), vector, h.cacheThreshold)
 	if err != nil {
 		log.Printf("semantic cache lookup failed: %v", err)
 		return provider.ChatResponse{}, false
@@ -473,11 +620,11 @@ func (h *Handler) cachedResponse(ctx context.Context, providerName string, req p
 	return entry.Response, true
 }
 
-func (h *Handler) storeCache(ctx context.Context, providerName string, req provider.ChatRequest, resp provider.ChatResponse) {
+func (h *Handler) storeCache(ctx context.Context, tenantScope, providerName string, req provider.ChatRequest, resp provider.ChatResponse) {
 	if h.store == nil || h.cacheThreshold <= 0 || len(req.Messages) == 0 || len(resp.Choices) == 0 {
 		return
 	}
-	key, err := cache.Key(providerName, req)
+	key, err := cache.KeyWithScope(tenantScope, providerName, req)
 	if err != nil {
 		log.Printf("exact cache key failed: %v", err)
 	}
@@ -492,7 +639,7 @@ func (h *Handler) storeCache(ctx context.Context, providerName string, req provi
 		Key:       key,
 		CreatedAt: time.Now().UTC(),
 		ExpiresAt: expiresAt,
-		Model:     cacheScope(req),
+		Model:     semanticCacheScope(tenantScope, providerName, req),
 		Prompt:    promptText,
 		Vector:    cache.Vectorize(promptText),
 		Response:  resp,
@@ -501,7 +648,13 @@ func (h *Handler) storeCache(ctx context.Context, providerName string, req provi
 	}
 }
 
-func cacheScope(req provider.ChatRequest) string {
+func semanticCacheScope(tenantScope, providerName string, req provider.ChatRequest) string {
+	parts := []string{tenantScope, providerName}
+	parts = append(parts, requestCacheScope(req))
+	return strings.Join(parts, "|")
+}
+
+func requestCacheScope(req provider.ChatRequest) string {
 	parts := []string{req.Model}
 	if req.Temperature != nil {
 		parts = append(parts, fmt.Sprintf("temperature=%.4f", *req.Temperature))
@@ -516,6 +669,25 @@ func cacheScope(req provider.ChatRequest) string {
 		parts = append(parts, "stop="+strings.Join(req.Stop, ","))
 	}
 	return strings.Join(parts, "|")
+}
+
+func (h *Handler) tenantCacheScope(r *http.Request) string {
+	switch h.cacheScope {
+	case "global":
+		return "global"
+	case "organization":
+		if id := strings.TrimSpace(r.Header.Get("x-sentinel-organization-id")); id != "" {
+			return "organization:" + id
+		}
+	case "workspace":
+		if id := strings.TrimSpace(r.Header.Get("x-sentinel-workspace-id")); id != "" {
+			return "workspace:" + id
+		}
+	}
+	if id := strings.TrimSpace(r.Header.Get("x-sentinel-key-id")); id != "" {
+		return "api_key:" + id
+	}
+	return "anonymous"
 }
 
 func (h *Handler) shadow(ctx context.Context, requestID, traceID, primaryProvider string, req provider.ChatRequest, shadowProvider string) {

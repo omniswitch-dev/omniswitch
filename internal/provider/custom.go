@@ -140,12 +140,61 @@ func (c *Custom) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-c
 	return streamOpenAICompatible(ctx, c.client, c.chatURL(), c.bearerAPIKey(), req, c.name, c.extraHeaders)
 }
 
+func (c *Custom) Embeddings(ctx context.Context, req EmbeddingRequest) (EmbeddingResponse, ProviderMeta, error) {
+	start := time.Now()
+	meta := ProviderMeta{Provider: c.name, ProviderType: "custom", Model: req.Model, Timestamp: start}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return EmbeddingResponse{}, meta, fmt.Errorf("marshal embeddings request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.embeddingURL(), bytes.NewReader(body))
+	if err != nil {
+		return EmbeddingResponse{}, meta, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey := c.bearerAPIKey(); apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	for key, value := range c.extraHeaders {
+		httpReq.Header.Set(key, value)
+	}
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		meta.Latency = time.Since(start)
+		return EmbeddingResponse{}, meta, fmt.Errorf("%s embeddings request: %w", c.name, err)
+	}
+	defer resp.Body.Close()
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		meta.Latency = time.Since(start)
+		return EmbeddingResponse{}, meta, fmt.Errorf("read embeddings response: %w", err)
+	}
+	meta.Latency = time.Since(start)
+	if resp.StatusCode != http.StatusOK {
+		meta.Error = string(payload)
+		return EmbeddingResponse{}, meta, fmt.Errorf("%s embeddings error (status %d): %s", c.name, resp.StatusCode, string(payload))
+	}
+	var response EmbeddingResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return EmbeddingResponse{}, meta, fmt.Errorf("decode embeddings response: %w", err)
+	}
+	meta.Cost = EstimateCost(c.name, req.Model, response.Usage)
+	return response, meta, nil
+}
+
 func (c *Custom) chatURL() string {
 	// If the base URL already contains "chat/completions", use as-is (e.g. Azure deployments).
 	if strings.Contains(c.baseURL, "/chat/completions") {
 		return c.baseURL
 	}
 	return c.baseURL + "/chat/completions"
+}
+
+func (c *Custom) embeddingURL() string {
+	if strings.Contains(c.baseURL, "/chat/completions") {
+		return strings.Replace(c.baseURL, "/chat/completions", "/embeddings", 1)
+	}
+	return c.baseURL + "/embeddings"
 }
 
 func (c *Custom) bearerAPIKey() string {

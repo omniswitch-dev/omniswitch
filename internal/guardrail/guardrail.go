@@ -17,7 +17,9 @@ type Result struct {
 }
 
 type Engine struct {
-	checks []Check
+	checks  []Check
+	actions map[string]string
+	rules   []Rule
 }
 
 type Check func(input GuardrailInput) Result
@@ -28,8 +30,53 @@ type GuardrailInput struct {
 	IsInput  bool
 }
 
+// Rule adds a declarative, deterministic check to the built-in guardrail
+// chain. Stage is input, output, or both and Action can be deny, warn, log, or
+// redact. Regex validation happens when the engine is constructed.
+type Rule struct {
+	Name    string `json:"name" yaml:"name"`
+	Stage   string `json:"stage,omitempty" yaml:"stage,omitempty"`
+	Pattern string `json:"pattern" yaml:"pattern"`
+	Action  string `json:"action,omitempty" yaml:"action,omitempty"`
+	Message string `json:"message,omitempty" yaml:"message,omitempty"`
+}
+
+type Config struct {
+	Actions map[string]string `json:"actions,omitempty" yaml:"actions,omitempty"`
+	Rules   []Rule            `json:"rules,omitempty" yaml:"rules,omitempty"`
+}
+
 func NewEngine() *Engine {
-	return &Engine{checks: []Check{checkPII, checkPromptInjection, checkSQLInjection, checkToxicContent, checkCodeLeakage}}
+	return NewEngineWithConfig(Config{})
+}
+
+func NewEngineWithConfig(config Config) *Engine {
+	actions := map[string]string{}
+	for kind, action := range config.Actions {
+		if validAction(action) {
+			actions[kind] = action
+		}
+	}
+	rules := make([]Rule, 0, len(config.Rules))
+	for _, rule := range config.Rules {
+		if strings.TrimSpace(rule.Name) == "" || strings.TrimSpace(rule.Pattern) == "" {
+			continue
+		}
+		if _, err := regexp.Compile(rule.Pattern); err != nil {
+			continue
+		}
+		if rule.Stage == "" {
+			rule.Stage = "both"
+		}
+		if !validAction(rule.Action) {
+			rule.Action = "deny"
+		}
+		if rule.Message == "" {
+			rule.Message = "Custom guardrail triggered: " + rule.Name
+		}
+		rules = append(rules, rule)
+	}
+	return &Engine{checks: []Check{checkPII, checkPromptInjection, checkSQLInjection, checkToxicContent, checkCodeLeakage}, actions: actions, rules: rules}
 }
 
 func (e *Engine) EvaluateInput(messages []provider.Message) []Result {
@@ -44,10 +91,37 @@ func (e *Engine) evaluate(input GuardrailInput) []Result {
 	var triggered []Result
 	for _, check := range e.checks {
 		if r := check(input); r.Triggered {
+			if action := e.actions[r.Type]; action != "" {
+				r.Action = action
+			}
 			triggered = append(triggered, r)
 		}
 	}
+	text := extractText(input)
+	stage := "output"
+	if input.IsInput {
+		stage = "input"
+	}
+	for _, rule := range e.rules {
+		if rule.Stage != "both" && rule.Stage != stage {
+			continue
+		}
+		pattern, err := regexp.Compile(rule.Pattern)
+		if err != nil || !pattern.MatchString(text) {
+			continue
+		}
+		triggered = append(triggered, Result{Triggered: true, Type: rule.Name, Action: rule.Action, Message: rule.Message, Details: rule.Pattern})
+	}
 	return triggered
+}
+
+func validAction(action string) bool {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "deny", "warn", "log", "redact":
+		return true
+	default:
+		return false
+	}
 }
 
 var piiPatterns = map[string]*regexp.Regexp{

@@ -8,41 +8,88 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"sentinel/internal/adapter/mcp"
 	"sentinel/internal/audit"
+	"sentinel/internal/model"
 	"sentinel/internal/policy"
 )
 
-type Handler struct {
+// TargetConfig defines a named upstream MCP server. A configured target is
+// exposed through the shared Sentinel MCP endpoint; its tools are prefixed
+// with "<target>__" in tools/list responses.
+type TargetConfig struct {
+	Name     string
+	Upstream string
+	Headers  map[string]string
+	Engine   policy.Engine
+}
+
+type target struct {
+	name     string
 	engine   policy.Engine
-	auditor  audit.Logger
 	upstream *url.URL
-	client   *http.Client
+	headers  map[string]string
+}
+
+type Handler struct {
+	engine      policy.Engine
+	auditor     audit.Logger
+	targets     map[string]target
+	targetOrder []string
+	defaultName string
+	client      *http.Client
 }
 
 func NewHandler(engine policy.Engine, auditor audit.Logger, upstream string) (*Handler, error) {
+	return NewMultiHandler(engine, auditor, []TargetConfig{{Name: "default", Upstream: upstream}})
+}
+
+// NewMultiHandler constructs a virtual MCP gateway over one or more remote
+// servers. Individual targets can use stricter policy engines while sharing
+// the gateway's authenticated caller identity and audit trail.
+func NewMultiHandler(engine policy.Engine, auditor audit.Logger, configs []TargetConfig) (*Handler, error) {
 	if engine == nil {
 		return nil, fmt.Errorf("policy engine is required")
 	}
-
-	parsed, err := url.Parse(upstream)
-	if err != nil {
-		return nil, fmt.Errorf("parse upstream URL: %w", err)
+	if len(configs) == 0 {
+		return nil, fmt.Errorf("at least one MCP target is required")
 	}
-	if parsed.Scheme == "" || parsed.Host == "" {
-		return nil, fmt.Errorf("upstream URL must include scheme and host")
+	handler := &Handler{
+		engine:  engine,
+		auditor: auditor,
+		targets: make(map[string]target, len(configs)),
+		client:  &http.Client{Timeout: 30 * time.Second},
 	}
-
-	return &Handler{
-		engine:   engine,
-		auditor:  auditor,
-		upstream: parsed,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-	}, nil
+	for index, config := range configs {
+		name := strings.TrimSpace(config.Name)
+		if name == "" {
+			return nil, fmt.Errorf("MCP target %d name is required", index)
+		}
+		key := strings.ToLower(name)
+		if _, exists := handler.targets[key]; exists {
+			return nil, fmt.Errorf("duplicate MCP target %q", name)
+		}
+		parsed, err := url.Parse(config.Upstream)
+		if err != nil {
+			return nil, fmt.Errorf("parse MCP target %q upstream: %w", name, err)
+		}
+		if parsed.Scheme == "" || parsed.Host == "" {
+			return nil, fmt.Errorf("MCP target %q upstream must include scheme and host", name)
+		}
+		engineForTarget := config.Engine
+		if engineForTarget == nil {
+			engineForTarget = engine
+		}
+		handler.targets[key] = target{name: name, engine: engineForTarget, upstream: parsed, headers: cloneHeaders(config.Headers)}
+		handler.targetOrder = append(handler.targetOrder, key)
+		if index == 0 {
+			handler.defaultName = key
+		}
+	}
+	return handler, nil
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -50,26 +97,43 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, mcp.ErrorResponse(nil, -32600, "Invalid Request", fmt.Errorf("only POST is supported")))
 		return
 	}
-
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, mcp.ErrorResponse(nil, -32700, "Parse error", err))
 		return
 	}
-
 	rpcReq, err := mcp.Decode(bytes.NewReader(body))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, mcp.ErrorResponse(nil, -32700, "Parse error", err))
 		return
 	}
 
-	toolReq, err := rpcReq.ToToolRequest()
+	switch rpcReq.Method {
+	case "tools/call":
+		h.handleToolCall(w, r, rpcReq, body)
+	case "tools/list":
+		h.handleToolList(w, r, rpcReq, body)
+	default:
+		// Initialization, notifications, prompts, and resources are forwarded to
+		// the default target intact. Tool calls/listing are the operations that
+		// require virtual-target routing and policy mediation.
+		h.forwardToTarget(w, r.Context(), h.targets[h.defaultName], body, r.Header)
+	}
+}
+
+func (h *Handler) handleToolCall(w http.ResponseWriter, r *http.Request, rpcReq mcp.Request, body []byte) {
+	target, toolName := h.targetForTool(rpcReq.Params.Name)
+	rpcReq.Params.Name = toolName
+	toolReq, err := rpcReq.ToToolRequestWithIdentity(requestIdentity(r), r.Header.Get("Mcp-Session-Id"))
 	if err != nil {
 		writeJSON(w, http.StatusOK, mcp.ErrorResponse(rpcReq.ID, -32602, "Invalid params", err))
 		return
 	}
-
-	decision, evalErr := h.engine.Evaluate(r.Context(), toolReq)
+	if toolReq.Metadata == nil {
+		toolReq.Metadata = map[string]string{}
+	}
+	toolReq.Metadata["mcp.target"] = target.name
+	decision, evalErr := target.engine.Evaluate(r.Context(), toolReq)
 	if h.auditor != nil {
 		_ = h.auditor.Log(r.Context(), audit.NewEvent(toolReq, decision))
 	}
@@ -77,35 +141,134 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, mcp.DeniedResponse(rpcReq.ID, decision))
 		return
 	}
-
-	h.forward(w, r.Context(), rpcReq.ID, body, r.Header.Get("Content-Type"))
+	body, err = replaceToolName(body, toolName)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, mcp.ErrorResponse(rpcReq.ID, -32700, "Parse error", err))
+		return
+	}
+	h.forwardToTarget(w, r.Context(), target, body, r.Header)
 }
 
-func (h *Handler) forward(w http.ResponseWriter, ctx context.Context, id []byte, body []byte, contentType string) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.upstream.String(), bytes.NewReader(body))
+func (h *Handler) handleToolList(w http.ResponseWriter, r *http.Request, rpcReq mcp.Request, body []byte) {
+	tools := make([]map[string]any, 0)
+	for _, key := range h.targetOrder {
+		target := h.targets[key]
+		listRequest := model.ToolRequest{
+			Agent:    requestIdentity(r),
+			Tool:     model.Tool{Name: target.name},
+			Action:   model.Action{Name: "list"},
+			Session:  model.Session{ID: r.Header.Get("Mcp-Session-Id")},
+			Metadata: map[string]string{"mcp.target": target.name},
+		}
+		decision, err := target.engine.Evaluate(r.Context(), listRequest)
+		if h.auditor != nil {
+			_ = h.auditor.Log(r.Context(), audit.NewEvent(listRequest, decision))
+		}
+		if err != nil || !decision.Allowed {
+			continue
+		}
+		status, _, response, err := h.callTarget(r.Context(), target, body, r.Header)
+		if err != nil || status < 200 || status >= 300 {
+			continue
+		}
+		var result struct {
+			Result struct {
+				Tools []map[string]any `json:"tools"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(response, &result); err != nil {
+			continue
+		}
+		for _, tool := range result.Result.Tools {
+			if name, ok := tool["name"].(string); ok {
+				tool["name"] = target.name + "__" + name
+			}
+			tools = append(tools, tool)
+		}
+	}
+	writeJSON(w, http.StatusOK, mcp.Response{JSONRPC: "2.0", ID: rpcReq.ID, Result: map[string]any{"tools": tools}})
+}
+
+func (h *Handler) targetForTool(name string) (target, string) {
+	if targetName, toolName, ok := strings.Cut(name, "__"); ok {
+		if target, exists := h.targets[strings.ToLower(targetName)]; exists && strings.TrimSpace(toolName) != "" {
+			return target, toolName
+		}
+	}
+	return h.targets[h.defaultName], name
+}
+
+func (h *Handler) forwardToTarget(w http.ResponseWriter, ctx context.Context, target target, body []byte, headers http.Header) {
+	status, responseHeaders, response, err := h.callTarget(ctx, target, body, headers)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, mcp.ErrorResponse(id, -32603, "Forwarding failed", err))
+		writeJSON(w, http.StatusBadGateway, mcp.ErrorResponse(nil, -32603, "Forwarding failed", err))
 		return
 	}
-	if contentType == "" {
-		contentType = "application/json"
-	}
-	req.Header.Set("Content-Type", contentType)
-
-	resp, err := h.client.Do(req)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, mcp.ErrorResponse(id, -32603, "Forwarding failed", err))
-		return
-	}
-	defer resp.Body.Close()
-
-	for key, values := range resp.Header {
+	for key, values := range responseHeaders {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
-	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	w.WriteHeader(status)
+	_, _ = w.Write(response)
+}
+
+func (h *Handler) callTarget(ctx context.Context, target target, body []byte, incoming http.Header) (int, http.Header, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.upstream.String(), bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for _, key := range []string{"Accept", "Mcp-Protocol-Version", "Mcp-Session-Id"} {
+		if value := incoming.Get(key); value != "" {
+			req.Header.Set(key, value)
+		}
+	}
+	for key, value := range target.headers {
+		req.Header.Set(key, value)
+	}
+	response, err := h.client.Do(req)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	defer response.Body.Close()
+	payload, err := io.ReadAll(response.Body)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return response.StatusCode, response.Header, payload, nil
+}
+
+func requestIdentity(r *http.Request) model.Agent {
+	return model.Agent{
+		ID:         r.Header.Get("x-sentinel-key-id"),
+		Department: r.Header.Get("x-sentinel-workspace-id"),
+		Role:       r.Header.Get("x-sentinel-role"),
+	}
+}
+
+func replaceToolName(body []byte, name string) ([]byte, error) {
+	var request map[string]any
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil, err
+	}
+	params, ok := request["params"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("params is required")
+	}
+	params["name"] = name
+	return json.Marshal(request)
+}
+
+func cloneHeaders(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func writeJSON(w http.ResponseWriter, status int, response mcp.Response) {

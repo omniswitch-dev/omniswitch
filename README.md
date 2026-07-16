@@ -39,6 +39,7 @@ Override with `SENTINEL_LISTEN`, `SENTINEL_POLICY`, and `SENTINEL_UPSTREAM`.
 - [Deployment](docs/DEPLOYMENT.md)
 - [Architecture](docs/architecture.md)
 - [Portkey Comparison](docs/PORTKEY_COMPARISON.md)
+- [Portkey & AgentGateway Feature Matrix](docs/PORTKEY_COMPARISON.md#feature-availability-matrix)
 - [Policy Standard](docs/standard.md)
 - [Roadmap](ROADMAP.md)
 - [Security Policy](SECURITY.md)
@@ -73,8 +74,15 @@ Useful environment variables:
 - `SENTINEL_LISTEN`: listen address, default `:8080`
 - `SENTINEL_DATA`: directory for `sentinel.db`, default `.`
 - `SENTINEL_AUTH`: set to `true` to require Sentinel API keys
+- `SENTINEL_BOOTSTRAP_API_KEY`: first owner/admin key for an empty auth-enabled database; use a secret manager and remove it after provisioning
 - `SENTINEL_CACHE_THRESHOLD`: semantic cache similarity threshold, default `0.95`; set `0` to disable
 - `SENTINEL_CACHE_TTL`: cache expiration duration, default `24h`
+- `SENTINEL_CACHE_SCOPE`: cache-sharing boundary: `api_key` (default), `workspace`, `organization`, or `global`
+- `SENTINEL_LOG_PAYLOADS`: persist raw prompts/completions only when explicitly `true`; defaults to `false`
+- `SENTINEL_CORS_ORIGINS`: comma-separated browser allow-list; unset disables cross-origin access
+- `SENTINEL_GUARDRAIL_STREAM_BUFFER`: buffer SSE before emitting so output guardrails can apply, default `true`
+- `SENTINEL_MAX_REQUEST_BYTES`, `SENTINEL_READ_HEADER_TIMEOUT`, `SENTINEL_READ_TIMEOUT`, `SENTINEL_WRITE_TIMEOUT`, `SENTINEL_IDLE_TIMEOUT`: production request/server limits
+- `SENTINEL_CIRCUIT_BREAKER_FAILURES`, `SENTINEL_CIRCUIT_BREAKER_COOLDOWN`: provider circuit-breaker tuning
 - `SENTINEL_SHADOW_PROVIDER`: provider to call asynchronously for shadow comparisons
 - `SENTINEL_AB_TEST`: weighted model/provider split, for example `logical=openai:gpt-4o-mini:90,anthropic:claude-3-5-haiku-20241022:10`
 - `SENTINEL_MCP_ENABLED`: set to `false` to disable MCP proxy endpoints in `cmd/gateway`
@@ -87,6 +95,7 @@ Useful environment variables:
 - `SENTINEL_OTEL_HEADERS`: comma-separated OTLP headers, for example `x-api-key=...`
 - `SENTINEL_OTEL_INSECURE`: allow insecure OTLP transport when needed
 - `SENTINEL_OTEL_TIMEOUT`: OTLP exporter timeout, default `10s`
+- `SENTINEL_PROMETHEUS_ENABLED`: enable `GET /metrics`, default `true`
 - `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`: built-in provider credentials
 - Any custom provider keys (e.g. `DEEPSEEK_API_KEY`, `TOGETHER_API_KEY`) referenced via `api_key_env` in config
 

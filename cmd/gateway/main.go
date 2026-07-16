@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -63,6 +65,9 @@ func main() {
 		log.Fatalf("failed to initialize store: %v", err)
 	}
 	defer st.Close()
+	if err := ensureBootstrapKey(context.Background(), st, settings); err != nil {
+		log.Fatalf("failed to initialize authentication: %v", err)
+	}
 	vaultManager := vault.New(st, settings.vaultKey)
 	if settings.vaultKey == "" {
 		log.Println("WARNING: SENTINEL_VAULT_KEY is not set. Provider vault entries created in this process will not be decryptable after restart.")
@@ -89,10 +94,18 @@ func main() {
 		rtr.SetRoute(model, route)
 		log.Printf("configured route for %s: %+v", model, route)
 	}
+	rtr.SetCircuitBreaker(router.NewCircuitBreaker(settings.circuitBreakerFailures, settings.circuitBreakerCooldown))
 	gr := guardrail.NewEngine()
+	if len(settings.guardrailConfig.Actions) > 0 || len(settings.guardrailConfig.Rules) > 0 {
+		gr = guardrail.NewEngineWithConfig(settings.guardrailConfig)
+	}
 	gw := gateway.New(registry, rtr, st, gr)
 	gw.SetSemanticCache(settings.cacheThreshold)
 	gw.SetCacheTTL(settings.cacheTTL)
+	gw.SetCacheScope(settings.cacheScope)
+	gw.SetLogPayloads(settings.logPayloads)
+	gw.SetStreamGuardrailBuffer(settings.guardrailStreamBuffer)
+	gw.SetMaxRequestBytes(settings.maxRequestBytes)
 	gw.SetShadowProvider(settings.shadowProvider)
 	adminHandler := admin.New(st)
 	feedbackHandler := feedback.New(st)
@@ -107,6 +120,9 @@ func main() {
 
 	// Gateway API (OpenAI-compatible).
 	mux.HandleFunc("/v1/chat/completions", gw.ChatCompletions)
+	mux.HandleFunc("/v1/responses", gw.Responses)
+	mux.HandleFunc("/v1/messages", gw.Messages)
+	mux.HandleFunc("/v1/embeddings", gw.Embeddings)
 	mux.HandleFunc("/v1/models", gw.ListModels)
 	mux.HandleFunc("/api/providers", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -121,7 +137,11 @@ func main() {
 			log.Fatalf("failed to load MCP policy: %v", err)
 		}
 		mcpAuditor := audit.NewMultiLogger(audit.NewStdoutLogger(os.Stdout), audit.NewStoreLogger(st))
-		mcpHandler, err := mcpproxy.NewHandler(mcpEngine, mcpAuditor, settings.mcpUpstreamURL)
+		mcpTargets, err := buildMCPTargets(mcpEngine, settings)
+		if err != nil {
+			log.Fatalf("failed to configure MCP targets: %v", err)
+		}
+		mcpHandler, err := mcpproxy.NewMultiHandler(mcpEngine, mcpAuditor, mcpTargets)
 		if err != nil {
 			log.Fatalf("failed to initialize MCP gateway: %v", err)
 		}
@@ -245,11 +265,15 @@ func main() {
 
 	// Dashboard API + static files.
 	dash.RegisterRoutes(mux)
+	if settings.prometheusEnabled {
+		dash.RegisterPrometheus(mux)
+	}
 
 	// Wrap with middleware.
 	auth := gateway.NewAuthMiddleware(st, settings.authEnabled)
+	authorize := gateway.NewAuthorizationMiddleware(settings.authEnabled)
 	rateLimiter := gateway.NewRateLimiter(120, time.Minute)
-	handler := gateway.CORSMiddleware(gateway.LoggingMiddleware(auth.Wrap(rateLimiter.Wrap(mux))))
+	handler := gateway.CORSMiddlewareWithOrigins(settings.corsOrigins, gateway.LoggingMiddleware(auth.Wrap(authorize.Wrap(rateLimiter.Wrap(mux)))))
 
 	// Print startup banner.
 	fmt.Println(banner())
@@ -261,45 +285,82 @@ func main() {
 	}
 	log.Printf("Providers: %v", registry.Names())
 
-	if err := http.ListenAndServe(settings.listenAddr, handler); err != nil {
+	server := &http.Server{
+		Addr:              settings.listenAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: settings.readHeaderTimeout,
+		ReadTimeout:       settings.readTimeout,
+		WriteTimeout:      settings.writeTimeout,
+		IdleTimeout:       settings.idleTimeout,
+	}
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("server failed: %v", err)
 	}
 }
 
 type runtimeSettings struct {
-	listenAddr       string
-	dataDir          string
-	authEnabled      bool
-	cacheThreshold   float64
-	cacheTTL         time.Duration
-	shadowProvider   string
-	mcpEnabled       bool
-	mcpPolicyPath    string
-	mcpUpstreamURL   string
-	routes           map[string]router.Route
-	providerAccounts []gatewayconfig.ProviderAccount
-	configPath       string
-	otelEnabled      bool
-	otelEndpoint     string
-	otelServiceName  string
-	otelHeaders      map[string]string
-	otelInsecure     bool
-	otelTimeout      time.Duration
-	vaultKey         string
+	listenAddr             string
+	dataDir                string
+	authEnabled            bool
+	cacheThreshold         float64
+	cacheTTL               time.Duration
+	cacheScope             string
+	logPayloads            bool
+	corsOrigins            []string
+	circuitBreakerFailures int
+	circuitBreakerCooldown time.Duration
+	guardrailConfig        guardrail.Config
+	guardrailStreamBuffer  bool
+	maxRequestBytes        int64
+	readHeaderTimeout      time.Duration
+	readTimeout            time.Duration
+	writeTimeout           time.Duration
+	idleTimeout            time.Duration
+	shadowProvider         string
+	mcpEnabled             bool
+	mcpPolicyPath          string
+	mcpUpstreamURL         string
+	mcpTargets             []gatewayconfig.MCPTarget
+	routes                 map[string]router.Route
+	providerAccounts       []gatewayconfig.ProviderAccount
+	configPath             string
+	otelEnabled            bool
+	otelEndpoint           string
+	otelServiceName        string
+	otelHeaders            map[string]string
+	otelInsecure           bool
+	otelTimeout            time.Duration
+	prometheusEnabled      bool
+	vaultKey               string
+	bootstrapAPIKey        string
+	bootstrapWorkspaceID   string
+	bootstrapRole          string
 }
 
 func loadRuntimeSettings() (runtimeSettings, error) {
 	settings := runtimeSettings{
-		listenAddr:      ":8080",
-		dataDir:         ".",
-		cacheThreshold:  0.95,
-		cacheTTL:        24 * time.Hour,
-		mcpEnabled:      true,
-		mcpPolicyPath:   "policies/production-delete.yaml",
-		mcpUpstreamURL:  "http://127.0.0.1:8090/mcp",
-		routes:          map[string]router.Route{},
-		otelServiceName: "sentinel-gateway",
-		otelTimeout:     10 * time.Second,
+		listenAddr:             ":8080",
+		dataDir:                ".",
+		cacheThreshold:         0.95,
+		cacheTTL:               24 * time.Hour,
+		cacheScope:             "api_key",
+		circuitBreakerFailures: 5,
+		circuitBreakerCooldown: 60 * time.Second,
+		guardrailStreamBuffer:  true,
+		maxRequestBytes:        10 << 20,
+		readHeaderTimeout:      5 * time.Second,
+		readTimeout:            30 * time.Second,
+		// Streaming responses can run for longer than a normal request; use a
+		// configurable zero default rather than truncating them unexpectedly.
+		writeTimeout:      0,
+		idleTimeout:       60 * time.Second,
+		mcpEnabled:        true,
+		mcpPolicyPath:     "policies/production-delete.yaml",
+		mcpUpstreamURL:    "http://127.0.0.1:8090/mcp",
+		routes:            map[string]router.Route{},
+		otelServiceName:   "sentinel-gateway",
+		otelTimeout:       10 * time.Second,
+		prometheusEnabled: true,
 	}
 
 	if configPath := strings.TrimSpace(os.Getenv("SENTINEL_CONFIG")); configPath != "" {
@@ -316,6 +377,19 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 	settings.authEnabled = envBool("SENTINEL_AUTH", settings.authEnabled)
 	settings.cacheThreshold = envFloat("SENTINEL_CACHE_THRESHOLD", settings.cacheThreshold)
 	settings.cacheTTL = envDuration("SENTINEL_CACHE_TTL", settings.cacheTTL)
+	settings.cacheScope = env("SENTINEL_CACHE_SCOPE", settings.cacheScope)
+	settings.logPayloads = envBool("SENTINEL_LOG_PAYLOADS", settings.logPayloads)
+	settings.guardrailStreamBuffer = envBool("SENTINEL_GUARDRAIL_STREAM_BUFFER", settings.guardrailStreamBuffer)
+	settings.maxRequestBytes = envInt64("SENTINEL_MAX_REQUEST_BYTES", settings.maxRequestBytes)
+	settings.readHeaderTimeout = envDuration("SENTINEL_READ_HEADER_TIMEOUT", settings.readHeaderTimeout)
+	settings.readTimeout = envDuration("SENTINEL_READ_TIMEOUT", settings.readTimeout)
+	settings.writeTimeout = envDuration("SENTINEL_WRITE_TIMEOUT", settings.writeTimeout)
+	settings.idleTimeout = envDuration("SENTINEL_IDLE_TIMEOUT", settings.idleTimeout)
+	settings.circuitBreakerFailures = envInt("SENTINEL_CIRCUIT_BREAKER_FAILURES", settings.circuitBreakerFailures)
+	settings.circuitBreakerCooldown = envDuration("SENTINEL_CIRCUIT_BREAKER_COOLDOWN", settings.circuitBreakerCooldown)
+	if value := strings.TrimSpace(os.Getenv("SENTINEL_CORS_ORIGINS")); value != "" {
+		settings.corsOrigins = parseCSV(value)
+	}
 	settings.shadowProvider = env("SENTINEL_SHADOW_PROVIDER", settings.shadowProvider)
 	settings.mcpEnabled = envBool("SENTINEL_MCP_ENABLED", settings.mcpEnabled)
 	settings.mcpPolicyPath = env("SENTINEL_MCP_POLICY", settings.mcpPolicyPath)
@@ -326,7 +400,13 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 	settings.otelHeaders = mergeStringMaps(settings.otelHeaders, parseHeaderList(os.Getenv("SENTINEL_OTEL_HEADERS")))
 	settings.otelInsecure = envBool("SENTINEL_OTEL_INSECURE", settings.otelInsecure)
 	settings.otelTimeout = envDuration("SENTINEL_OTEL_TIMEOUT", settings.otelTimeout)
+	settings.prometheusEnabled = envBool("SENTINEL_PROMETHEUS_ENABLED", settings.prometheusEnabled)
 	settings.vaultKey = env("SENTINEL_VAULT_KEY", settings.vaultKey)
+	// Bootstrap credentials must not live in config-as-code, so they are only
+	// accepted through the process environment or a secret manager injection.
+	settings.bootstrapAPIKey = env("SENTINEL_BOOTSTRAP_API_KEY", settings.bootstrapAPIKey)
+	settings.bootstrapWorkspaceID = env("SENTINEL_BOOTSTRAP_WORKSPACE", settings.bootstrapWorkspaceID)
+	settings.bootstrapRole = env("SENTINEL_BOOTSTRAP_ROLE", settings.bootstrapRole)
 	if settings.otelEndpoint != "" {
 		settings.otelEnabled = true
 	}
@@ -334,6 +414,49 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 		settings.routes[model] = mergeRoute(settings.routes[model], route)
 	}
 	return settings, nil
+}
+
+// ensureBootstrapKey prevents an auth-enabled, empty deployment from becoming
+// unmanageable. The bootstrap secret is never logged or exposed through the
+// control-plane API; only its SHA-256 hash is persisted.
+func ensureBootstrapKey(ctx context.Context, st *store.Store, settings runtimeSettings) error {
+	if !settings.authEnabled {
+		return nil
+	}
+	if secret := strings.TrimSpace(settings.bootstrapAPIKey); secret != "" {
+		hash := sha256.Sum256([]byte(secret))
+		role := strings.TrimSpace(settings.bootstrapRole)
+		if role == "" {
+			role = "owner"
+		}
+		if role != "owner" && role != "admin" {
+			return fmt.Errorf("SENTINEL_BOOTSTRAP_ROLE must be owner or admin")
+		}
+		prefix := secret
+		if len(prefix) > 12 {
+			prefix = prefix[:12]
+		}
+		return st.InsertAPIKey(ctx, store.APIKey{
+			ID:          "bootstrap-admin",
+			Name:        "Bootstrap administrator",
+			KeyHash:     hex.EncodeToString(hash[:]),
+			KeyPrefix:   prefix + "...",
+			WorkspaceID: strings.TrimSpace(settings.bootstrapWorkspaceID),
+			Role:        role,
+			CreatedAt:   time.Now().UTC(),
+			RateLimit:   120,
+			Enabled:     true,
+		})
+	}
+
+	keys, err := st.ListAPIKeys(ctx)
+	if err != nil {
+		return fmt.Errorf("list existing API keys: %w", err)
+	}
+	if len(keys) == 0 {
+		return fmt.Errorf("authentication is enabled but no API keys exist; set SENTINEL_BOOTSTRAP_API_KEY for first startup")
+	}
+	return nil
 }
 
 func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
@@ -351,6 +474,50 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 	}
 	if cfg.Gateway.CacheTTL != nil {
 		settings.cacheTTL = cfg.Gateway.CacheTTL.Duration
+	}
+	if cfg.Gateway.CacheScope != "" {
+		settings.cacheScope = cfg.Gateway.CacheScope
+	}
+	if cfg.Gateway.LogPayloads != nil {
+		settings.logPayloads = *cfg.Gateway.LogPayloads
+	}
+	if cfg.Gateway.CORSOrigins != nil {
+		settings.corsOrigins = append([]string(nil), cfg.Gateway.CORSOrigins...)
+	}
+	if cfg.Gateway.CircuitBreakerFailures != nil {
+		settings.circuitBreakerFailures = *cfg.Gateway.CircuitBreakerFailures
+	}
+	if cfg.Gateway.CircuitBreakerCooldown != nil {
+		settings.circuitBreakerCooldown = cfg.Gateway.CircuitBreakerCooldown.Duration
+	}
+	if cfg.Gateway.MaxRequestBytes > 0 {
+		settings.maxRequestBytes = cfg.Gateway.MaxRequestBytes
+	}
+	if cfg.Gateway.ReadHeaderTimeout != nil {
+		settings.readHeaderTimeout = cfg.Gateway.ReadHeaderTimeout.Duration
+	}
+	if cfg.Gateway.ReadTimeout != nil {
+		settings.readTimeout = cfg.Gateway.ReadTimeout.Duration
+	}
+	if cfg.Gateway.WriteTimeout != nil {
+		settings.writeTimeout = cfg.Gateway.WriteTimeout.Duration
+	}
+	if cfg.Gateway.IdleTimeout != nil {
+		settings.idleTimeout = cfg.Gateway.IdleTimeout.Duration
+	}
+	if cfg.Guardrails.Actions != nil {
+		settings.guardrailConfig.Actions = cfg.Guardrails.Actions
+	}
+	if cfg.Guardrails.Rules != nil {
+		settings.guardrailConfig.Rules = make([]guardrail.Rule, 0, len(cfg.Guardrails.Rules))
+		for _, rule := range cfg.Guardrails.Rules {
+			settings.guardrailConfig.Rules = append(settings.guardrailConfig.Rules, guardrail.Rule{
+				Name: rule.Name, Stage: rule.Stage, Pattern: rule.Pattern, Action: rule.Action, Message: rule.Message,
+			})
+		}
+	}
+	if cfg.Guardrails.StreamBuffer != nil {
+		settings.guardrailStreamBuffer = *cfg.Guardrails.StreamBuffer
 	}
 	if cfg.Gateway.ShadowProvider != "" {
 		settings.shadowProvider = cfg.Gateway.ShadowProvider
@@ -374,6 +541,9 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 	if cfg.Observability.Timeout != nil {
 		settings.otelTimeout = cfg.Observability.Timeout.Duration
 	}
+	if cfg.Observability.PrometheusEnabled != nil {
+		settings.prometheusEnabled = *cfg.Observability.PrometheusEnabled
+	}
 	if cfg.MCP.Enabled != nil {
 		settings.mcpEnabled = *cfg.MCP.Enabled
 	}
@@ -383,10 +553,40 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 	if cfg.MCP.Upstream != "" {
 		settings.mcpUpstreamURL = cfg.MCP.Upstream
 	}
+	if cfg.MCP.Targets != nil {
+		settings.mcpTargets = append([]gatewayconfig.MCPTarget(nil), cfg.MCP.Targets...)
+	}
 	for model, route := range cfg.Routes {
 		settings.routes[model] = route
 	}
 	settings.providerAccounts = append(settings.providerAccounts, cfg.Providers...)
+}
+
+func buildMCPTargets(defaultEngine policy.Engine, settings runtimeSettings) ([]mcpproxy.TargetConfig, error) {
+	if len(settings.mcpTargets) == 0 {
+		return []mcpproxy.TargetConfig{{Name: "default", Upstream: settings.mcpUpstreamURL, Engine: defaultEngine}}, nil
+	}
+	targets := make([]mcpproxy.TargetConfig, 0, len(settings.mcpTargets))
+	for _, configured := range settings.mcpTargets {
+		if configured.Enabled != nil && !*configured.Enabled {
+			continue
+		}
+		engine := defaultEngine
+		if configured.Policy != "" {
+			loaded, err := policy.NewEngineFromFiles(configured.Policy)
+			if err != nil {
+				return nil, fmt.Errorf("load policy for MCP target %q: %w", configured.Name, err)
+			}
+			engine = loaded
+		}
+		targets = append(targets, mcpproxy.TargetConfig{
+			Name: configured.Name, Upstream: configured.Upstream, Headers: expandHeaderValues(configured.Headers), Engine: engine,
+		})
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no enabled MCP targets")
+	}
+	return targets, nil
 }
 
 func mergeRoute(base, override router.Route) router.Route {
@@ -415,6 +615,24 @@ func env(key, fallback string) string {
 func envFloat(key string, fallback float64) float64 {
 	if value := os.Getenv(key); value != "" {
 		if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func envInt64(key string, fallback int64) int64 {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil && parsed > 0 {
 			return parsed
 		}
 	}

@@ -125,6 +125,29 @@ func (r Request) ToToolRequest() (model.ToolRequest, error) {
 	}, nil
 }
 
+// ToToolRequestWithIdentity binds policy input to gateway-authenticated
+// identity instead of caller-controlled tool arguments. Optional argument
+// values still enrich the request but cannot impersonate another agent.
+func (r Request) ToToolRequestWithIdentity(agent model.Agent, sessionID string) (model.ToolRequest, error) {
+	request, err := r.ToToolRequest()
+	if err != nil {
+		return model.ToolRequest{}, err
+	}
+	if agent.ID != "" {
+		request.Agent.ID = agent.ID
+	}
+	if agent.Department != "" {
+		request.Agent.Department = agent.Department
+	}
+	if agent.Role != "" {
+		request.Agent.Role = agent.Role
+	}
+	if sessionID != "" {
+		request.Session.ID = sessionID
+	}
+	return request, nil
+}
+
 func DeniedResponse(id json.RawMessage, decision model.Decision) Response {
 	return Response{
 		JSONRPC: "2.0",

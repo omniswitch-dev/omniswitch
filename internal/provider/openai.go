@@ -94,6 +94,43 @@ func (o *OpenAI) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-c
 	return streamOpenAICompatible(ctx, o.client, o.baseURL+"/chat/completions", o.apiKey, req, "openai", nil)
 }
 
+func (o *OpenAI) Embeddings(ctx context.Context, req EmbeddingRequest) (EmbeddingResponse, ProviderMeta, error) {
+	start := time.Now()
+	meta := ProviderMeta{Provider: "openai", Model: req.Model, Timestamp: start}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return EmbeddingResponse{}, meta, fmt.Errorf("marshal embeddings request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return EmbeddingResponse{}, meta, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
+	resp, err := o.client.Do(httpReq)
+	if err != nil {
+		meta.Latency = time.Since(start)
+		return EmbeddingResponse{}, meta, fmt.Errorf("openai embeddings request: %w", err)
+	}
+	defer resp.Body.Close()
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		meta.Latency = time.Since(start)
+		return EmbeddingResponse{}, meta, fmt.Errorf("read embeddings response: %w", err)
+	}
+	meta.Latency = time.Since(start)
+	if resp.StatusCode != http.StatusOK {
+		meta.Error = string(payload)
+		return EmbeddingResponse{}, meta, fmt.Errorf("openai embeddings error (status %d): %s", resp.StatusCode, string(payload))
+	}
+	var response EmbeddingResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return EmbeddingResponse{}, meta, fmt.Errorf("decode embeddings response: %w", err)
+	}
+	meta.Cost = EstimateCost("openai", req.Model, response.Usage)
+	return response, meta, nil
+}
+
 func openAIPricing(model string) ModelPricing {
 	switch model {
 	case "gpt-4o":

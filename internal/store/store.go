@@ -424,8 +424,21 @@ func (s *Store) InsertLog(ctx context.Context, log RequestLog) error {
 
 // ListLogs returns paginated request logs ordered by timestamp descending.
 func (s *Store) ListLogs(ctx context.Context, limit, offset int, provider, status string) ([]RequestLog, int, error) {
+	return s.listLogs(ctx, limit, offset, provider, status, "")
+}
+
+// ListLogsForAPIKey scopes dashboard access to the authenticated workload key.
+func (s *Store) ListLogsForAPIKey(ctx context.Context, apiKeyID string, limit, offset int, provider, status string) ([]RequestLog, int, error) {
+	return s.listLogs(ctx, limit, offset, provider, status, apiKeyID)
+}
+
+func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, status, apiKeyID string) ([]RequestLog, int, error) {
 	where := "1=1"
 	args := []any{}
+	if apiKeyID != "" {
+		where += " AND api_key_id = ?"
+		args = append(args, apiKeyID)
+	}
 	if provider != "" {
 		where += " AND provider = ?"
 		args = append(args, provider)
@@ -471,10 +484,24 @@ func (s *Store) ListLogs(ctx context.Context, limit, offset int, provider, statu
 
 // GetMetrics returns aggregated metrics for the given time window.
 func (s *Store) GetMetrics(ctx context.Context, since time.Time) (Metrics, error) {
+	return s.getMetrics(ctx, since, "")
+}
+
+// GetMetricsForAPIKey returns metrics only for one workload key.
+func (s *Store) GetMetricsForAPIKey(ctx context.Context, since time.Time, apiKeyID string) (Metrics, error) {
+	return s.getMetrics(ctx, since, apiKeyID)
+}
+
+func (s *Store) getMetrics(ctx context.Context, since time.Time, apiKeyID string) (Metrics, error) {
 	var m Metrics
 	sinceStr := since.Format(time.RFC3339Nano)
-
-	err := s.db.QueryRowContext(ctx, `
+	where := "timestamp >= ?"
+	args := []any{sinceStr}
+	if apiKeyID != "" {
+		where += " AND api_key_id = ?"
+		args = append(args, apiKeyID)
+	}
+	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN decision = 'ALLOW' THEN 1 ELSE 0 END), 0),
@@ -484,7 +511,7 @@ func (s *Store) GetMetrics(ctx context.Context, since time.Time) (Metrics, error
 			COALESCE(SUM(cost), 0),
 			COALESCE(SUM(total_tokens), 0),
 			COALESCE(SUM(CASE WHEN cached = 1 THEN 1 ELSE 0 END), 0)
-		FROM request_logs WHERE timestamp >= ?`, sinceStr,
+		FROM request_logs WHERE %s`, where), args...,
 	).Scan(&m.TotalRequests, &m.AllowedCount, &m.DeniedCount, &m.ErrorCount,
 		&m.AvgLatencyMs, &m.TotalCost, &m.TotalTokens, &m.CacheHits)
 	if err != nil {
@@ -500,15 +527,30 @@ func (s *Store) GetMetrics(ctx context.Context, since time.Time) (Metrics, error
 
 // GetProviderMetrics returns per-provider metrics.
 func (s *Store) GetProviderMetrics(ctx context.Context, since time.Time) ([]ProviderMetrics, error) {
+	return s.getProviderMetrics(ctx, since, "")
+}
+
+// GetProviderMetricsForAPIKey returns per-provider metrics only for one key.
+func (s *Store) GetProviderMetricsForAPIKey(ctx context.Context, since time.Time, apiKeyID string) ([]ProviderMetrics, error) {
+	return s.getProviderMetrics(ctx, since, apiKeyID)
+}
+
+func (s *Store) getProviderMetrics(ctx context.Context, since time.Time, apiKeyID string) ([]ProviderMetrics, error) {
 	sinceStr := since.Format(time.RFC3339Nano)
-	rows, err := s.db.QueryContext(ctx, `
+	where := "timestamp >= ?"
+	args := []any{sinceStr}
+	if apiKeyID != "" {
+		where += " AND api_key_id = ?"
+		args = append(args, apiKeyID)
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT provider,
 			COUNT(*),
 			COALESCE(AVG(latency_ms), 0),
 			COALESCE(SUM(cost), 0),
 			COALESCE(CAST(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS REAL) / NULLIF(COUNT(*), 0), 0)
-		FROM request_logs WHERE timestamp >= ?
-		GROUP BY provider`, sinceStr)
+		FROM request_logs WHERE %s
+		GROUP BY provider`, where), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1070,6 +1112,23 @@ func (s *Store) ListWorkspaces(ctx context.Context, organizationID string) ([]Wo
 		workspaces = append(workspaces, workspace)
 	}
 	return workspaces, rows.Err()
+}
+
+// GetWorkspaceByID returns the authoritative organization mapping for a
+// workspace. Authentication uses this to derive tenant scope rather than
+// trusting a request header supplied by the caller.
+func (s *Store) GetWorkspaceByID(ctx context.Context, id string) (Workspace, error) {
+	var workspace Workspace
+	var createdAt, metadata string
+	err := s.db.QueryRowContext(ctx,
+		"SELECT id, organization_id, name, created_at, metadata FROM workspaces WHERE id = ?", id,
+	).Scan(&workspace.ID, &workspace.OrganizationID, &workspace.Name, &createdAt, &metadata)
+	if err != nil {
+		return workspace, err
+	}
+	workspace.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	_ = json.Unmarshal([]byte(metadata), &workspace.Metadata)
+	return workspace, nil
 }
 
 func (s *Store) InsertUser(ctx context.Context, user User) error {

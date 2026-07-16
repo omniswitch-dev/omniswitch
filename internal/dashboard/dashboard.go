@@ -3,6 +3,7 @@ package dashboard
 import (
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"strconv"
@@ -38,6 +39,12 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("/", fileServer)
 }
 
+// RegisterPrometheus registers a lightweight Prometheus text endpoint. It is
+// kept separate from RegisterRoutes so operators can explicitly disable it.
+func (h *Handler) RegisterPrometheus(mux *http.ServeMux) {
+	mux.HandleFunc("/metrics", h.prometheus)
+}
+
 func (h *Handler) getLogs(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -48,7 +55,14 @@ func (h *Handler) getLogs(w http.ResponseWriter, r *http.Request) {
 		limit = 50
 	}
 
-	logs, total, err := h.store.ListLogs(r.Context(), limit, offset, providerFilter, statusFilter)
+	var logs []store.RequestLog
+	var total int
+	var err error
+	if keyID := scopedAPIKeyID(r); keyID != "" {
+		logs, total, err = h.store.ListLogsForAPIKey(r.Context(), keyID, limit, offset, providerFilter, statusFilter)
+	} else {
+		logs, total, err = h.store.ListLogs(r.Context(), limit, offset, providerFilter, statusFilter)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -74,7 +88,13 @@ func (h *Handler) getMetrics(w http.ResponseWriter, r *http.Request) {
 		since = now.Add(-30 * 24 * time.Hour)
 	}
 
-	metrics, err := h.store.GetMetrics(r.Context(), since)
+	var metrics store.Metrics
+	var err error
+	if keyID := scopedAPIKeyID(r); keyID != "" {
+		metrics, err = h.store.GetMetricsForAPIKey(r.Context(), since, keyID)
+	} else {
+		metrics, err = h.store.GetMetrics(r.Context(), since)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -84,7 +104,13 @@ func (h *Handler) getMetrics(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) getProviderMetrics(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().UTC().Add(-24 * time.Hour)
-	metrics, err := h.store.GetProviderMetrics(r.Context(), since)
+	var metrics []store.ProviderMetrics
+	var err error
+	if keyID := scopedAPIKeyID(r); keyID != "" {
+		metrics, err = h.store.GetProviderMetricsForAPIKey(r.Context(), since, keyID)
+	} else {
+		metrics, err = h.store.GetProviderMetrics(r.Context(), since)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -95,11 +121,42 @@ func (h *Handler) getProviderMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"providers": metrics})
 }
 
+// scopedAPIKeyID returns the key scope for non-administrative callers. The
+// authentication middleware owns these internal headers; callers cannot set
+// them when authentication is enabled because it overwrites their values.
+func scopedAPIKeyID(r *http.Request) string {
+	role := r.Header.Get("x-sentinel-role")
+	if role == "admin" || role == "owner" {
+		return ""
+	}
+	return r.Header.Get("x-sentinel-key-id")
+}
+
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "healthy",
 		"time":   time.Now().UTC(),
 	})
+}
+
+func (h *Handler) prometheus(w http.ResponseWriter, r *http.Request) {
+	metrics, err := h.store.GetMetrics(r.Context(), time.Now().UTC().Add(-24*time.Hour))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	fprintf := func(format string, values ...any) { _, _ = fmt.Fprintf(w, format, values...) }
+	fprintf("# HELP sentinel_requests_total Gateway requests over the last 24 hours.\n")
+	fprintf("# TYPE sentinel_requests_total counter\n")
+	fprintf("sentinel_requests_total %d\n", metrics.TotalRequests)
+	fprintf("sentinel_requests_allowed_total %d\n", metrics.AllowedCount)
+	fprintf("sentinel_requests_denied_total %d\n", metrics.DeniedCount)
+	fprintf("sentinel_requests_errors_total %d\n", metrics.ErrorCount)
+	fprintf("sentinel_cache_hits_total %d\n", metrics.CacheHits)
+	fprintf("sentinel_tokens_total %d\n", metrics.TotalTokens)
+	fprintf("sentinel_cost_usd_total %.6f\n", metrics.TotalCost)
+	fprintf("sentinel_request_latency_ms_average %.3f\n", metrics.AvgLatencyMs)
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

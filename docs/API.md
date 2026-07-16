@@ -27,6 +27,32 @@ Headers:
 - `x-sentinel-trace-id`: group calls into a trace
 - `x-sentinel-session-id`: group calls into an agent session
 
+Streaming is available on this endpoint with `stream: true`. Sentinel's default
+guardrail mode buffers stream output before emitting SSE so output policies can
+be enforced.
+
+### `POST /v1/responses`
+
+Implements the practical text/messages subset of the OpenAI Responses API:
+`model`, a string or message-array `input`, `instructions`, `temperature`,
+`max_output_tokens`, and `top_p`. It uses the same routing, cache, budget,
+guardrail, and logging path as chat completions. Responses streaming, tools,
+background mode, and other advanced Responses features are not yet supported.
+
+### `POST /v1/messages`
+
+Accepts the core Anthropic Messages shape (`model`, `messages`, `system`,
+`max_tokens`, `temperature`, `top_p`) and returns an Anthropic-style message
+result through the common Sentinel path. Streaming and Anthropic tool use are
+not yet supported.
+
+### `POST /v1/embeddings`
+
+Forwards OpenAI-compatible embedding requests (`model`, `input`, optional
+`encoding_format`, `dimensions`, and `user`) to OpenAI or a compatible custom
+provider. Input budget and guardrail checks apply; providers without an
+embeddings implementation are skipped in a configured fallback chain.
+
 ### `GET /v1/models`
 
 Returns all models registered through provider adapters and provider catalog aliases.
@@ -48,7 +74,9 @@ Query parameters:
 - `provider`
 - `status`
 
-Logs include capped raw `request_body` and `response_body` fields for debugging, incident review, and replay workflows.
+Raw `request_body` and `response_body` are present only when
+`log_payloads: true` is explicitly enabled; metadata, usage, cache, and status
+remain available by default.
 
 ### `GET /api/metrics`
 
@@ -61,6 +89,12 @@ Query parameters:
 ### `GET /api/metrics/providers`
 
 Returns per-provider aggregate metrics.
+
+### `GET /metrics`
+
+Returns Prometheus text-format gateway metrics for the last 24 hours when
+`prometheus_enabled` is true. With gateway authentication enabled, a viewer,
+member, admin, or owner key is required.
 
 ### `GET /api/providers`
 
@@ -264,8 +298,20 @@ The response includes aggregate `allowed`, `denied`, and `errors` counts plus ea
 
 ### `POST /mcp`
 
-Evaluates MCP JSON-RPC `tools/call` requests through Sentinel policy and forwards allowed requests upstream.
+Evaluates MCP JSON-RPC `tools/call` requests through Sentinel policy and forwards allowed requests upstream. With `mcp.targets` configured, `tools/list` federates tools from each target under `target__tool` names and `tools/call` dispatches the prefixed name to its owning target. Target headers are configured server-side and Sentinel credentials are not forwarded upstream.
 
 ### `POST /v1/mcp/tools/call`
 
 Alias for the MCP tool-call gateway.
+
+The current MCP implementation is HTTP JSON-RPC federation and policy control.
+It does not yet implement stdio, SSE/streamable HTTP, OAuth delegation, or A2A.
+
+## Roles and Scopes
+
+When `SENTINEL_AUTH=true`, API-key roles are `viewer`, `member`, `admin`, and
+`owner`. All valid keys can call inference and MCP. Viewers can read dashboard
+data (scoped to their own key); members can change prompts and run policy evals;
+admins/owners can mutate keys, virtual keys, and organization/workspace data.
+Admins and owners see global dashboard aggregates, while other roles are
+limited to their key's logs and metrics.

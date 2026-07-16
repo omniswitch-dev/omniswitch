@@ -89,3 +89,33 @@ func TestHandlerServeHTTP(t *testing.T) {
 		})
 	}
 }
+
+func TestMultiHandlerFederatesToolLists(t *testing.T) {
+	newUpstream := func(tool string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"` + tool + `"}]}}`))
+		}))
+	}
+	first := newUpstream("search")
+	defer first.Close()
+	second := newUpstream("deploy")
+	defer second.Close()
+	engine, err := policy.NewEngine()
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	handler, err := NewMultiHandler(engine, nil, []TargetConfig{
+		{Name: "docs", Upstream: first.URL},
+		{Name: "ops", Upstream: second.URL},
+	})
+	if err != nil {
+		t.Fatalf("NewMultiHandler() error = %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "docs__search") || !strings.Contains(rec.Body.String(), "ops__deploy") {
+		t.Fatalf("status/body = %d/%s, want both prefixed tools", rec.Code, rec.Body.String())
+	}
+}

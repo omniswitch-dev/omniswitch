@@ -157,6 +157,99 @@ func TestChatCompletionsSemanticCacheHit(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsCacheIsolatedByAPIKey(t *testing.T) {
+	st := newGatewayTestStore(t)
+	calls := 0
+	registry := provider.NewRegistry()
+	registry.Register(gatewayProvider{name: "test", model: "test-model", calls: &calls})
+	handler := New(registry, router.New(registry), st, guardrail.NewEngine())
+
+	for _, keyID := range []string{"key_one", "key_two"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+			"model":"test-model",
+			"messages":[{"role":"user","content":"same tenant-sensitive prompt"}]
+		}`))
+		req.Header.Set("x-sentinel-key-id", keyID)
+		handler.ChatCompletions(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request for %s status = %d, body = %s", keyID, rec.Code, rec.Body.String())
+		}
+		if rec.Header().Get("x-sentinel-cache") != "MISS" {
+			t.Fatalf("request for %s cache = %q, want MISS because cache scope differs", keyID, rec.Header().Get("x-sentinel-cache"))
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("provider calls = %d, want two isolated calls", calls)
+	}
+}
+
+func TestChatCompletionsStreamingBuffersDeniedOutput(t *testing.T) {
+	st := newGatewayTestStore(t)
+	registry := provider.NewRegistry()
+	registry.Register(gatewayProvider{name: "test", model: "test-model", content: "forbidden output"})
+	guardrails := guardrail.NewEngineWithConfig(guardrail.Config{Rules: []guardrail.Rule{{
+		Name: "forbidden-output", Stage: "output", Pattern: "forbidden", Action: "deny",
+	}}})
+	handler := New(registry, router.New(registry), st, guardrails)
+	handler.SetStreamGuardrailBuffer(true)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"test-model", "stream":true,
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	handler.ChatCompletions(rec, req)
+	if rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), "forbidden output") {
+		t.Fatalf("status/body = %d/%q, want blocked stream without output", rec.Code, rec.Body.String())
+	}
+}
+
+func TestResponsesAndMessagesCompatibility(t *testing.T) {
+	st := newGatewayTestStore(t)
+	registry := provider.NewRegistry()
+	registry.Register(gatewayProvider{name: "test", model: "test-model", content: "compatible"})
+	handler := New(registry, router.New(registry), st, guardrail.NewEngine())
+
+	for _, test := range []struct {
+		name string
+		path string
+		body string
+		want string
+	}{
+		{name: "responses", path: "/v1/responses", body: `{"model":"test-model","input":"hello"}`, want: `"object":"response"`},
+		{name: "messages", path: "/v1/messages", body: `{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`, want: `"type":"message"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body))
+			switch test.path {
+			case "/v1/responses":
+				handler.Responses(rec, req)
+			case "/v1/messages":
+				handler.Messages(rec, req)
+			}
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), test.want) || !strings.Contains(rec.Body.String(), "compatible") {
+				t.Fatalf("status/body = %d/%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestEmbeddingsCompatibility(t *testing.T) {
+	st := newGatewayTestStore(t)
+	registry := provider.NewRegistry()
+	registry.Register(embeddingGatewayProvider{})
+	handler := New(registry, router.New(registry), st, guardrail.NewEngine())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(`{"model":"embedding-model","input":"hello"}`))
+	handler.Embeddings(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"object":"list"`) {
+		t.Fatalf("status/body = %d/%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestChatCompletionsBudgetExceeded(t *testing.T) {
 	st := newGatewayTestStore(t)
 	rawKey := "sk-sentinel-budget"
@@ -296,6 +389,26 @@ func (p gatewayProvider) ChatCompletion(ctx context.Context, req provider.ChatRe
 }
 
 type streamCostProvider struct{}
+
+type embeddingGatewayProvider struct{}
+
+func (embeddingGatewayProvider) Name() string { return "embeddings" }
+
+func (embeddingGatewayProvider) Models() []provider.ModelInfo {
+	return []provider.ModelInfo{{ID: "embedding-model", Object: "model", OwnedBy: "embeddings", Provider: "embeddings"}}
+}
+
+func (embeddingGatewayProvider) ChatCompletion(context.Context, provider.ChatRequest) (provider.ChatResponse, provider.ProviderMeta, error) {
+	return provider.ChatResponse{}, provider.ProviderMeta{}, nil
+}
+
+func (embeddingGatewayProvider) Embeddings(_ context.Context, request provider.EmbeddingRequest) (provider.EmbeddingResponse, provider.ProviderMeta, error) {
+	return provider.EmbeddingResponse{
+		Object: "list", Model: request.Model,
+		Data:  []provider.Embedding{{Object: "embedding", Index: 0, Embedding: []float64{0.1, 0.2}}},
+		Usage: provider.Usage{PromptTokens: 1, TotalTokens: 1},
+	}, provider.ProviderMeta{Provider: "embeddings", Model: request.Model}, nil
+}
 
 func (p streamCostProvider) Name() string {
 	return "openai"
