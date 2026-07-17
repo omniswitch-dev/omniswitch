@@ -1,13 +1,13 @@
-# <p align="center"><img src="https://raw.githubusercontent.com/onlychirag/sentinel-ai-gateway/main/website/public/favicon.svg" width="48" height="48" alt="OmniSwitch Logo" /><br/>OmniSwitch</p>
+# <p align="center"><img src="https://raw.githubusercontent.com/omniswitch-dev/omniswitch-website/main/public/favicon.svg" width="48" height="48" alt="OmniSwitch Logo" /><br/>OmniSwitch</p>
 
 <p align="center">
   <strong>The Open-Source, Zero-Dependency AI Gateway & Guardrail Layer for Production Teams</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/omniswitch-dev/omniswitch/actions"><img src="https://img.shields.io/github/actions/workflow/status/onlychirag/sentinel-ai-gateway/build.yml?branch=main&style=flat-square" alt="Build Status" /></a>
-  <a href="https://golang.org"><img src="https://img.shields.io/github/go-mod/go-version/onlychirag/sentinel-ai-gateway?style=flat-square&color=blue" alt="Go Version" /></a>
-  <a href="https://github.com/omniswitch-dev/omniswitch/blob/main/LICENSE"><img src="https://img.shields.io/github/license/onlychirag/sentinel-ai-gateway?style=flat-square&color=emerald" alt="License" /></a>
+  <a href="https://github.com/omniswitch-dev/omniswitch/actions"><img src="https://img.shields.io/github/actions/workflow/status/omniswitch-dev/omniswitch/build.yml?branch=main&style=flat-square" alt="Build Status" /></a>
+  <a href="https://golang.org"><img src="https://img.shields.io/github/go-mod/go-version/omniswitch-dev/omniswitch?style=flat-square&color=blue" alt="Go Version" /></a>
+  <a href="https://github.com/omniswitch-dev/omniswitch/blob/main/LICENSE"><img src="https://img.shields.io/github/license/omniswitch-dev/omniswitch?style=flat-square&color=emerald" alt="License" /></a>
   <a href="https://omniswitch.dev"><img src="https://img.shields.io/badge/website-omniswitch.dev-purple?style=flat-square" alt="Website" /></a>
 </p>
 

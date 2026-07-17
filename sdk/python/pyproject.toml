@@ -10,8 +10,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/onlychirag/sentinel-ai-gateway"
-Repository = "https://github.com/onlychirag/sentinel-ai-gateway"
+Homepage = "https://github.com/omniswitch-dev/omniswitch"
+Repository = "https://github.com/omniswitch-dev/omniswitch"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
