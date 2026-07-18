@@ -182,6 +182,51 @@ func (c *Custom) Embeddings(ctx context.Context, req EmbeddingRequest) (Embeddin
 	return response, meta, nil
 }
 
+func (c *Custom) Rerank(ctx context.Context, req RerankRequest) (RerankResponse, ProviderMeta, error) {
+	start := time.Now()
+	meta := ProviderMeta{Provider: c.name, ProviderType: "custom", Model: req.Model, Timestamp: start}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return RerankResponse{}, meta, fmt.Errorf("marshal rerank request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.rerankURL(), bytes.NewReader(body))
+	if err != nil {
+		return RerankResponse{}, meta, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey := c.bearerAPIKey(); apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	for key, value := range c.extraHeaders {
+		httpReq.Header.Set(key, value)
+	}
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		meta.Latency = time.Since(start)
+		return RerankResponse{}, meta, fmt.Errorf("%s rerank request: %w", c.name, err)
+	}
+	defer resp.Body.Close()
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		meta.Latency = time.Since(start)
+		return RerankResponse{}, meta, fmt.Errorf("read rerank response: %w", err)
+	}
+	meta.Latency = time.Since(start)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Error = string(payload)
+		return RerankResponse{}, meta, fmt.Errorf("%s rerank error (status %d): %s", c.name, resp.StatusCode, string(payload))
+	}
+	var response RerankResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return RerankResponse{}, meta, fmt.Errorf("decode rerank response: %w", err)
+	}
+	if response.Model == "" {
+		response.Model = req.Model
+	}
+	meta.Cost = EstimateCost(c.name, req.Model, response.Usage)
+	return response, meta, nil
+}
+
 func (c *Custom) chatURL() string {
 	// If the base URL already contains "chat/completions", use as-is (e.g. Azure deployments).
 	if strings.Contains(c.baseURL, "/chat/completions") {
@@ -195,6 +240,19 @@ func (c *Custom) embeddingURL() string {
 		return strings.Replace(c.baseURL, "/chat/completions", "/embeddings", 1)
 	}
 	return c.baseURL + "/embeddings"
+}
+
+func (c *Custom) rerankURL() string {
+	if strings.Contains(c.baseURL, "/rerank") {
+		return c.baseURL
+	}
+	if strings.Contains(c.baseURL, "/chat/completions") {
+		return strings.Replace(c.baseURL, "/chat/completions", "/rerank", 1)
+	}
+	if strings.Contains(c.baseURL, "/embeddings") {
+		return strings.Replace(c.baseURL, "/embeddings", "/rerank", 1)
+	}
+	return c.baseURL + "/rerank"
 }
 
 func (c *Custom) bearerAPIKey() string {

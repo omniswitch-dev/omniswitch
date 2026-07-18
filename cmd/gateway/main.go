@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -123,13 +124,24 @@ func main() {
 	mux.HandleFunc("/v1/responses", gw.Responses)
 	mux.HandleFunc("/v1/messages", gw.Messages)
 	mux.HandleFunc("/v1/embeddings", gw.Embeddings)
+	mux.HandleFunc("/v1/moderations", gw.Moderations)
+	mux.HandleFunc("/v1/rerank", gw.Rerank)
 	mux.HandleFunc("/v1/models", gw.ListModels)
+	mux.HandleFunc("/.well-known/agent-card.json", gw.A2AAgentCard)
+	mux.HandleFunc("/a2a", gw.A2A)
 	mux.HandleFunc("/api/providers", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"providers": registry.Names(), "models": registry.AllModels()})
+	})
+	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, http.StatusOK, runtimeConfigSummary(settings, registry))
 	})
 	if settings.mcpEnabled {
 		mcpEngine, err := policy.NewEngineFromFiles(settings.mcpPolicyPath)
@@ -145,6 +157,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("failed to initialize MCP gateway: %v", err)
 		}
+		defer mcpHandler.Close()
 		mux.Handle("/mcp", mcpHandler)
 		mux.Handle("/v1/mcp/tools/call", mcpHandler)
 	}
@@ -271,8 +284,32 @@ func main() {
 
 	// Wrap with middleware.
 	auth := gateway.NewAuthMiddleware(st, settings.authEnabled)
+	if settings.oidcJWKSURL != "" {
+		oidcAuthenticator, err := gateway.NewJWTAuthenticator(gateway.JWTAuthenticatorConfig{
+			JWKSURL:           settings.oidcJWKSURL,
+			Issuer:            settings.oidcIssuer,
+			Audience:          settings.oidcAudience,
+			RoleClaim:         settings.oidcRoleClaim,
+			WorkspaceClaim:    settings.oidcWorkspaceClaim,
+			OrganizationClaim: settings.oidcOrganizationClaim,
+			CacheTTL:          settings.oidcCacheTTL,
+		})
+		if err != nil {
+			log.Fatalf("failed to initialize OIDC identity: %v", err)
+		}
+		auth.SetTokenAuthenticator(oidcAuthenticator)
+	}
 	authorize := gateway.NewAuthorizationMiddleware(settings.authEnabled)
-	rateLimiter := gateway.NewRateLimiter(120, time.Minute)
+	authorizationPolicy, err := gateway.NewAuthorizationPolicy(settings.authorizationRules)
+	if err != nil {
+		log.Fatalf("failed to initialize authorization policy: %v", err)
+	}
+	authorize.SetPolicy(authorizationPolicy)
+	rateLimiter, closeRateLimiter, err := buildRateLimiter(settings)
+	if err != nil {
+		log.Fatalf("failed to initialize rate limiter: %v", err)
+	}
+	defer closeRateLimiter()
 	handler := gateway.CORSMiddlewareWithOrigins(settings.corsOrigins, gateway.LoggingMiddleware(auth.Wrap(authorize.Wrap(rateLimiter.Wrap(mux)))))
 
 	// Print startup banner.
@@ -310,6 +347,12 @@ type runtimeSettings struct {
 	circuitBreakerFailures int
 	circuitBreakerCooldown time.Duration
 	guardrailConfig        guardrail.Config
+	authorizationRules     []gateway.AuthorizationRule
+	rateLimitRequests      int
+	rateLimitWindow        time.Duration
+	rateLimitRedisURL      string
+	rateLimitPrefix        string
+	rateLimitFailOpen      bool
 	guardrailStreamBuffer  bool
 	maxRequestBytes        int64
 	readHeaderTimeout      time.Duration
@@ -323,6 +366,13 @@ type runtimeSettings struct {
 	mcpTargets             []gatewayconfig.MCPTarget
 	routes                 map[string]router.Route
 	providerAccounts       []gatewayconfig.ProviderAccount
+	oidcJWKSURL            string
+	oidcIssuer             string
+	oidcAudience           string
+	oidcRoleClaim          string
+	oidcWorkspaceClaim     string
+	oidcOrganizationClaim  string
+	oidcCacheTTL           time.Duration
 	configPath             string
 	otelEnabled            bool
 	otelEndpoint           string
@@ -346,6 +396,9 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 		cacheScope:             "api_key",
 		circuitBreakerFailures: 5,
 		circuitBreakerCooldown: 60 * time.Second,
+		rateLimitRequests:      120,
+		rateLimitWindow:        time.Minute,
+		rateLimitPrefix:        "omniswitch:ratelimit",
 		guardrailStreamBuffer:  true,
 		maxRequestBytes:        10 << 20,
 		readHeaderTimeout:      5 * time.Second,
@@ -358,6 +411,7 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 		mcpPolicyPath:     "policies/production-delete.yaml",
 		mcpUpstreamURL:    "http://127.0.0.1:8090/mcp",
 		routes:            map[string]router.Route{},
+		oidcCacheTTL:      5 * time.Minute,
 		otelServiceName:   "omniswitch-gateway",
 		otelTimeout:       10 * time.Second,
 		prometheusEnabled: true,
@@ -387,6 +441,11 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 	settings.idleTimeout = envDuration("OMNISWITCH_IDLE_TIMEOUT", settings.idleTimeout)
 	settings.circuitBreakerFailures = envInt("OMNISWITCH_CIRCUIT_BREAKER_FAILURES", settings.circuitBreakerFailures)
 	settings.circuitBreakerCooldown = envDuration("OMNISWITCH_CIRCUIT_BREAKER_COOLDOWN", settings.circuitBreakerCooldown)
+	settings.rateLimitRequests = envInt("OMNISWITCH_RATE_LIMIT_REQUESTS", settings.rateLimitRequests)
+	settings.rateLimitWindow = envDuration("OMNISWITCH_RATE_LIMIT_WINDOW", settings.rateLimitWindow)
+	settings.rateLimitRedisURL = env("OMNISWITCH_RATE_LIMIT_REDIS_URL", settings.rateLimitRedisURL)
+	settings.rateLimitPrefix = env("OMNISWITCH_RATE_LIMIT_PREFIX", settings.rateLimitPrefix)
+	settings.rateLimitFailOpen = envBool("OMNISWITCH_RATE_LIMIT_FAIL_OPEN", settings.rateLimitFailOpen)
 	if value := strings.TrimSpace(os.Getenv("OMNISWITCH_CORS_ORIGINS")); value != "" {
 		settings.corsOrigins = parseCSV(value)
 	}
@@ -394,6 +453,13 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 	settings.mcpEnabled = envBool("OMNISWITCH_MCP_ENABLED", settings.mcpEnabled)
 	settings.mcpPolicyPath = env("OMNISWITCH_MCP_POLICY", settings.mcpPolicyPath)
 	settings.mcpUpstreamURL = env("OMNISWITCH_MCP_UPSTREAM", settings.mcpUpstreamURL)
+	settings.oidcJWKSURL = env("OMNISWITCH_OIDC_JWKS_URL", settings.oidcJWKSURL)
+	settings.oidcIssuer = env("OMNISWITCH_OIDC_ISSUER", settings.oidcIssuer)
+	settings.oidcAudience = env("OMNISWITCH_OIDC_AUDIENCE", settings.oidcAudience)
+	settings.oidcRoleClaim = env("OMNISWITCH_OIDC_ROLE_CLAIM", settings.oidcRoleClaim)
+	settings.oidcWorkspaceClaim = env("OMNISWITCH_OIDC_WORKSPACE_CLAIM", settings.oidcWorkspaceClaim)
+	settings.oidcOrganizationClaim = env("OMNISWITCH_OIDC_ORGANIZATION_CLAIM", settings.oidcOrganizationClaim)
+	settings.oidcCacheTTL = envDuration("OMNISWITCH_OIDC_CACHE_TTL", settings.oidcCacheTTL)
 	settings.otelEnabled = envBool("OMNISWITCH_OTEL_ENABLED", settings.otelEnabled)
 	settings.otelEndpoint = env("OMNISWITCH_OTEL_ENDPOINT", settings.otelEndpoint)
 	settings.otelServiceName = env("OMNISWITCH_OTEL_SERVICE_NAME", settings.otelServiceName)
@@ -409,6 +475,9 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 	settings.bootstrapRole = env("OMNISWITCH_BOOTSTRAP_ROLE", settings.bootstrapRole)
 	if settings.otelEndpoint != "" {
 		settings.otelEnabled = true
+	}
+	if settings.oidcJWKSURL != "" {
+		settings.authEnabled = true
 	}
 	for model, route := range parseABConfig(os.Getenv("OMNISWITCH_AB_TEST")) {
 		settings.routes[model] = mergeRoute(settings.routes[model], route)
@@ -453,7 +522,7 @@ func ensureBootstrapKey(ctx context.Context, st *store.Store, settings runtimeSe
 	if err != nil {
 		return fmt.Errorf("list existing API keys: %w", err)
 	}
-	if len(keys) == 0 {
+	if len(keys) == 0 && settings.oidcJWKSURL == "" {
 		return fmt.Errorf("authentication is enabled but no API keys exist; set OMNISWITCH_BOOTSTRAP_API_KEY for first startup")
 	}
 	return nil
@@ -505,8 +574,52 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 	if cfg.Gateway.IdleTimeout != nil {
 		settings.idleTimeout = cfg.Gateway.IdleTimeout.Duration
 	}
+	if cfg.Identity.OIDC.JWKSURL != "" {
+		settings.oidcJWKSURL = cfg.Identity.OIDC.JWKSURL
+	}
+	if cfg.Identity.OIDC.Issuer != "" {
+		settings.oidcIssuer = cfg.Identity.OIDC.Issuer
+	}
+	if cfg.Identity.OIDC.Audience != "" {
+		settings.oidcAudience = cfg.Identity.OIDC.Audience
+	}
+	if cfg.Identity.OIDC.RoleClaim != "" {
+		settings.oidcRoleClaim = cfg.Identity.OIDC.RoleClaim
+	}
+	if cfg.Identity.OIDC.WorkspaceClaim != "" {
+		settings.oidcWorkspaceClaim = cfg.Identity.OIDC.WorkspaceClaim
+	}
+	if cfg.Identity.OIDC.OrganizationClaim != "" {
+		settings.oidcOrganizationClaim = cfg.Identity.OIDC.OrganizationClaim
+	}
+	if cfg.Identity.OIDC.CacheTTL != nil {
+		settings.oidcCacheTTL = cfg.Identity.OIDC.CacheTTL.Duration
+	}
 	if cfg.Guardrails.Actions != nil {
 		settings.guardrailConfig.Actions = cfg.Guardrails.Actions
+	}
+	if cfg.Authorization.Rules != nil {
+		settings.authorizationRules = make([]gateway.AuthorizationRule, 0, len(cfg.Authorization.Rules))
+		for _, rule := range cfg.Authorization.Rules {
+			settings.authorizationRules = append(settings.authorizationRules, gateway.AuthorizationRule{
+				Name: rule.Name, When: rule.When, Effect: rule.Effect, Message: rule.Message,
+			})
+		}
+	}
+	if cfg.RateLimit.Requests != nil {
+		settings.rateLimitRequests = *cfg.RateLimit.Requests
+	}
+	if cfg.RateLimit.Window != nil {
+		settings.rateLimitWindow = cfg.RateLimit.Window.Duration
+	}
+	if cfg.RateLimit.RedisURL != "" {
+		settings.rateLimitRedisURL = cfg.RateLimit.RedisURL
+	}
+	if cfg.RateLimit.Prefix != "" {
+		settings.rateLimitPrefix = cfg.RateLimit.Prefix
+	}
+	if cfg.RateLimit.FailOpen != nil {
+		settings.rateLimitFailOpen = *cfg.RateLimit.FailOpen
 	}
 	if cfg.Guardrails.Rules != nil {
 		settings.guardrailConfig.Rules = make([]guardrail.Rule, 0, len(cfg.Guardrails.Rules))
@@ -514,6 +627,22 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 			settings.guardrailConfig.Rules = append(settings.guardrailConfig.Rules, guardrail.Rule{
 				Name: rule.Name, Stage: rule.Stage, Pattern: rule.Pattern, Action: rule.Action, Message: rule.Message,
 			})
+		}
+	}
+	if cfg.Guardrails.Webhooks != nil {
+		settings.guardrailConfig.Webhooks = make([]guardrail.Webhook, 0, len(cfg.Guardrails.Webhooks))
+		for _, webhook := range cfg.Guardrails.Webhooks {
+			configured := guardrail.Webhook{
+				Name: webhook.Name, URL: webhook.URL, Stage: webhook.Stage, Action: webhook.Action,
+				Headers: expandHeaderValues(webhook.Headers),
+			}
+			if webhook.Timeout != nil {
+				configured.Timeout = webhook.Timeout.Duration
+			}
+			if webhook.FailOpen != nil {
+				configured.FailOpen = *webhook.FailOpen
+			}
+			settings.guardrailConfig.Webhooks = append(settings.guardrailConfig.Webhooks, configured)
 		}
 	}
 	if cfg.Guardrails.StreamBuffer != nil {
@@ -562,6 +691,33 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 	settings.providerAccounts = append(settings.providerAccounts, cfg.Providers...)
 }
 
+func buildRateLimiter(settings runtimeSettings) (*gateway.RateLimiter, func(), error) {
+	if strings.TrimSpace(settings.rateLimitRedisURL) == "" {
+		return gateway.NewRateLimiter(settings.rateLimitRequests, settings.rateLimitWindow), func() {}, nil
+	}
+
+	backend, err := gateway.NewRedisRateLimitBackend(settings.rateLimitRedisURL, settings.rateLimitPrefix)
+	if err != nil {
+		return nil, nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := backend.Ping(ctx); err != nil {
+		_ = backend.Close()
+		return nil, nil, err
+	}
+	return gateway.NewRateLimiterWithBackend(
+			settings.rateLimitRequests,
+			settings.rateLimitWindow,
+			backend,
+			settings.rateLimitFailOpen,
+		), func() {
+			if err := backend.Close(); err != nil {
+				log.Printf("failed to close rate limit Redis client: %v", err)
+			}
+		}, nil
+}
+
 func buildMCPTargets(defaultEngine policy.Engine, settings runtimeSettings) ([]mcpproxy.TargetConfig, error) {
 	if len(settings.mcpTargets) == 0 {
 		return []mcpproxy.TargetConfig{{Name: "default", Upstream: settings.mcpUpstreamURL, Engine: defaultEngine}}, nil
@@ -580,13 +736,231 @@ func buildMCPTargets(defaultEngine policy.Engine, settings runtimeSettings) ([]m
 			engine = loaded
 		}
 		targets = append(targets, mcpproxy.TargetConfig{
-			Name: configured.Name, Upstream: configured.Upstream, Headers: expandHeaderValues(configured.Headers), Engine: engine,
+			Name: configured.Name, Transport: configured.Transport, Upstream: configured.Upstream,
+			Command: os.ExpandEnv(configured.Command), Args: expandStrings(configured.Args),
+			Environment: expandHeaderValues(configured.Environment), Headers: expandHeaderValues(configured.Headers), Engine: engine,
+			ForwardBearerToken: configured.ForwardBearerToken != nil && *configured.ForwardBearerToken,
 		})
 	}
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("no enabled MCP targets")
 	}
 	return targets, nil
+}
+
+func runtimeConfigSummary(settings runtimeSettings, registry *provider.Registry) map[string]any {
+	providerNames := []string{}
+	modelCount := 0
+	if registry != nil {
+		providerNames = registry.Names()
+		sort.Strings(providerNames)
+		modelCount = len(registry.AllModels())
+	}
+	return map[string]any{
+		"config_path": settings.configPath,
+		"gateway": map[string]any{
+			"listen":                   settings.listenAddr,
+			"auth_enabled":             settings.authEnabled,
+			"cache_threshold":          settings.cacheThreshold,
+			"cache_ttl":                settings.cacheTTL.String(),
+			"cache_scope":              settings.cacheScope,
+			"log_payloads":             settings.logPayloads,
+			"cors_origins":             append([]string(nil), settings.corsOrigins...),
+			"max_request_bytes":        settings.maxRequestBytes,
+			"read_header_timeout":      settings.readHeaderTimeout.String(),
+			"read_timeout":             settings.readTimeout.String(),
+			"write_timeout":            settings.writeTimeout.String(),
+			"idle_timeout":             settings.idleTimeout.String(),
+			"circuit_breaker_failures": settings.circuitBreakerFailures,
+			"circuit_breaker_cooldown": settings.circuitBreakerCooldown.String(),
+			"shadow_provider":          settings.shadowProvider,
+		},
+		"rate_limit": map[string]any{
+			"requests":  settings.rateLimitRequests,
+			"window":    settings.rateLimitWindow.String(),
+			"backend":   rateLimitBackendName(settings),
+			"prefix":    settings.rateLimitPrefix,
+			"fail_open": settings.rateLimitFailOpen,
+		},
+		"identity": map[string]any{
+			"api_keys_enabled": settings.authEnabled,
+			"oidc": map[string]any{
+				"enabled":            settings.oidcJWKSURL != "",
+				"issuer":             settings.oidcIssuer,
+				"audience":           settings.oidcAudience,
+				"role_claim":         settings.oidcRoleClaim,
+				"workspace_claim":    settings.oidcWorkspaceClaim,
+				"organization_claim": settings.oidcOrganizationClaim,
+				"cache_ttl":          settings.oidcCacheTTL.String(),
+			},
+		},
+		"authorization": map[string]any{
+			"rule_count": len(settings.authorizationRules),
+			"rules":      authorizationRuleSummaries(settings.authorizationRules),
+		},
+		"guardrails": map[string]any{
+			"stream_buffer":  settings.guardrailStreamBuffer,
+			"actions":        cloneStringMap(settings.guardrailConfig.Actions),
+			"rule_count":     len(settings.guardrailConfig.Rules),
+			"rules":          guardrailRuleSummaries(settings.guardrailConfig.Rules),
+			"webhook_count":  len(settings.guardrailConfig.Webhooks),
+			"webhooks":       guardrailWebhookSummaries(settings.guardrailConfig.Webhooks),
+			"moderation_api": true,
+		},
+		"providers": map[string]any{
+			"names":       providerNames,
+			"model_count": modelCount,
+		},
+		"routes": routeSummaries(settings.routes),
+		"mcp": map[string]any{
+			"enabled": settings.mcpEnabled,
+			"targets": mcpTargetSummaries(settings),
+		},
+		"a2a": map[string]any{
+			"enabled":            true,
+			"agent_card_path":    "/.well-known/agent-card.json",
+			"jsonrpc_path":       "/a2a",
+			"methods":            []string{"SendMessage", "GetExtendedAgentCard"},
+			"task_lifecycle":     false,
+			"streaming":          false,
+			"push_notifications": false,
+		},
+	}
+}
+
+func rateLimitBackendName(settings runtimeSettings) string {
+	if strings.TrimSpace(settings.rateLimitRedisURL) != "" {
+		return "redis"
+	}
+	return "local"
+}
+
+func authorizationRuleSummaries(rules []gateway.AuthorizationRule) []map[string]string {
+	summaries := make([]map[string]string, 0, len(rules))
+	for _, rule := range rules {
+		summaries = append(summaries, map[string]string{
+			"name":   rule.Name,
+			"effect": rule.Effect,
+		})
+	}
+	return summaries
+}
+
+func guardrailRuleSummaries(rules []guardrail.Rule) []map[string]string {
+	summaries := make([]map[string]string, 0, len(rules))
+	for _, rule := range rules {
+		summaries = append(summaries, map[string]string{
+			"name":   rule.Name,
+			"stage":  rule.Stage,
+			"action": rule.Action,
+		})
+	}
+	return summaries
+}
+
+func guardrailWebhookSummaries(webhooks []guardrail.Webhook) []map[string]any {
+	summaries := make([]map[string]any, 0, len(webhooks))
+	for _, webhook := range webhooks {
+		summaries = append(summaries, map[string]any{
+			"name":      webhook.Name,
+			"stage":     webhook.Stage,
+			"action":    webhook.Action,
+			"timeout":   webhook.Timeout.String(),
+			"fail_open": webhook.FailOpen,
+		})
+	}
+	return summaries
+}
+
+func routeSummaries(routes map[string]router.Route) []map[string]any {
+	names := make([]string, 0, len(routes))
+	for name := range routes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	summaries := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		route := routes[name]
+		summaries = append(summaries, map[string]any{
+			"model":           name,
+			"provider":        route.Provider,
+			"fallbacks":       append([]string(nil), route.Fallbacks...),
+			"max_retries":     route.MaxRetries,
+			"retry_backoff":   route.RetryBackoff,
+			"retry_codes":     append([]int(nil), route.RetryCodes...),
+			"timeout":         route.Timeout,
+			"shadow_provider": route.ShadowProvider,
+			"default_params":  cloneAnyMap(route.DefaultParams),
+			"override_params": cloneAnyMap(route.OverrideParams),
+			"drop_params":     append([]string(nil), route.DropParams...),
+			"variants":        append([]router.Variant(nil), route.Variants...),
+		})
+	}
+	return summaries
+}
+
+func mcpTargetSummaries(settings runtimeSettings) []map[string]any {
+	if len(settings.mcpTargets) == 0 {
+		if strings.TrimSpace(settings.mcpUpstreamURL) == "" {
+			return []map[string]any{}
+		}
+		return []map[string]any{{
+			"name":                   "default",
+			"transport":              "http",
+			"enabled":                settings.mcpEnabled,
+			"policy_configured":      strings.TrimSpace(settings.mcpPolicyPath) != "",
+			"headers_configured":     false,
+			"environment_configured": false,
+			"forward_bearer_token":   false,
+		}}
+	}
+	summaries := make([]map[string]any, 0, len(settings.mcpTargets))
+	for _, target := range settings.mcpTargets {
+		transport := strings.TrimSpace(target.Transport)
+		if transport == "" {
+			transport = "http"
+		}
+		enabled := true
+		if target.Enabled != nil {
+			enabled = *target.Enabled
+		}
+		forwardBearer := false
+		if target.ForwardBearerToken != nil {
+			forwardBearer = *target.ForwardBearerToken
+		}
+		summaries = append(summaries, map[string]any{
+			"name":                   target.Name,
+			"transport":              transport,
+			"enabled":                enabled,
+			"policy_configured":      strings.TrimSpace(target.Policy) != "",
+			"headers_configured":     len(target.Headers) > 0,
+			"environment_configured": len(target.Environment) > 0,
+			"forward_bearer_token":   forwardBearer,
+		})
+	}
+	return summaries
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return map[string]string{}
+	}
+	cloned := make(map[string]string, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneAnyMap(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return map[string]any{}
+	}
+	cloned := make(map[string]any, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func mergeRoute(base, override router.Route) router.Route {
@@ -709,6 +1083,17 @@ func expandHeaderValues(headers map[string]string) map[string]string {
 	expanded := make(map[string]string, len(headers))
 	for key, value := range headers {
 		expanded[key] = os.ExpandEnv(value)
+	}
+	return expanded
+}
+
+func expandStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	expanded := make([]string, len(values))
+	for index, value := range values {
+		expanded[index] = os.ExpandEnv(value)
 	}
 	return expanded
 }

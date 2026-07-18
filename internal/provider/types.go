@@ -176,6 +176,37 @@ type EmbeddingProvider interface {
 	Embeddings(ctx context.Context, req EmbeddingRequest) (EmbeddingResponse, ProviderMeta, error)
 }
 
+// RerankRequest and RerankResponse mirror the common Cohere/Jina-style rerank
+// shape while keeping documents flexible enough for strings or document
+// objects.
+type RerankRequest struct {
+	Model           string `json:"model"`
+	Query           string `json:"query"`
+	Documents       []any  `json:"documents"`
+	TopN            *int   `json:"top_n,omitempty"`
+	ReturnDocuments bool   `json:"return_documents,omitempty"`
+	MaxChunksPerDoc *int   `json:"max_chunks_per_doc,omitempty"`
+	User            string `json:"user,omitempty"`
+}
+
+type RerankResult struct {
+	Index          int     `json:"index"`
+	RelevanceScore float64 `json:"relevance_score"`
+	Document       any     `json:"document,omitempty"`
+}
+
+type RerankResponse struct {
+	ID      string         `json:"id,omitempty"`
+	Object  string         `json:"object,omitempty"`
+	Model   string         `json:"model,omitempty"`
+	Results []RerankResult `json:"results"`
+	Usage   Usage          `json:"usage,omitempty"`
+}
+
+type RerankProvider interface {
+	Rerank(ctx context.Context, req RerankRequest) (RerankResponse, ProviderMeta, error)
+}
+
 type ChatResponseChunk struct {
 	ID      string        `json:"id"`
 	Object  string        `json:"object"`

@@ -24,6 +24,38 @@ gateway:
   idle_timeout: 60s
   shadow_provider: ""
 
+# OmniSwitch uses a local sliding-window quota by default. Configure Redis to
+# enforce the same fixed-window quota across every gateway replica.
+rate_limit:
+  requests: 120
+  window: 1m
+  # redis_url: redis://redis:6379/0
+  prefix: omniswitch:ratelimit
+  # Keep false in production: return 503 if the shared quota store is down.
+  fail_open: false
+
+authorization:
+  # A deny rule always wins. If one or more allow rules are configured, callers
+  # must match an allow rule as well. Variables: method, path, model,
+  # api_key_id, subject, workspace_id, organization_id, role, and claims.
+  rules:
+    - name: prohibit-production-model-for-members
+      when: 'role == "member" && model == "production-model"'
+      effect: deny
+      message: This model requires an administrator key
+
+# Local API keys and OIDC workload tokens can coexist. Adding a JWKS endpoint
+# automatically enables authentication, even when gateway.auth is omitted.
+identity:
+  oidc:
+    # jwks_url: https://issuer.example.com/.well-known/jwks.json
+    issuer: https://issuer.example.com/
+    audience: omniswitch
+    role_claim: roles
+    workspace_claim: workspace_id
+    organization_claim: organization_id
+    cache_ttl: 5m
+
 guardrails:
   # Supported actions: deny, redact, warn, and log. deny/redact change the
   # response; warn/log create structured guardrail audit events.
@@ -31,6 +63,18 @@ guardrails:
     injection: deny
     pii: redact
   stream_buffer: true
+  # Opt-in connector for a managed or in-house moderation service. The service
+  # receives {stage, text, messages} and returns {triggered, message, details}
+  # or {allowed}. Keep fail_open false for safety-critical checks.
+  # webhooks:
+  #   - name: managed-moderation
+  #     url: https://guardrails.example.com/v1/check
+  #     stage: input
+  #     action: deny
+  #     headers:
+  #       authorization: "Bearer ${GUARDRAIL_API_KEY}"
+  #     timeout: 3s
+  #     fail_open: false
   rules:
     - name: block-internal-secret-marker
       stage: both
@@ -102,6 +146,16 @@ mcp:
       policy: policies/production-delete.yaml
       headers:
         x-api-key: "${GITHUB_MCP_TOKEN}"
+      # Delegate the caller's OIDC bearer token, never an OmniSwitch API key.
+      forward_bearer_token: false
+
+    # A local stdio MCP server can run without an HTTP sidecar.
+    # - name: filesystem
+    #   transport: stdio
+    #   command: npx
+    #   args: ["-y", "@modelcontextprotocol/server-filesystem", "${WORKSPACE_ROOT}"]
+    #   environment:
+    #     LOG_LEVEL: warn
 
 routes:
   fast-chat:

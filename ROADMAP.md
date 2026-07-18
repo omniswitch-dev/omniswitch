@@ -4,10 +4,11 @@ OmniSwitch's goal is to become a local-first, open-source control plane for AI g
 
 ## Near Term
 
-- Workspace enforcement middleware and SSO/SAML integration on top of the current organization/workspace/user data model.
-- Richer MCP server registry with credential injection and per-tool access policies.
+- Shared storage or external control-plane support for horizontally scaled key, log, budget, and config state.
+- SAML/mTLS identity options on top of the current API key and OIDC/JWKS model.
+- OpenAPI-to-MCP conversion and richer MCP OAuth client flows.
 - Prompt rollback and playground workflows on top of the current prompt version API.
-- Guardrail registry and configurable guardrail bundles.
+- Guardrail retry, reroute, and fallback actions after policy violations.
 - Dashboard trace waterfall, cost charts, and eval report views.
 
 ## Medium Term
@@ -15,7 +16,8 @@ OmniSwitch's goal is to become a local-first, open-source control plane for AI g
 - Evaluation datasets and model-quality simulations on top of the current policy replay endpoint.
 - Visual policy and routing editor.
 - First-class provider adapters for non-OpenAI-compatible APIs, including AWS Bedrock and Cohere.
-- Embeddings, rerank, image, and audio endpoints.
+- Image, audio, batch, and file endpoints.
+- Fuller A2A task lifecycle, streaming, push notifications, and outbound agent calls.
 
 ## Long Term
 

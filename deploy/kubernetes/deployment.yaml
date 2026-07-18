@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omniswitch-gateway
+  namespace: omniswitch
+  labels:
+    app.kubernetes.io/name: omniswitch
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: omniswitch
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: omniswitch
+        app.kubernetes.io/component: gateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8080"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: gateway
+          image: ghcr.io/omniswitch-dev/omniswitch:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: OMNISWITCH_CONFIG
+              value: /config/gateway.yaml
+          envFrom:
+            - secretRef:
+                name: omniswitch-secrets
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: omniswitch-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: omniswitch-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: omniswitch-data
+  namespace: omniswitch
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

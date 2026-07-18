@@ -35,11 +35,46 @@ gateway:
   write_timeout: 0s
   idle_timeout: 60s
 
+rate_limit:
+  requests: 120
+  window: 1m
+  # Set to share quotas across gateway replicas.
+  redis_url: redis://redis:6379/0
+  prefix: omniswitch:ratelimit
+  # false returns 503 if Redis is unavailable; true preserves availability.
+  fail_open: false
+
+authorization:
+  rules:
+    - name: member-model-restriction
+      when: 'role == "member" && model == "production-model"'
+      effect: deny
+      message: This model requires an administrator key
+
+identity:
+  oidc:
+    jwks_url: https://issuer.example.com/.well-known/jwks.json
+    issuer: https://issuer.example.com/
+    audience: omniswitch
+    role_claim: roles
+    workspace_claim: workspace_id
+    organization_claim: organization_id
+    cache_ttl: 5m
+
 guardrails:
   actions:
     injection: deny
     pii: redact
   stream_buffer: true
+  webhooks:
+    - name: managed-moderation
+      url: https://guardrails.example.com/v1/check
+      stage: input
+      action: deny
+      headers:
+        authorization: "Bearer ${GUARDRAIL_API_KEY}"
+      timeout: 3s
+      fail_open: false
   rules:
     - name: no-secret-marker
       stage: both
@@ -75,6 +110,15 @@ mcp:
       policy: policies/production-delete.yaml
       headers:
         x-api-key: "${GITHUB_MCP_TOKEN}"
+      # Forward an OIDC bearer token only; OmniSwitch API keys never leave the gateway.
+      forward_bearer_token: false
+
+    - name: filesystem
+      transport: stdio
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "${WORKSPACE_ROOT}"]
+      environment:
+        LOG_LEVEL: warn
 
 routes:
   canary-chat:
@@ -169,6 +213,31 @@ cross-origin browser access. `max_request_bytes`, `read_header_timeout`,
 limits. The write timeout defaults to `0s` so long-running SSE streams are not
 cut off; set a positive value only when streaming is not required.
 
+## Authorization and Rate Limits
+
+`authorization.rules` are CEL policies evaluated after API-key authentication.
+They receive `method`, `path`, `model`, `api_key_id`, `workspace_id`,
+`organization_id`, `role`, `subject`, and `claims`. A matching `deny` always
+wins. When any `allow` rule exists, a request must also match at least one
+allow rule. This composes with the built-in role checks for the control plane.
+
+`rate_limit` controls the default request quota. Every API key can still set
+its own quota in the control plane. Without `redis_url`, the gateway uses a
+local sliding window, suitable for one replica. With Redis, OmniSwitch uses an
+atomic fixed-window counter shared by all replicas. The startup check fails
+closed by default if Redis cannot be reached; `fail_open: true` lets traffic
+continue if Redis later becomes unavailable.
+
+## OIDC Workload Identity
+
+`identity.oidc` accepts JWTs signed by the public keys at `jwks_url`, alongside
+locally issued API keys. It supports RSA, ECDSA, and Ed25519 signing keys and
+verifies expiration, issuer, and audience when those values are configured.
+The JWT `sub` becomes the request subject and quota/cache key; role, workspace,
+and organization claims are mapped with the configurable claim names. JWT
+claims are also available to authorization CEL rules as `subject` and
+`claims`. Supplying a JWKS URL enables gateway authentication automatically.
+
 When `auth: true` is used on an empty database, set
 `OMNISWITCH_BOOTSTRAP_API_KEY` for the first process start. OmniSwitch stores only
 its SHA-256 hash and creates the `bootstrap-admin` owner key. Store the secret
@@ -197,14 +266,26 @@ path. `stream_buffer: true` (default) buffers an SSE response before emitting
 it, allowing output enforcement; turning it off reduces latency but makes
 stream output a trusted-provider trade-off.
 
+`guardrails.webhooks` adds an opt-in connector for a managed or in-house
+moderation service. OmniSwitch sends `{stage, text, messages}` and expects
+`{triggered, message, details}` or `{allowed}`. The configured `action`
+controls enforcement; `fail_open: false` (the safer default) treats an
+unavailable webhook as a guardrail trigger, while `true` ignores its failure.
+
 ## MCP Targets
 
 The legacy `upstream` is a default HTTP MCP upstream. `targets` adds federated
 HTTP MCP servers. `tools/list` combines allowed target tools under stable
 `target__tool` names, and `tools/call` dispatches the prefixed tool to the
-matching upstream with the target's policy and configured headers. OmniSwitch
-currently supports HTTP MCP transport here; stdio, SSE/streamable transport,
-OAuth delegation, and A2A are not implemented.
+matching upstream with the target's policy and configured headers. HTTP
+responses with `text/event-stream` are streamed through without gateway
+buffering, so streamable HTTP and SSE-capable MCP servers work through the same
+endpoint. Set `forward_bearer_token: true` only for targets that require
+OAuth/OIDC delegation: it forwards the authenticated OIDC bearer token and
+never forwards a local OmniSwitch API key. Stdio targets use a persistent
+newline-delimited JSON-RPC child process and serialize calls per target.
+OpenAPI conversion is not implemented. A2A is not an MCP target type; it is
+served separately through public Agent Card discovery and `/a2a` JSON-RPC.
 
 ## Provider Vault
 
@@ -244,6 +325,18 @@ curl -X POST http://localhost:8080/api/virtual-keys \
 - `OMNISWITCH_IDLE_TIMEOUT`
 - `OMNISWITCH_CIRCUIT_BREAKER_FAILURES`
 - `OMNISWITCH_CIRCUIT_BREAKER_COOLDOWN`
+- `OMNISWITCH_RATE_LIMIT_REQUESTS`
+- `OMNISWITCH_RATE_LIMIT_WINDOW`
+- `OMNISWITCH_RATE_LIMIT_REDIS_URL`
+- `OMNISWITCH_RATE_LIMIT_PREFIX`
+- `OMNISWITCH_RATE_LIMIT_FAIL_OPEN`
+- `OMNISWITCH_OIDC_JWKS_URL`
+- `OMNISWITCH_OIDC_ISSUER`
+- `OMNISWITCH_OIDC_AUDIENCE`
+- `OMNISWITCH_OIDC_ROLE_CLAIM`
+- `OMNISWITCH_OIDC_WORKSPACE_CLAIM`
+- `OMNISWITCH_OIDC_ORGANIZATION_CLAIM`
+- `OMNISWITCH_OIDC_CACHE_TTL`
 - `OMNISWITCH_SHADOW_PROVIDER`
 - `OMNISWITCH_AB_TEST`
 - `OMNISWITCH_OTEL_ENABLED`

@@ -167,6 +167,54 @@ func (r *Router) Embeddings(ctx context.Context, req provider.EmbeddingRequest, 
 	return provider.EmbeddingResponse{}, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all embedding providers exhausted: %w", lastErr)
 }
 
+// Rerank routes common RAG reranking requests through providers that implement
+// the optional rerank interface. Providers that do not support rerank are
+// skipped in a fallback chain.
+func (r *Router) Rerank(ctx context.Context, req provider.RerankRequest, providerHint string) (provider.RerankResponse, provider.ProviderMeta, error) {
+	logicalModel := req.Model
+	route, hasRoute := r.routeFor(logicalModel)
+	selectedRoute := false
+	if providerHint == "" {
+		if variant, ok := r.selectVariant(logicalModel, provider.ChatRequest{Model: logicalModel}); ok {
+			providerHint = variant.Provider
+			selectedRoute = true
+			if variant.Model != "" {
+				req.Model = variant.Model
+			}
+		}
+	}
+	providers := r.resolveProviders(logicalModel, req.Model, providerHint, route, hasRoute && (selectedRoute || providerHint == ""))
+	if len(providers) == 0 {
+		return provider.RerankResponse{}, provider.ProviderMeta{}, fmt.Errorf("no provider found for model %q", req.Model)
+	}
+	var lastErr error
+	for index, current := range providers {
+		rerankProvider, ok := current.(provider.RerankProvider)
+		if !ok {
+			lastErr = fmt.Errorf("provider %q does not support rerank", current.Name())
+			continue
+		}
+		if !r.allowProvider(current.Name()) {
+			lastErr = fmt.Errorf("provider %q circuit is open", current.Name())
+			continue
+		}
+		callCtx, cancel := withRouteTimeout(ctx, route.Timeout)
+		response, meta, err := rerankProvider.Rerank(callCtx, req)
+		cancel()
+		if err == nil {
+			r.recordSuccess(current.Name())
+			meta.Fallback = index > 0
+			if meta.Model == "" {
+				meta.Model = req.Model
+			}
+			return response, meta, nil
+		}
+		r.recordFailure(current.Name())
+		lastErr = err
+	}
+	return provider.RerankResponse{}, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all rerank providers exhausted: %w", lastErr)
+}
+
 // Execute routes a chat request to the appropriate provider,
 // handling retries and fallbacks automatically.
 func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, providerHint string) (provider.ChatResponse, provider.ProviderMeta, error) {

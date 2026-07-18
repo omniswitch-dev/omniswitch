@@ -168,7 +168,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// Input guardrails.
 	if h.guardrails != nil {
-		results := h.guardrails.EvaluateInput(req.Messages)
+		results := h.guardrails.EvaluateInputContext(ctx, req.Messages)
 		h.recordGuardrailResults(ctx, reqID, results)
 		for _, gr := range results {
 			if gr.Action == "deny" {
@@ -195,7 +195,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	backendReq.Stream = false
 	cacheProvider := firstNonEmpty(providerHint, "auto")
 	if cachedResp, ok := h.cachedResponse(ctx, tenantCacheScope, cacheProvider, backendReq); ok {
-		if denied, _, reason := h.outputGuardrailDisposition(ctx, reqID, cachedResp); denied {
+		if denied, _, reason := h.outputGuardrailDisposition(ctx, reqID, &cachedResp); denied {
 			h.logRequest(ctx, logContext{
 				ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &cachedResp,
 				APIKeyID: apiKeyID, Status: "denied", ErrorMessage: reason, Cached: true,
@@ -254,7 +254,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// Output guardrails inspect every completion choice. Redacted output is what
 	// gets cached and logged, so a later cache hit cannot restore sensitive data.
-	if denied, _, reason := h.outputGuardrailDisposition(ctx, reqID, resp); denied {
+	if denied, _, reason := h.outputGuardrailDisposition(ctx, reqID, &resp); denied {
 		span.SetAttributes(
 			attribute.String("sentinel.decision", "DENY"),
 			attribute.String("sentinel.decision_reason", reason),
@@ -456,7 +456,7 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 	}
 
 	if bufferOutput {
-		denied, redacted, reason := h.outputGuardrailDisposition(ctx, streamCtx.ID, aggregated)
+		denied, redacted, reason := h.outputGuardrailDisposition(ctx, streamCtx.ID, &aggregated)
 		if denied {
 			span.SetStatus(codes.Error, "stream output guardrail denied")
 			h.logRequest(ctx, logContext{
@@ -516,19 +516,19 @@ func setStreamHeaders(w http.ResponseWriter, traceID, sessionID string) {
 
 // outputGuardrailDisposition evaluates every generated choice. A redaction
 // replaces the affected output before it is logged, cached, or returned.
-func (h *Handler) outputGuardrailDisposition(ctx context.Context, requestID string, resp provider.ChatResponse) (denied, redacted bool, reason string) {
+func (h *Handler) outputGuardrailDisposition(ctx context.Context, requestID string, resp *provider.ChatResponse) (denied, redacted bool, reason string) {
 	if h.guardrails == nil {
 		return false, false, ""
 	}
 	for index := range resp.Choices {
-		results := h.guardrails.EvaluateOutput(resp.Choices[index].Message.Content)
+		results := h.guardrails.EvaluateOutputContext(ctx, resp.Choices[index].Message.Content)
 		h.recordGuardrailResults(ctx, requestID, results)
 		for _, result := range results {
 			switch result.Action {
 			case "deny":
 				return true, false, result.Message
 			case "redact":
-				resp.Choices[index].Message.Content = "[REDACTED BY SENTINEL]"
+				resp.Choices[index].Message.Content = "[REDACTED BY OMNISWITCH]"
 				redacted = true
 			}
 		}

@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/omniswitch-dev/omniswitch/internal/adapter/mcp"
 	"github.com/omniswitch-dev/omniswitch/internal/audit"
@@ -21,17 +20,24 @@ import (
 // exposed through the shared OmniSwitch MCP endpoint; its tools are prefixed
 // with "<target>__" in tools/list responses.
 type TargetConfig struct {
-	Name     string
-	Upstream string
-	Headers  map[string]string
-	Engine   policy.Engine
+	Name               string
+	Transport          string
+	Upstream           string
+	Command            string
+	Args               []string
+	Environment        map[string]string
+	Headers            map[string]string
+	ForwardBearerToken bool
+	Engine             policy.Engine
 }
 
 type target struct {
-	name     string
-	engine   policy.Engine
-	upstream *url.URL
-	headers  map[string]string
+	name               string
+	engine             policy.Engine
+	upstream           *url.URL
+	stdio              *stdioClient
+	headers            map[string]string
+	forwardBearerToken bool
 }
 
 type Handler struct {
@@ -61,7 +67,9 @@ func NewMultiHandler(engine policy.Engine, auditor audit.Logger, configs []Targe
 		engine:  engine,
 		auditor: auditor,
 		targets: make(map[string]target, len(configs)),
-		client:  &http.Client{Timeout: 30 * time.Second},
+		// Request contexts still control cancellation. A client-wide timeout
+		// would terminate valid long-lived MCP SSE/streamable responses.
+		client: &http.Client{},
 	}
 	for index, config := range configs {
 		name := strings.TrimSpace(config.Name)
@@ -72,24 +80,54 @@ func NewMultiHandler(engine policy.Engine, auditor audit.Logger, configs []Targe
 		if _, exists := handler.targets[key]; exists {
 			return nil, fmt.Errorf("duplicate MCP target %q", name)
 		}
-		parsed, err := url.Parse(config.Upstream)
-		if err != nil {
-			return nil, fmt.Errorf("parse MCP target %q upstream: %w", name, err)
+		transport := strings.ToLower(strings.TrimSpace(config.Transport))
+		if transport == "" {
+			transport = "http"
 		}
-		if parsed.Scheme == "" || parsed.Host == "" {
-			return nil, fmt.Errorf("MCP target %q upstream must include scheme and host", name)
+		configuredTarget := target{name: name, headers: cloneHeaders(config.Headers), forwardBearerToken: config.ForwardBearerToken}
+		switch transport {
+		case "http", "streamable_http":
+			parsed, err := url.Parse(config.Upstream)
+			if err != nil {
+				return nil, fmt.Errorf("parse MCP target %q upstream: %w", name, err)
+			}
+			if parsed.Scheme == "" || parsed.Host == "" {
+				return nil, fmt.Errorf("MCP target %q upstream must include scheme and host", name)
+			}
+			configuredTarget.upstream = parsed
+		case "stdio":
+			client, err := newStdioClient(config.Command, config.Args, config.Environment)
+			if err != nil {
+				return nil, fmt.Errorf("configure MCP target %q stdio transport: %w", name, err)
+			}
+			configuredTarget.stdio = client
+		default:
+			return nil, fmt.Errorf("MCP target %q uses unsupported transport %q", name, config.Transport)
 		}
 		engineForTarget := config.Engine
 		if engineForTarget == nil {
 			engineForTarget = engine
 		}
-		handler.targets[key] = target{name: name, engine: engineForTarget, upstream: parsed, headers: cloneHeaders(config.Headers)}
+		configuredTarget.engine = engineForTarget
+		handler.targets[key] = configuredTarget
 		handler.targetOrder = append(handler.targetOrder, key)
 		if index == 0 {
 			handler.defaultName = key
 		}
 	}
 	return handler, nil
+}
+
+// Close stops persistent transports owned by the handler.
+func (h *Handler) Close() {
+	if h == nil {
+		return
+	}
+	for _, target := range h.targets {
+		if target.stdio != nil {
+			target.stdio.stop()
+		}
+	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -199,35 +237,45 @@ func (h *Handler) targetForTool(name string) (target, string) {
 }
 
 func (h *Handler) forwardToTarget(w http.ResponseWriter, ctx context.Context, target target, body []byte, headers http.Header) {
-	status, responseHeaders, response, err := h.callTarget(ctx, target, body, headers)
+	if target.stdio != nil {
+		status, responseHeaders, response, err := h.callTarget(ctx, target, body, headers)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, mcp.ErrorResponse(nil, -32603, "Forwarding failed", err))
+			return
+		}
+		for key, values := range responseHeaders {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write(response)
+		return
+	}
+	response, err := h.targetRequest(ctx, target, body, headers)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, mcp.ErrorResponse(nil, -32603, "Forwarding failed", err))
 		return
 	}
-	for key, values := range responseHeaders {
+	defer response.Body.Close()
+	for key, values := range response.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
-	w.WriteHeader(status)
-	_, _ = w.Write(response)
+	w.WriteHeader(response.StatusCode)
+	streamTargetResponse(w, response.Body, response.Header.Get("Content-Type"))
 }
 
 func (h *Handler) callTarget(ctx context.Context, target target, body []byte, incoming http.Header) (int, http.Header, []byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.upstream.String(), bytes.NewReader(body))
-	if err != nil {
-		return 0, nil, nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	for _, key := range []string{"Accept", "Mcp-Protocol-Version", "Mcp-Session-Id"} {
-		if value := incoming.Get(key); value != "" {
-			req.Header.Set(key, value)
+	if target.stdio != nil {
+		payload, err := target.stdio.Call(ctx, body)
+		if err != nil {
+			return 0, nil, nil, err
 		}
+		return http.StatusOK, http.Header{"Content-Type": {"application/json"}}, payload, nil
 	}
-	for key, value := range target.headers {
-		req.Header.Set(key, value)
-	}
-	response, err := h.client.Do(req)
+	response, err := h.targetRequest(ctx, target, body, incoming)
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -237,6 +285,59 @@ func (h *Handler) callTarget(ctx context.Context, target target, body []byte, in
 		return 0, nil, nil, err
 	}
 	return response.StatusCode, response.Header, payload, nil
+}
+
+func (h *Handler) targetRequest(ctx context.Context, target target, body []byte, incoming http.Header) (*http.Response, error) {
+	if target.upstream == nil {
+		return nil, fmt.Errorf("HTTP target is not configured")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.upstream.String(), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for _, key := range []string{"Accept", "Mcp-Protocol-Version", "Mcp-Session-Id", "Last-Event-ID"} {
+		if value := incoming.Get(key); value != "" {
+			req.Header.Set(key, value)
+		}
+	}
+	// A target can receive an OIDC bearer token only when explicitly enabled.
+	// OmniSwitch API keys are never forwarded to avoid leaking a gateway secret
+	// to an MCP server.
+	if target.forwardBearerToken && incoming.Get("x-omniswitch-auth-method") == "oidc" {
+		if authorization := incoming.Get("Authorization"); authorization != "" {
+			req.Header.Set("Authorization", authorization)
+		}
+	}
+	for key, value := range target.headers {
+		req.Header.Set(key, value)
+	}
+	response, err := h.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func streamTargetResponse(w http.ResponseWriter, body io.Reader, contentType string) {
+	if !strings.Contains(strings.ToLower(contentType), "text/event-stream") {
+		_, _ = io.Copy(w, body)
+		return
+	}
+	flusher, _ := w.(http.Flusher)
+	buffer := make([]byte, 32*1024)
+	for {
+		read, err := body.Read(buffer)
+		if read > 0 {
+			_, _ = w.Write(buffer[:read])
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 func requestIdentity(r *http.Request) model.Agent {

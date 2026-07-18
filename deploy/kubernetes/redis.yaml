@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omniswitch-redis
+  namespace: omniswitch
+  labels:
+    app.kubernetes.io/name: omniswitch
+    app.kubernetes.io/component: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: omniswitch
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: omniswitch
+        app.kubernetes.io/component: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: redis
+              containerPort: 6379
+          args: ["redis-server", "--appendonly", "yes"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: omniswitch-redis-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: omniswitch-redis-data
+  namespace: omniswitch
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: omniswitch-redis
+  namespace: omniswitch
+  labels:
+    app.kubernetes.io/name: omniswitch
+    app.kubernetes.io/component: redis
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: omniswitch
+    app.kubernetes.io/component: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis

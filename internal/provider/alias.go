@@ -95,6 +95,23 @@ func (p *AliasProvider) Embeddings(ctx context.Context, req EmbeddingRequest) (E
 	return response, meta, err
 }
 
+func (p *AliasProvider) Rerank(ctx context.Context, req RerankRequest) (RerankResponse, ProviderMeta, error) {
+	provider, ok := p.inner.(RerankProvider)
+	if !ok {
+		return RerankResponse{}, ProviderMeta{Provider: p.name, Model: req.Model}, fmt.Errorf("provider %q does not support rerank", p.inner.Name())
+	}
+	originalModel := req.Model
+	req.Model = p.stripModel(req.Model)
+	response, meta, err := provider.Rerank(ctx, req)
+	meta.ProviderType = p.inner.Name()
+	meta.Provider = p.name
+	meta.Model = originalModel
+	if response.Model != "" {
+		response.Model = originalModel
+	}
+	return response, meta, err
+}
+
 func (p *AliasProvider) stripModel(model string) string {
 	prefix := p.name + "/"
 	if strings.HasPrefix(model, prefix) {

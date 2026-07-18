@@ -1,7 +1,7 @@
 # <p align="center"><img src="https://raw.githubusercontent.com/omniswitch-dev/omniswitch-website/main/public/favicon.svg" width="48" height="48" alt="OmniSwitch Logo" /><br/>OmniSwitch</p>
 
 <p align="center">
-  <strong>The Open-Source, Zero-Dependency AI Gateway & Guardrail Layer for Production Teams</strong>
+  <strong>Open-source AI gateway, guardrail, and agent-protocol layer for production teams</strong>
 </p>
 
 <p align="center">
@@ -11,76 +11,53 @@
   <a href="https://omniswitch.dev"><img src="https://img.shields.io/badge/website-omniswitch.dev-purple?style=flat-square" alt="Website" /></a>
 </p>
 
----
+OmniSwitch is a self-hosted AI gateway for routing, securing, caching, and
+observing LLM traffic across OpenAI-compatible clients, provider backends, MCP
+tools, and basic A2A agent discovery. It runs as a single Go binary with SQLite
+as the built-in store; Redis is optional when you need shared request limits
+across multiple gateway replicas.
 
-OmniSwitch is a high-performance, single-binary AI gateway designed to route, secure, cache, and observe all your LLM traffic across 1,600+ models. 
+## Key Capabilities
 
-Unlike SaaS-only alternatives or heavy microservice proxies, OmniSwitch runs completely locally with **zero external dependencies** (no Redis, Postgres, or external vector DB required), utilizing an embedded high-concurrency **SQLite** engine for key management, semantic vector caching, policy auditing, and request logging.
+- **OpenAI-compatible gateway:** `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/embeddings`, `/v1/rerank`, `/v1/moderations`, and `/v1/models`.
+- **Provider routing:** Native OpenAI, Anthropic, Google, and Groq adapters plus any OpenAI-compatible custom endpoint.
+- **Reliability controls:** Fallback chains, weighted variants, CEL route conditions, retries, retryable status codes, timeouts, circuit breakers, and shadow routing.
+- **Tenant-safe cache and quotas:** Exact and semantic cache with API key, workspace, organization, or global scope; per-key budgets; local or Redis-backed request limits.
+- **Identity and authorization:** Hashed API keys, bootstrap owner key, role gates, OIDC/JWKS workload identity, and CEL allow/deny authorization policies.
+- **Guardrails:** Built-in PII, injection, SQL, toxic, and secret checks; regex rules; webhook guardrail connectors; local OpenAI-compatible moderation; output redaction and buffered SSE protection.
+- **MCP gateway:** HTTP and streamable HTTP/SSE pass-through, persistent stdio targets, federated `tools/list`, policy-gated `tools/call`, target headers, and explicit OIDC bearer delegation.
+- **A2A gateway:** Public Agent Card discovery plus authenticated JSON-RPC `SendMessage` through the governed chat pipeline.
+- **Observability and operations:** SQLite logs, traces/sessions, feedback, provider metrics, OTLP trace export, Prometheus `/metrics`, Docker, and Kubernetes Kustomize manifests.
 
-## 🚀 Key Capabilities
+## Quickstart
 
-*   **Unified OpenAI-Compatible API:** Single endpoint to query OpenAI, Anthropic, Gemini, Groq, or any local custom deployment (Ollama, vLLM, DeepSeek, Together AI).
-*   **Zero-Overhead Semantic Caching:** Local SQLite-backed exact-match and semantic similarity vector caching to slash token bills and latency.
-*   **Sub-Millisecond Guardrails:** Local input/output guardrails executing CEL (Common Expression Language) and regex to block prompt injection, toxic content, SQL injection, and PII leaks.
-*   **Virtual Key Vault:** Securely map and rotate upstream API keys behind locally generated Virtual Keys encrypted via AES-256-GCM.
-*   **Advanced Routing & Split-Testing:** Declarative config for model retries, fallback options, status-code routing, shadow routing (async compare), and weighted A/B routes.
-*   **Model Context Protocol (MCP) Integration:** Built-in HTTP tool federation and policy-governed tool execution for autonomous AI agents.
-*   **OTel Tracing & Prometheus:** Built-in OpenTelemetry trace exporting and Prometheus `/metrics` endpoint for enterprise-grade observability.
-*   **Built-in Local Dashboard:** Responsive React dashboard served directly from the gateway binary to monitor usage, cost, and audit logs.
-
----
-
-## 🗺️ Architectural Flow
-
-```mermaid
-graph TD
-    A[Your App / SDK] -->|REST API / SSE| B(OmniSwitch Gateway)
-    B -->|1. AES Key Vault| C{Auth & Limits}
-    B -->|2. Exact/Semantic| D[Local SQLite Cache]
-    B -->|3. Input Check| E[CEL & Pattern Guardrails]
-    
-    C -->|If Allowed & Cache Miss| F{Router Engine}
-    F -->|Weighted Split / shadow| G[OpenAI]
-    F -->|Fallback Route| H[Anthropic]
-    F -->|Custom Endpoint| I[Ollama / DeepSeek]
-    
-    G & H & I -->|4. Output Check| J[Redact / Deny Filter]
-    J -->|5. OTel Traces / Logs| K[Prometheus & SQLite DB]
-    J -->|Response| A
-```
-
----
-
-## ⚡ Quickstart
-
-### 1. Build and Run Natively
-
-OmniSwitch is written in Go and compiles to a single binary:
+Build and run locally:
 
 ```bash
-# Clone the repository
 git clone https://github.com/omniswitch-dev/omniswitch.git
-cd sentinel-ai-gateway
-
-# Start the Gateway with your API keys
+cd omniswitch
 OPENAI_API_KEY=your_key_here go run ./cmd/gateway
 ```
 
-The gateway will start on `http://localhost:8080` and host the built-in developer dashboard at `http://localhost:8080/`.
+The gateway starts on `http://localhost:8080` and serves the dashboard at
+`http://localhost:8080/`.
 
-### 2. Run with Docker Compose
-
-Spin up the gateway in seconds:
+Run with Docker Compose:
 
 ```bash
 docker compose up -d
 ```
 
----
+Run on Kubernetes:
 
-## 🛠️ Declarative Configuration
+```bash
+kubectl apply -k deploy/kubernetes
+```
 
-Define gateway routes, caching, fallbacks, and security guardrails using a simple `config.yaml` file:
+Replace the example secrets in `deploy/kubernetes/secret.example.yaml` before
+using the Kubernetes manifests outside a throwaway environment.
+
+## Example Configuration
 
 ```yaml
 apiVersion: omniswitch.dev/v1
@@ -88,125 +65,97 @@ kind: GatewayConfig
 
 gateway:
   listen: ":8080"
-  cache_threshold: 0.95        # Semantic vector similarity threshold
-  cache_ttl: 24h
+  auth: true
+  cache_scope: api_key
+  log_payloads: false
+
+rate_limit:
+  requests: 120
+  window: 1m
+  redis_url: redis://redis:6379/0
+
+identity:
+  oidc:
+    jwks_url: https://issuer.example.com/.well-known/jwks.json
+    issuer: https://issuer.example.com/
+    audience: omniswitch
+
+authorization:
+  rules:
+    - name: member-model-restriction
+      when: 'role == "member" && model == "production-model"'
+      effect: deny
 
 providers:
   - name: openai-prod
     type: openai
     api_key_env: OPENAI_API_KEY
 
+guardrails:
+  stream_buffer: true
+  actions:
+    injection: deny
+    pii: redact
+
 mcp:
   enabled: true
   policy: policies/production-delete.yaml
-  upstream: http://127.0.0.1:8090/mcp
+  targets:
+    - name: github
+      upstream: http://127.0.0.1:8091/mcp
+      headers:
+        x-api-key: "${GITHUB_MCP_TOKEN}"
 
 routes:
-  gpt-4o-logical:
+  logical-chat:
     fallbacks: ["@anthropic-prod"]
     max_retries: 2
     retry_codes: [429, 500, 502, 503, 504]
-    shadow_provider: "@openai-shadow"
+    timeout: 30s
     variants:
-      - provider: openai-prod
-        model: gpt-4o-mini
-        weight: 90
-      - provider: anthropic-prod
-        model: claude-3-5-haiku-latest
-        weight: 10
+      - provider: "@openai-prod"
+        model: "@openai-prod/gpt-4o-mini"
+        weight: 100
 ```
 
-Run the gateway using this configuration file:
-```bash
-OMNISWITCH_CONFIG=config.yaml go run ./cmd/gateway
-```
-
----
-
-## 📦 Client Integrations
-
-OmniSwitch provides lightweight SDK wrappers that extend the official OpenAI SDKs to support tracing, provider overrides, and key vault routing.
-
-### Python SDK
+Run with the config file:
 
 ```bash
-pip install openai  # OmniSwitch wraps the official SDK
+OMNISWITCH_CONFIG=examples/gateway-config.yaml go run ./cmd/gateway
 ```
 
-```python
-from sdk.python import OmniSwitch
+## Compatibility Snapshot
 
-client = OmniSwitch(
-    gateway_url="http://localhost:8080",
-    api_key="your-omniswitch-key",
-    trace_id="user-session-99",     # Observability mapping
-    session_id="conv-flow-abc"
-)
+| Area | OmniSwitch today |
+| --- | --- |
+| Inference APIs | Chat, Responses subset, Anthropic Messages subset, embeddings, rerank, models, local moderation |
+| Routing | Fallbacks, weighted variants, CEL conditions, retries, timeouts, circuit breaker, shadow traffic |
+| Security | API keys, OIDC/JWKS, CEL authorization, workspace/org scoping, encrypted provider vault |
+| Guardrails | Built-in checks, regex rules, webhooks, redaction, buffered output checks |
+| MCP | HTTP, streamable HTTP/SSE, stdio, tool federation, policy and audit |
+| A2A | Agent Card, `SendMessage`, `GetExtendedAgentCard` |
+| Deployment | Binary, Docker Compose, Kubernetes manifests, optional Redis for shared request limits |
 
-# Route request automatically
-response = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[{"role": "user", "content": "How does semantic caching work?"}]
-)
-print(response.choices[0].message.content)
-```
+See [docs/PORTKEY_COMPARISON.md](docs/PORTKEY_COMPARISON.md) for the full
+Portkey and AgentGateway comparison.
 
-### Node.js SDK
+## Client Integrations
 
-```bash
-npm install openai
-```
+OmniSwitch works with normal OpenAI-compatible clients by setting the base URL
+to your gateway and using an OmniSwitch API key when authentication is enabled.
+The lightweight SDK wrappers in `sdk/` add convenience headers for traces,
+sessions, provider overrides, and virtual key routing.
 
-```javascript
-const { OmniSwitch } = require('./sdk/node');
+## Repository Map
 
-const client = new OmniSwitch({
-  gatewayUrl: 'http://localhost:8080',
-  apiKey: 'your-omniswitch-key'
-});
+- `cmd/gateway`: AI gateway, dashboard, MCP, A2A, and management API server.
+- `internal/gateway`: OpenAI-compatible handlers, identity, quotas, cache, guardrails, and A2A.
+- `internal/router`: Provider routing, fallbacks, retries, variants, and request shaping.
+- `internal/proxy`: MCP federation, stdio transport, and policy-enforced tool forwarding.
+- `internal/store`: SQLite persistence for keys, logs, prompts, feedback, budgets, and cache.
+- `deploy/kubernetes`: Kustomize baseline for self-hosted Kubernetes deployment.
+- `docs`: API, configuration, deployment, architecture, and comparison docs.
 
-async function main() {
-  const stream = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [{ role: 'user', content: 'Explain shadow routing.' }],
-    stream: true
-  });
-  
-  for await (const chunk of stream) {
-    process.stdout.write(chunk.choices[0]?.delta?.content || '');
-  }
-}
-main();
-```
+## License
 
----
-
-## 📊 Feature Parity Map
-
-| Operational Capability | Portkey AI Gateway | AgentGateway (Solo.io) | OmniSwitch |
-| :--- | :--- | :--- | :--- |
-| **Philosophy** | Commercial SaaS (OSS SDK) | Enterprise K8s/Envoy | **Open-source, self-hosted single binary** |
-| **Dependencies** | Requires Redis, Postgres, vector DB | Requires Envoy control plane | **Zero external dependencies (SQLite embedded)** |
-| **Unified inference API** | Yes | Yes | **Yes** (`/v1/chat/completions`, `/v1/models`, `/v1/embeddings`) |
-| **Shadow Routing** | No (open source) | No | **Yes** (Asynchronous mirror execution) |
-| **Semantic Caching** | Yes | No | **Yes** (Built-in cosine-similarity cache) |
-| **Real-time Guardrails** | Yes (managed cloud) | Yes (Envoy filters) | **Yes** (CEL & local pattern scanner) |
-| **Model Context Protocol** | Yes | Yes | **Yes** (Gated HTTP tool execution) |
-| **Local Admin Dashboard** | No (hosted cloud console) | No | **Yes** (Built-in React dashboard) |
-
----
-
-## 📖 Directory Structure
-
-*   [`cmd/gateway`](cmd/gateway/): Main gateway proxy server and local dashboard server.
-*   [`internal/gateway`](internal/gateway/): Proxy handler, route resolution, and token bucketing.
-*   [`internal/cache`](internal/cache/): Cosine similarity semantic caching and exact-match cache logic.
-*   [`internal/guardrail`](internal/guardrail/): CEL validator, SQL injection detector, and toxic content checker.
-*   [`internal/store`](internal/store/): SQLite database connection pool, migration files, and audit log handlers.
-*   [`website/`](website/): Product landing page, comparison matrix, and developer docs.
-
----
-
-## 🛡️ License
-
-OmniSwitch is distributed under the Apache-2.0 License. See [LICENSE](LICENSE) for more details.
+OmniSwitch is distributed under the Apache-2.0 License. See [LICENSE](LICENSE).

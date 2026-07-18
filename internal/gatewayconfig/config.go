@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,9 +27,52 @@ type Config struct {
 	Gateway       Gateway                 `json:"gateway,omitempty" yaml:"gateway,omitempty"`
 	Observability Observability           `json:"observability,omitempty" yaml:"observability,omitempty"`
 	Providers     []ProviderAccount       `json:"providers,omitempty" yaml:"providers,omitempty"`
+	Identity      Identity                `json:"identity,omitempty" yaml:"identity,omitempty"`
+	Authorization Authorization           `json:"authorization,omitempty" yaml:"authorization,omitempty"`
+	RateLimit     RateLimit               `json:"rate_limit,omitempty" yaml:"rate_limit,omitempty"`
 	Guardrails    Guardrails              `json:"guardrails,omitempty" yaml:"guardrails,omitempty"`
 	MCP           MCP                     `json:"mcp,omitempty" yaml:"mcp,omitempty"`
 	Routes        map[string]router.Route `json:"routes,omitempty" yaml:"routes,omitempty"`
+}
+
+// Identity configures external workload identity in addition to local API
+// keys. OIDC JWTs are validated against the issuer's JWKS endpoint.
+type Identity struct {
+	OIDC OIDC `json:"oidc,omitempty" yaml:"oidc,omitempty"`
+}
+
+type OIDC struct {
+	JWKSURL           string    `json:"jwks_url,omitempty" yaml:"jwks_url,omitempty"`
+	Issuer            string    `json:"issuer,omitempty" yaml:"issuer,omitempty"`
+	Audience          string    `json:"audience,omitempty" yaml:"audience,omitempty"`
+	RoleClaim         string    `json:"role_claim,omitempty" yaml:"role_claim,omitempty"`
+	WorkspaceClaim    string    `json:"workspace_claim,omitempty" yaml:"workspace_claim,omitempty"`
+	OrganizationClaim string    `json:"organization_claim,omitempty" yaml:"organization_claim,omitempty"`
+	CacheTTL          *Duration `json:"cache_ttl,omitempty" yaml:"cache_ttl,omitempty"`
+}
+
+// Authorization configures CEL authorization after API-key authentication.
+// If one or more allow rules are present, every request must match an allow
+// rule and must not match a deny rule.
+type Authorization struct {
+	Rules []AuthorizationRule `json:"rules,omitempty" yaml:"rules,omitempty"`
+}
+
+type AuthorizationRule struct {
+	Name    string `json:"name,omitempty" yaml:"name,omitempty"`
+	When    string `json:"when" yaml:"when"`
+	Effect  string `json:"effect" yaml:"effect"`
+	Message string `json:"message,omitempty" yaml:"message,omitempty"`
+}
+
+// RateLimit configures a request quota. When RedisURL is omitted, OmniSwitch
+// uses its local sliding-window backend.
+type RateLimit struct {
+	Requests *int      `json:"requests,omitempty" yaml:"requests,omitempty"`
+	Window   *Duration `json:"window,omitempty" yaml:"window,omitempty"`
+	RedisURL string    `json:"redis_url,omitempty" yaml:"redis_url,omitempty"`
+	Prefix   string    `json:"prefix,omitempty" yaml:"prefix,omitempty"`
+	FailOpen *bool     `json:"fail_open,omitempty" yaml:"fail_open,omitempty"`
 }
 
 type Gateway struct {
@@ -65,9 +109,10 @@ type MCP struct {
 // rules. Actions are keyed by built-in check type, for example injection:
 // deny or pii: redact.
 type Guardrails struct {
-	Actions      map[string]string `json:"actions,omitempty" yaml:"actions,omitempty"`
-	Rules        []GuardrailRule   `json:"rules,omitempty" yaml:"rules,omitempty"`
-	StreamBuffer *bool             `json:"stream_buffer,omitempty" yaml:"stream_buffer,omitempty"`
+	Actions      map[string]string  `json:"actions,omitempty" yaml:"actions,omitempty"`
+	Rules        []GuardrailRule    `json:"rules,omitempty" yaml:"rules,omitempty"`
+	Webhooks     []GuardrailWebhook `json:"webhooks,omitempty" yaml:"webhooks,omitempty"`
+	StreamBuffer *bool              `json:"stream_buffer,omitempty" yaml:"stream_buffer,omitempty"`
 }
 
 type GuardrailRule struct {
@@ -78,14 +123,31 @@ type GuardrailRule struct {
 	Message string `json:"message,omitempty" yaml:"message,omitempty"`
 }
 
+// GuardrailWebhook delegates a stage to an external moderation or safety
+// service. Its endpoint returns {triggered,message,details} or {allowed}.
+type GuardrailWebhook struct {
+	Name     string            `json:"name" yaml:"name"`
+	URL      string            `json:"url" yaml:"url"`
+	Stage    string            `json:"stage,omitempty" yaml:"stage,omitempty"`
+	Action   string            `json:"action,omitempty" yaml:"action,omitempty"`
+	Headers  map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	Timeout  *Duration         `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	FailOpen *bool             `json:"fail_open,omitempty" yaml:"fail_open,omitempty"`
+}
+
 // MCPTarget is a named remote MCP server. Multiple targets are exposed through
 // one OmniSwitch endpoint and tool names are prefixed with the target name.
 type MCPTarget struct {
-	Name     string            `json:"name" yaml:"name"`
-	Upstream string            `json:"upstream" yaml:"upstream"`
-	Policy   string            `json:"policy,omitempty" yaml:"policy,omitempty"`
-	Headers  map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
-	Enabled  *bool             `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Name               string            `json:"name" yaml:"name"`
+	Transport          string            `json:"transport,omitempty" yaml:"transport,omitempty"`
+	Upstream           string            `json:"upstream" yaml:"upstream"`
+	Command            string            `json:"command,omitempty" yaml:"command,omitempty"`
+	Args               []string          `json:"args,omitempty" yaml:"args,omitempty"`
+	Environment        map[string]string `json:"environment,omitempty" yaml:"environment,omitempty"`
+	Policy             string            `json:"policy,omitempty" yaml:"policy,omitempty"`
+	Headers            map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	ForwardBearerToken *bool             `json:"forward_bearer_token,omitempty" yaml:"forward_bearer_token,omitempty"`
+	Enabled            *bool             `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 }
 
 type Observability struct {
@@ -188,6 +250,31 @@ func Validate(cfg Config) error {
 	if cfg.Observability.Timeout != nil && cfg.Observability.Timeout.Duration < 0 {
 		return fmt.Errorf("observability.timeout must be non-negative")
 	}
+	if cfg.Identity.OIDC.JWKSURL != "" {
+		parsed, err := url.Parse(cfg.Identity.OIDC.JWKSURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("identity.oidc.jwks_url must be an absolute HTTP(S) URL")
+		}
+	}
+	if cfg.Identity.OIDC.CacheTTL != nil && cfg.Identity.OIDC.CacheTTL.Duration <= 0 {
+		return fmt.Errorf("identity.oidc.cache_ttl must be positive")
+	}
+	for index, rule := range cfg.Authorization.Rules {
+		if strings.TrimSpace(rule.When) == "" {
+			return fmt.Errorf("authorization.rules[%d].when is required", index)
+		}
+		switch strings.ToLower(strings.TrimSpace(rule.Effect)) {
+		case "allow", "deny":
+		default:
+			return fmt.Errorf("authorization.rules[%d].effect must be allow or deny", index)
+		}
+	}
+	if cfg.RateLimit.Requests != nil && *cfg.RateLimit.Requests < 1 {
+		return fmt.Errorf("rate_limit.requests must be positive")
+	}
+	if cfg.RateLimit.Window != nil && cfg.RateLimit.Window.Duration <= 0 {
+		return fmt.Errorf("rate_limit.window must be positive")
+	}
 	for i, account := range cfg.Providers {
 		if strings.TrimSpace(account.Name) == "" {
 			return fmt.Errorf("providers[%d].name is required", i)
@@ -200,8 +287,17 @@ func Validate(cfg Config) error {
 		if strings.TrimSpace(target.Name) == "" {
 			return fmt.Errorf("mcp.targets[%d].name is required", i)
 		}
-		if strings.TrimSpace(target.Upstream) == "" {
-			return fmt.Errorf("mcp.targets[%d].upstream is required", i)
+		switch strings.ToLower(strings.TrimSpace(target.Transport)) {
+		case "", "http", "streamable_http":
+			if strings.TrimSpace(target.Upstream) == "" {
+				return fmt.Errorf("mcp.targets[%d].upstream is required for HTTP transport", i)
+			}
+		case "stdio":
+			if strings.TrimSpace(target.Command) == "" {
+				return fmt.Errorf("mcp.targets[%d].command is required for stdio transport", i)
+			}
+		default:
+			return fmt.Errorf("mcp.targets[%d].transport must be http, streamable_http, or stdio", i)
 		}
 	}
 	for i, rule := range cfg.Guardrails.Rules {
@@ -218,6 +314,26 @@ func Validate(cfg Config) error {
 		}
 		if rule.Action != "" && !validGuardrailAction(rule.Action) {
 			return fmt.Errorf("guardrails.rules[%d].action must be deny, redact, warn, or log", i)
+		}
+	}
+	for i, webhook := range cfg.Guardrails.Webhooks {
+		if strings.TrimSpace(webhook.Name) == "" || strings.TrimSpace(webhook.URL) == "" {
+			return fmt.Errorf("guardrails.webhooks[%d] requires name and url", i)
+		}
+		parsed, err := url.Parse(webhook.URL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("guardrails.webhooks[%d].url must be an absolute HTTP(S) URL", i)
+		}
+		switch webhook.Stage {
+		case "", "input", "output", "both":
+		default:
+			return fmt.Errorf("guardrails.webhooks[%d].stage must be input, output, or both", i)
+		}
+		if webhook.Action != "" && !validGuardrailAction(webhook.Action) {
+			return fmt.Errorf("guardrails.webhooks[%d].action must be deny, redact, warn, or log", i)
+		}
+		if webhook.Timeout != nil && webhook.Timeout.Duration <= 0 {
+			return fmt.Errorf("guardrails.webhooks[%d].timeout must be positive", i)
 		}
 	}
 	for check, action := range cfg.Guardrails.Actions {

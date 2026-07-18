@@ -5,7 +5,7 @@ OmniSwitch is designed to run as a single self-hosted binary.
 ## Build Binaries
 
 ```bash
-go build -o bin/sentinel ./cmd/omniswitch
+go build -o bin/omniswitch ./cmd/omniswitch
 go build -o bin/gateway ./cmd/gateway
 go build -o bin/proxy ./cmd/proxy
 ```
@@ -24,14 +24,31 @@ OPENAI_API_KEY=... \
 ## Run with Docker
 
 ```bash
-docker build -t sentinel-ai-gateway .
+docker build -t omniswitch-ai-gateway .
 docker run --rm -p 8080:8080 \
   -e OPENAI_API_KEY=... \
   -e OMNISWITCH_AUTH=true \
   -e OMNISWITCH_BOOTSTRAP_API_KEY=replace-with-a-secret-manager-value \
   -e OMNISWITCH_CONFIG=examples/gateway-config.yaml \
-  sentinel-ai-gateway
+  omniswitch-ai-gateway
 ```
+
+## Run on Kubernetes
+
+The repository includes a Kustomize baseline in `deploy/kubernetes`. It creates
+the gateway Deployment, ClusterIP Service, ConfigMap, Secret example, persistent
+SQLite volume, and a Redis instance for shared request-rate limits.
+
+```bash
+kubectl apply -k deploy/kubernetes
+```
+
+Before production use, replace values in
+`deploy/kubernetes/secret.example.yaml` through your cluster secret manager or
+an overlay. Keep `replicas: 1` while using the bundled SQLite control-plane
+store. Redis lets multiple gateway pods share request quotas, but API keys,
+logs, prompts, budgets, and cache entries remain on the mounted SQLite volume
+until OmniSwitch is connected to a shared database or external control plane.
 
 ## Persistence
 
@@ -55,4 +72,4 @@ Set `OMNISWITCH_DATA` or `gateway.data_dir` to a persistent directory. SQLite st
 - Use a reverse proxy for TLS.
 - `/metrics` is Prometheus text format by default; scrape it with an
   authenticated viewer-or-higher key when auth is enabled.
-- Run multiple replicas only when each replica has its own SQLite database, or place OmniSwitch behind a queue/sticky routing layer until external storage is implemented. The in-memory rate limiter is local to each replica.
+- Use a shared Redis `rate_limit.redis_url` to enforce one quota across replicas. SQLite remains a local control-plane store; use one writer or an external database before horizontally scaling control-plane mutations.

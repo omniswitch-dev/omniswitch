@@ -1,6 +1,11 @@
 package guardrail
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -17,9 +22,10 @@ type Result struct {
 }
 
 type Engine struct {
-	checks  []Check
-	actions map[string]string
-	rules   []Rule
+	checks   []Check
+	actions  map[string]string
+	rules    []Rule
+	webhooks []webhookCheck
 }
 
 type Check func(input GuardrailInput) Result
@@ -42,8 +48,28 @@ type Rule struct {
 }
 
 type Config struct {
-	Actions map[string]string `json:"actions,omitempty" yaml:"actions,omitempty"`
-	Rules   []Rule            `json:"rules,omitempty" yaml:"rules,omitempty"`
+	Actions  map[string]string `json:"actions,omitempty" yaml:"actions,omitempty"`
+	Rules    []Rule            `json:"rules,omitempty" yaml:"rules,omitempty"`
+	Webhooks []Webhook         `json:"webhooks,omitempty" yaml:"webhooks,omitempty"`
+}
+
+// Webhook delegates a guardrail decision to a managed or in-house service.
+// The service receives stage/text/messages and responds with JSON such as
+// {"triggered":true,"message":"...","details":"..."}. A false
+// `allowed` field is also treated as a trigger.
+type Webhook struct {
+	Name     string            `json:"name" yaml:"name"`
+	URL      string            `json:"url" yaml:"url"`
+	Stage    string            `json:"stage,omitempty" yaml:"stage,omitempty"`
+	Action   string            `json:"action,omitempty" yaml:"action,omitempty"`
+	Headers  map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	Timeout  time.Duration     `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	FailOpen bool              `json:"fail_open,omitempty" yaml:"fail_open,omitempty"`
+}
+
+type webhookCheck struct {
+	config Webhook
+	client *http.Client
 }
 
 func NewEngine() *Engine {
@@ -76,18 +102,32 @@ func NewEngineWithConfig(config Config) *Engine {
 		}
 		rules = append(rules, rule)
 	}
-	return &Engine{checks: []Check{checkPII, checkPromptInjection, checkSQLInjection, checkToxicContent, checkCodeLeakage}, actions: actions, rules: rules}
+	webhooks := make([]webhookCheck, 0, len(config.Webhooks))
+	for _, webhook := range config.Webhooks {
+		if normalized, ok := normalizeWebhook(webhook); ok {
+			webhooks = append(webhooks, webhookCheck{config: normalized, client: &http.Client{Timeout: normalized.Timeout}})
+		}
+	}
+	return &Engine{checks: []Check{checkPII, checkPromptInjection, checkSQLInjection, checkToxicContent, checkCodeLeakage}, actions: actions, rules: rules, webhooks: webhooks}
 }
 
 func (e *Engine) EvaluateInput(messages []provider.Message) []Result {
-	return e.evaluate(GuardrailInput{Messages: messages, IsInput: true})
+	return e.EvaluateInputContext(context.Background(), messages)
 }
 
 func (e *Engine) EvaluateOutput(response string) []Result {
-	return e.evaluate(GuardrailInput{Response: response, IsInput: false})
+	return e.EvaluateOutputContext(context.Background(), response)
 }
 
-func (e *Engine) evaluate(input GuardrailInput) []Result {
+func (e *Engine) EvaluateInputContext(ctx context.Context, messages []provider.Message) []Result {
+	return e.evaluate(ctx, GuardrailInput{Messages: messages, IsInput: true})
+}
+
+func (e *Engine) EvaluateOutputContext(ctx context.Context, response string) []Result {
+	return e.evaluate(ctx, GuardrailInput{Response: response, IsInput: false})
+}
+
+func (e *Engine) evaluate(ctx context.Context, input GuardrailInput) []Result {
 	var triggered []Result
 	for _, check := range e.checks {
 		if r := check(input); r.Triggered {
@@ -112,7 +152,106 @@ func (e *Engine) evaluate(input GuardrailInput) []Result {
 		}
 		triggered = append(triggered, Result{Triggered: true, Type: rule.Name, Action: rule.Action, Message: rule.Message, Details: rule.Pattern})
 	}
+	for _, webhook := range e.webhooks {
+		if !webhook.appliesTo(stage) {
+			continue
+		}
+		result, err := webhook.Evaluate(ctx, input)
+		if err != nil {
+			if webhook.config.FailOpen {
+				continue
+			}
+			triggered = append(triggered, Result{Triggered: true, Type: "webhook:" + webhook.config.Name, Action: webhook.config.Action, Message: "External guardrail unavailable: " + webhook.config.Name, Details: err.Error()})
+			continue
+		}
+		if result.Triggered {
+			triggered = append(triggered, result)
+		}
+	}
 	return triggered
+}
+
+func normalizeWebhook(webhook Webhook) (Webhook, bool) {
+	webhook.Name = strings.TrimSpace(webhook.Name)
+	webhook.URL = strings.TrimSpace(webhook.URL)
+	if webhook.Name == "" || webhook.URL == "" {
+		return Webhook{}, false
+	}
+	parsed, err := url.Parse(webhook.URL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return Webhook{}, false
+	}
+	webhook.Stage = strings.ToLower(strings.TrimSpace(webhook.Stage))
+	if webhook.Stage == "" {
+		webhook.Stage = "both"
+	}
+	if webhook.Stage != "input" && webhook.Stage != "output" && webhook.Stage != "both" {
+		return Webhook{}, false
+	}
+	webhook.Action = strings.ToLower(strings.TrimSpace(webhook.Action))
+	if webhook.Action == "" {
+		webhook.Action = "deny"
+	}
+	if !validAction(webhook.Action) {
+		return Webhook{}, false
+	}
+	if webhook.Timeout <= 0 {
+		webhook.Timeout = 3 * time.Second
+	}
+	return webhook, true
+}
+
+func (webhook webhookCheck) appliesTo(stage string) bool {
+	return webhook.config.Stage == "both" || webhook.config.Stage == stage
+}
+
+func (webhook webhookCheck) Evaluate(ctx context.Context, input GuardrailInput) (Result, error) {
+	stage := "output"
+	if input.IsInput {
+		stage = "input"
+	}
+	payload, err := json.Marshal(struct {
+		Stage    string             `json:"stage"`
+		Text     string             `json:"text"`
+		Messages []provider.Message `json:"messages,omitempty"`
+	}{Stage: stage, Text: extractText(input), Messages: input.Messages})
+	if err != nil {
+		return Result{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, webhook.config.URL, strings.NewReader(string(payload)))
+	if err != nil {
+		return Result{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	for key, value := range webhook.config.Headers {
+		request.Header.Set(key, value)
+	}
+	response, err := webhook.client.Do(request)
+	if err != nil {
+		return Result{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return Result{}, fmt.Errorf("unexpected status %s", response.Status)
+	}
+	var decision struct {
+		Triggered bool   `json:"triggered"`
+		Allowed   *bool  `json:"allowed"`
+		Message   string `json:"message"`
+		Details   string `json:"details"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&decision); err != nil {
+		return Result{}, fmt.Errorf("decode response: %w", err)
+	}
+	triggered := decision.Triggered || (decision.Allowed != nil && !*decision.Allowed)
+	if !triggered {
+		return Result{}, nil
+	}
+	message := strings.TrimSpace(decision.Message)
+	if message == "" {
+		message = "External guardrail triggered: " + webhook.config.Name
+	}
+	return Result{Triggered: true, Type: "webhook:" + webhook.config.Name, Action: webhook.config.Action, Message: message, Details: decision.Details}, nil
 }
 
 func validAction(action string) bool {

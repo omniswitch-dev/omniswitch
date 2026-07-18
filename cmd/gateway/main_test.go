@@ -9,11 +9,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/omniswitch-dev/omniswitch/internal/gateway"
 	"github.com/omniswitch-dev/omniswitch/internal/gatewayconfig"
+	"github.com/omniswitch-dev/omniswitch/internal/guardrail"
 	"github.com/omniswitch-dev/omniswitch/internal/provider"
+	"github.com/omniswitch-dev/omniswitch/internal/router"
 	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
@@ -70,6 +74,20 @@ gateway:
   cache_threshold: 0.72
   cache_ttl: 15m
   shadow_provider: anthropic
+rate_limit:
+  requests: 42
+  window: 30s
+  prefix: test:quota
+  fail_open: true
+identity:
+  oidc:
+    jwks_url: https://issuer.example.test/keys
+    issuer: https://issuer.example.test/
+    audience: omniswitch
+    role_claim: roles
+    workspace_claim: workspace
+    organization_claim: organization
+    cache_ttl: 10m
 observability:
   otel_enabled: true
   otlp_endpoint: http://localhost:4318/v1/traces
@@ -113,6 +131,12 @@ routes:
 	if settings.shadowProvider != "anthropic" || settings.mcpEnabled {
 		t.Fatalf("settings shadow/mcp = %q/%v, want anthropic/false", settings.shadowProvider, settings.mcpEnabled)
 	}
+	if settings.rateLimitRequests != 42 || settings.rateLimitWindow != 30*time.Second || settings.rateLimitPrefix != "test:quota" || !settings.rateLimitFailOpen {
+		t.Fatalf("rate limit settings = %+v, want configured values", settings)
+	}
+	if !settings.authEnabled || settings.oidcJWKSURL != "https://issuer.example.test/keys" || settings.oidcIssuer != "https://issuer.example.test/" || settings.oidcAudience != "omniswitch" || settings.oidcRoleClaim != "roles" || settings.oidcWorkspaceClaim != "workspace" || settings.oidcOrganizationClaim != "organization" || settings.oidcCacheTTL != 10*time.Minute {
+		t.Fatalf("OIDC settings = %+v, want configured identity", settings)
+	}
 	if !settings.otelEnabled || settings.otelEndpoint != "http://localhost:4318/v1/traces" || settings.otelServiceName != "sentinel-test" || !settings.otelInsecure || settings.otelTimeout != 2*time.Second {
 		t.Fatalf("otel settings = %+v, want configured telemetry", settings)
 	}
@@ -145,6 +169,12 @@ routes:
 	t.Setenv("OMNISWITCH_LISTEN", ":7070")
 	t.Setenv("OMNISWITCH_CACHE_THRESHOLD", "0.44")
 	t.Setenv("OMNISWITCH_MCP_ENABLED", "true")
+	t.Setenv("OMNISWITCH_RATE_LIMIT_REQUESTS", "80")
+	t.Setenv("OMNISWITCH_RATE_LIMIT_WINDOW", "10s")
+	t.Setenv("OMNISWITCH_RATE_LIMIT_PREFIX", "override:quota")
+	t.Setenv("OMNISWITCH_RATE_LIMIT_FAIL_OPEN", "true")
+	t.Setenv("OMNISWITCH_OIDC_JWKS_URL", "https://override.example.test/keys")
+	t.Setenv("OMNISWITCH_OIDC_AUDIENCE", "override-audience")
 	t.Setenv("OMNISWITCH_AB_TEST", "logical=anthropic:claude-3-5-haiku-20241022:100")
 
 	settings, err := loadRuntimeSettings()
@@ -153,6 +183,12 @@ routes:
 	}
 	if settings.listenAddr != ":7070" || settings.cacheThreshold != 0.44 || !settings.mcpEnabled {
 		t.Fatalf("settings = %+v, want env overrides", settings)
+	}
+	if settings.rateLimitRequests != 80 || settings.rateLimitWindow != 10*time.Second || settings.rateLimitPrefix != "override:quota" || !settings.rateLimitFailOpen {
+		t.Fatalf("rate limit settings = %+v, want env overrides", settings)
+	}
+	if !settings.authEnabled || settings.oidcJWKSURL != "https://override.example.test/keys" || settings.oidcAudience != "override-audience" {
+		t.Fatalf("OIDC settings = %+v, want env overrides", settings)
 	}
 	route := settings.routes["logical"]
 	if route.Provider != "openai" || len(route.Variants) != 1 || route.Variants[0].Provider != "anthropic" {
@@ -224,6 +260,65 @@ func TestRegisterCustomProviderAccountExpandsHeaders(t *testing.T) {
 	}
 }
 
+func TestRuntimeConfigSummaryRedactsSensitiveConfig(t *testing.T) {
+	forwardBearer := true
+	settings := runtimeSettings{
+		configPath:        "config.yaml",
+		listenAddr:        ":8080",
+		authEnabled:       true,
+		cacheThreshold:    0.95,
+		cacheTTL:          time.Hour,
+		cacheScope:        "api_key",
+		rateLimitRequests: 120,
+		rateLimitWindow:   time.Minute,
+		rateLimitRedisURL: "redis://redis-secret.example:6379/0",
+		rateLimitPrefix:   "omniswitch:ratelimit",
+		oidcJWKSURL:       "https://issuer.example/keys",
+		oidcIssuer:        "https://issuer.example/",
+		oidcAudience:      "omniswitch",
+		authorizationRules: []gateway.AuthorizationRule{{
+			Name: "secret-rule", Effect: "deny", When: `claims["top_secret"] == "secret-value"`,
+		}},
+		guardrailConfig: guardrail.Config{
+			Actions: map[string]string{"pii": "redact"},
+			Rules:   []guardrail.Rule{{Name: "secret-marker", Stage: "output", Pattern: "super-secret-pattern", Action: "deny"}},
+			Webhooks: []guardrail.Webhook{{
+				Name: "managed", URL: "https://guardrail-secret.example/check", Stage: "input", Action: "deny", Headers: map[string]string{"authorization": "Bearer webhook-secret"}, Timeout: 3 * time.Second,
+			}},
+		},
+		mcpEnabled: true,
+		mcpTargets: []gatewayconfig.MCPTarget{{
+			Name: "github", Upstream: "https://mcp-secret.example/mcp", Headers: map[string]string{"x-api-key": "target-secret"}, ForwardBearerToken: &forwardBearer,
+		}},
+		routes: map[string]router.Route{"logical": {Provider: "@openai-prod", Variants: []router.Variant{{Provider: "@openai-prod", Model: "gpt-4o-mini", Weight: 100}}}},
+	}
+	registry := provider.NewRegistry()
+
+	payload, err := json.Marshal(runtimeConfigSummary(settings, registry))
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	body := string(payload)
+	for _, forbidden := range []string{
+		"webhook-secret",
+		"target-secret",
+		"mcp-secret.example",
+		"guardrail-secret.example",
+		"super-secret-pattern",
+		"secret-value",
+		"redis-secret.example",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("runtime config summary leaked %q in %s", forbidden, body)
+		}
+	}
+	for _, want := range []string{`"backend":"redis"`, `"rule_count":1`, `"webhook_count":1`, `"forward_bearer_token":true`, `"model":"logical"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("runtime config summary = %s, want %s", body, want)
+		}
+	}
+}
+
 func TestParseHeaderListAndExpansion(t *testing.T) {
 	t.Setenv("HEADER_SECRET", "resolved")
 	headers := parseHeaderList("x-api-key=${HEADER_SECRET},x-team=ai,bad")
@@ -279,6 +374,29 @@ func clearGatewayEnv(t *testing.T) {
 		"OMNISWITCH_AUTH",
 		"OMNISWITCH_CACHE_THRESHOLD",
 		"OMNISWITCH_CACHE_TTL",
+		"OMNISWITCH_CACHE_SCOPE",
+		"OMNISWITCH_LOG_PAYLOADS",
+		"OMNISWITCH_CORS_ORIGINS",
+		"OMNISWITCH_GUARDRAIL_STREAM_BUFFER",
+		"OMNISWITCH_MAX_REQUEST_BYTES",
+		"OMNISWITCH_READ_HEADER_TIMEOUT",
+		"OMNISWITCH_READ_TIMEOUT",
+		"OMNISWITCH_WRITE_TIMEOUT",
+		"OMNISWITCH_IDLE_TIMEOUT",
+		"OMNISWITCH_CIRCUIT_BREAKER_FAILURES",
+		"OMNISWITCH_CIRCUIT_BREAKER_COOLDOWN",
+		"OMNISWITCH_RATE_LIMIT_REQUESTS",
+		"OMNISWITCH_RATE_LIMIT_WINDOW",
+		"OMNISWITCH_RATE_LIMIT_REDIS_URL",
+		"OMNISWITCH_RATE_LIMIT_PREFIX",
+		"OMNISWITCH_RATE_LIMIT_FAIL_OPEN",
+		"OMNISWITCH_OIDC_JWKS_URL",
+		"OMNISWITCH_OIDC_ISSUER",
+		"OMNISWITCH_OIDC_AUDIENCE",
+		"OMNISWITCH_OIDC_ROLE_CLAIM",
+		"OMNISWITCH_OIDC_WORKSPACE_CLAIM",
+		"OMNISWITCH_OIDC_ORGANIZATION_CLAIM",
+		"OMNISWITCH_OIDC_CACHE_TTL",
 		"OMNISWITCH_SHADOW_PROVIDER",
 		"OMNISWITCH_MCP_ENABLED",
 		"OMNISWITCH_MCP_POLICY",
@@ -290,6 +408,7 @@ func clearGatewayEnv(t *testing.T) {
 		"OMNISWITCH_OTEL_HEADERS",
 		"OMNISWITCH_OTEL_INSECURE",
 		"OMNISWITCH_OTEL_TIMEOUT",
+		"OMNISWITCH_PROMETHEUS_ENABLED",
 		"OMNISWITCH_VAULT_KEY",
 		"OMNISWITCH_BOOTSTRAP_API_KEY",
 		"OMNISWITCH_BOOTSTRAP_WORKSPACE",

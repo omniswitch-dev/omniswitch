@@ -168,3 +168,63 @@ func TestValidateRejectsUnsupportedGuardrailAction(t *testing.T) {
 		t.Fatalf("Parse() error = %v, want guardrail action validation", err)
 	}
 }
+
+func TestValidateAuthorizationRules(t *testing.T) {
+	_, err := Parse([]byte(`authorization: {rules: [{when: 'role == "member"', effect: audit}]}`), ".yaml")
+	if err == nil || !strings.Contains(err.Error(), "effect must be allow or deny") {
+		t.Fatalf("Parse() error = %v, want authorization effect validation", err)
+	}
+
+	cfg, err := Parse([]byte(`authorization: {rules: [{name: member-only, when: 'role == "member"', effect: allow}]}`), ".yaml")
+	if err != nil || len(cfg.Authorization.Rules) != 1 {
+		t.Fatalf("Parse() cfg/err = %+v/%v, want authorization rule", cfg.Authorization, err)
+	}
+}
+
+func TestValidateRateLimit(t *testing.T) {
+	_, err := Parse([]byte(`rate_limit: {requests: 0}`), ".yaml")
+	if err == nil || !strings.Contains(err.Error(), "rate_limit.requests") {
+		t.Fatalf("Parse() error = %v, want rate limit request validation", err)
+	}
+	_, err = Parse([]byte(`rate_limit: {window: 0s}`), ".yaml")
+	if err == nil || !strings.Contains(err.Error(), "rate_limit.window") {
+		t.Fatalf("Parse() error = %v, want rate limit window validation", err)
+	}
+	cfg, err := Parse([]byte(`rate_limit: {requests: 60, window: 1m, redis_url: redis://localhost:6379/0, prefix: team:quota, fail_open: true}`), ".yaml")
+	if err != nil || cfg.RateLimit.Requests == nil || *cfg.RateLimit.Requests != 60 || cfg.RateLimit.Window == nil || cfg.RateLimit.Window.Duration != time.Minute || !*cfg.RateLimit.FailOpen {
+		t.Fatalf("Parse() cfg/err = %+v/%v, want valid rate limit config", cfg.RateLimit, err)
+	}
+}
+
+func TestValidateOIDCIdentity(t *testing.T) {
+	_, err := Parse([]byte(`identity: {oidc: {jwks_url: file:///keys.json}}`), ".yaml")
+	if err == nil || !strings.Contains(err.Error(), "identity.oidc.jwks_url") {
+		t.Fatalf("Parse() error = %v, want OIDC URL validation", err)
+	}
+	cfg, err := Parse([]byte(`identity: {oidc: {jwks_url: https://issuer.example.test/keys, issuer: https://issuer.example.test/, audience: omniswitch, cache_ttl: 10m}}`), ".yaml")
+	if err != nil || cfg.Identity.OIDC.JWKSURL == "" || cfg.Identity.OIDC.CacheTTL == nil || cfg.Identity.OIDC.CacheTTL.Duration != 10*time.Minute {
+		t.Fatalf("Parse() cfg/err = %+v/%v, want valid OIDC config", cfg.Identity.OIDC, err)
+	}
+}
+
+func TestValidateStdioMCPTarget(t *testing.T) {
+	_, err := Parse([]byte(`mcp: {targets: [{name: local, transport: stdio}]}`), ".yaml")
+	if err == nil || !strings.Contains(err.Error(), "command is required") {
+		t.Fatalf("Parse() error = %v, want stdio command validation", err)
+	}
+	cfg, err := Parse([]byte(`mcp: {targets: [{name: local, transport: stdio, command: npx, args: ["-y", "@modelcontextprotocol/server-filesystem"], environment: {ALLOWED_DIR: "${WORKDIR}"}}]}`), ".yaml")
+	if err != nil || len(cfg.MCP.Targets) != 1 || cfg.MCP.Targets[0].Command != "npx" || len(cfg.MCP.Targets[0].Args) != 2 {
+		t.Fatalf("Parse() cfg/err = %+v/%v, want valid stdio target", cfg.MCP.Targets, err)
+	}
+}
+
+func TestValidateGuardrailWebhook(t *testing.T) {
+	_, err := Parse([]byte(`guardrails: {webhooks: [{name: managed, url: file:///policy}]}`), ".yaml")
+	if err == nil || !strings.Contains(err.Error(), "guardrails.webhooks[0].url") {
+		t.Fatalf("Parse() error = %v, want webhook URL validation", err)
+	}
+	cfg, err := Parse([]byte(`guardrails: {webhooks: [{name: managed, url: https://guardrail.example.test/check, stage: input, action: deny, timeout: 2s, fail_open: true}]}`), ".yaml")
+	if err != nil || len(cfg.Guardrails.Webhooks) != 1 || cfg.Guardrails.Webhooks[0].Timeout == nil || cfg.Guardrails.Webhooks[0].Timeout.Duration != 2*time.Second || !*cfg.Guardrails.Webhooks[0].FailOpen {
+		t.Fatalf("Parse() cfg/err = %+v/%v, want valid webhook", cfg.Guardrails.Webhooks, err)
+	}
+}

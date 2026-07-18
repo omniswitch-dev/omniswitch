@@ -53,9 +53,41 @@ Forwards OpenAI-compatible embedding requests (`model`, `input`, optional
 provider. Input budget and guardrail checks apply; providers without an
 embeddings implementation are skipped in a configured fallback chain.
 
+### `POST /v1/rerank`
+
+Accepts a common RAG rerank request shape (`model`, `query`, `documents`,
+optional `top_n`, `return_documents`, `max_chunks_per_doc`, and `user`) and
+routes it to providers that implement reranking. Custom OpenAI-compatible
+providers forward rerank traffic to `/rerank`; fallback chains skip providers
+without rerank support. Query and document text are inspected by input
+guardrails before the provider call.
+
 ### `GET /v1/models`
 
 Returns all models registered through provider adapters and provider catalog aliases.
+
+## A2A Gateway
+
+### `GET /.well-known/agent-card.json`
+
+Publishes a public A2A v1 Agent Card for OmniSwitch's JSON-RPC interface. The
+card advertises `/a2a` as a governed text inference agent and is cacheable by
+A2A clients with `Cache-Control` and `ETag` validators.
+
+### `POST /a2a`
+
+Accepts A2A v1 JSON-RPC requests. `SendMessage` supports direct text message
+responses by converting message text into the same chat-completions path used
+by OpenAI-compatible clients. Provide the model with `metadata.model` or the
+`x-omniswitch-model` header.
+
+Supported A2A methods:
+
+- `SendMessage`
+- `GetExtendedAgentCard`
+
+Task lifecycle methods, streaming, push notifications, and outbound A2A client
+calls are not yet implemented.
 
 ## Management API
 
@@ -99,6 +131,15 @@ member, admin, or owner key is required.
 ### `GET /api/providers`
 
 Returns registered provider names and exposed models.
+
+### `GET /api/config`
+
+Returns a redacted runtime configuration posture summary for authenticated
+operators. It includes gateway settings, rate-limit backend, identity mode,
+authorization rule names/effects, guardrail rule/webhook names, provider counts,
+route summaries, MCP target posture, and A2A capability flags. It does not
+return bootstrap keys, provider credentials, target headers, webhook URLs,
+provider base URLs, Redis URLs, or policy expressions.
 
 ### `POST /api/virtual-keys`
 
@@ -294,6 +335,15 @@ Replays a batch of tool requests against one or more OmniSwitch policy files.
 
 The response includes aggregate `allowed`, `denied`, and `errors` counts plus each decision trace.
 
+## Moderation
+
+### `POST /v1/moderations`
+
+Provides an OpenAI-compatible moderation response using OmniSwitch's configured
+local input guardrails. `input` accepts a string or an array of strings. Each
+result includes `flagged`, `categories`, and `category_scores`; no request text
+is sent to an external moderation provider.
+
 ## MCP Gateway
 
 ### `POST /mcp`
@@ -304,8 +354,13 @@ Evaluates MCP JSON-RPC `tools/call` requests through OmniSwitch policy and forwa
 
 Alias for the MCP tool-call gateway.
 
-The current MCP implementation is HTTP JSON-RPC federation and policy control.
-It does not yet implement stdio, SSE/streamable HTTP, OAuth delegation, or A2A.
+The MCP gateway supports JSON-RPC over HTTP, including streaming
+`text/event-stream` responses from streamable HTTP/SSE-capable upstreams.
+Targets can opt into OIDC bearer-token delegation with
+`forward_bearer_token: true`; local OmniSwitch API keys are never forwarded.
+It supports persistent stdio targets as well as HTTP and streamable HTTP. It
+does not yet implement OpenAPI conversion. A2A is exposed separately through
+the `/.well-known/agent-card.json` and `/a2a` endpoints.
 
 ## Roles and Scopes
 

@@ -12,7 +12,7 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
     volumes:
-      - sentinel-data:/data
+      - omniswitch-data:/data
 
 volumes:
-  sentinel-data:
+  omniswitch-data:
