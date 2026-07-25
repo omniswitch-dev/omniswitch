@@ -109,12 +109,12 @@ type MCP struct {
 // rules. Actions are keyed by built-in check type, for example injection:
 // deny or pii: redact.
 type Guardrails struct {
-	Actions      map[string]string  `json:"actions,omitempty" yaml:"actions,omitempty"`
-	Rules        []GuardrailRule    `json:"rules,omitempty" yaml:"rules,omitempty"`
+	Actions      map[string]string   `json:"actions,omitempty" yaml:"actions,omitempty"`
+	Rules        []GuardrailRule     `json:"rules,omitempty" yaml:"rules,omitempty"`
 	ToolRules    []ToolGuardrailRule `json:"tool_rules,omitempty" yaml:"tool_rules,omitempty"`
-	Webhooks     []GuardrailWebhook `json:"webhooks,omitempty" yaml:"webhooks,omitempty"`
+	Webhooks     []GuardrailWebhook  `json:"webhooks,omitempty" yaml:"webhooks,omitempty"`
 	LLMJudges    []LLMGuardrailJudge `json:"llm_judges,omitempty" yaml:"llm_judges,omitempty"`
-	StreamBuffer *bool              `json:"stream_buffer,omitempty" yaml:"stream_buffer,omitempty"`
+	StreamBuffer *bool               `json:"stream_buffer,omitempty" yaml:"stream_buffer,omitempty"`
 }
 
 type GuardrailRule struct {
@@ -185,20 +185,20 @@ type Observability struct {
 }
 
 type ProviderAccount struct {
-	Name              string            `json:"name" yaml:"name"`
-	Type              string            `json:"type" yaml:"type"`
-	APIKeyEnv         string            `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
-	BaseURL           string            `json:"base_url,omitempty" yaml:"base_url,omitempty"`
-	Endpoint          string            `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
-	APIVersion        string            `json:"api_version,omitempty" yaml:"api_version,omitempty"`
-	Region            string            `json:"region,omitempty" yaml:"region,omitempty"`
+	Name               string            `json:"name" yaml:"name"`
+	Type               string            `json:"type" yaml:"type"`
+	APIKeyEnv          string            `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+	BaseURL            string            `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	Endpoint           string            `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
+	APIVersion         string            `json:"api_version,omitempty" yaml:"api_version,omitempty"`
+	Region             string            `json:"region,omitempty" yaml:"region,omitempty"`
 	AWSAccessKeyEnv    string            `json:"aws_access_key_env,omitempty" yaml:"aws_access_key_env,omitempty"`
 	AWSSecretKeyEnv    string            `json:"aws_secret_key_env,omitempty" yaml:"aws_secret_key_env,omitempty"`
 	AWSSessionTokenEnv string            `json:"aws_session_token_env,omitempty" yaml:"aws_session_token_env,omitempty"`
 	GuardrailID        string            `json:"guardrail_id,omitempty" yaml:"guardrail_id,omitempty"`
 	GuardrailVersion   string            `json:"guardrail_version,omitempty" yaml:"guardrail_version,omitempty"`
-	Models            []string          `json:"models,omitempty" yaml:"models,omitempty"`
-	ExtraHeaders      map[string]string `json:"extra_headers,omitempty" yaml:"extra_headers,omitempty"`
+	Models             []string          `json:"models,omitempty" yaml:"models,omitempty"`
+	ExtraHeaders       map[string]string `json:"extra_headers,omitempty" yaml:"extra_headers,omitempty"`
 }
 
 type Duration struct {

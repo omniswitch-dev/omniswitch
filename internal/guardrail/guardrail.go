@@ -33,10 +33,10 @@ type Engine struct {
 type Check func(input GuardrailInput) Result
 
 type GuardrailInput struct {
-	Messages []provider.Message
-	Response string
+	Messages  []provider.Message
+	Response  string
 	ToolCalls []provider.ToolCall
-	IsInput  bool
+	IsInput   bool
 }
 
 // Rule adds a declarative, deterministic check to the built-in guardrail
@@ -153,7 +153,7 @@ func NewEngineWithConfig(config Config) *Engine {
 		}
 	}
 	return &Engine{
-		checks: []Check{checkPII, checkPromptInjection, checkSQLInjection, checkToxicContent, checkCodeLeakage},
+		checks:  []Check{checkPII, checkPromptInjection, checkSQLInjection, checkToxicContent, checkCodeLeakage},
 		actions: actions, rules: rules, toolRules: toolRules, webhooks: webhooks, llmJudges: llmJudges,
 	}
 }
@@ -439,7 +439,7 @@ func (judge llmJudgeCheck) Evaluate(ctx context.Context, input GuardrailInput) (
 			{"role": "system", "content": judge.config.SystemPrompt},
 			{"role": "user", "content": fmt.Sprintf("Stage: %s\n\nContent:\n%s\n\nTool calls:\n%s", stage, extractText(input), toolCallsJSON(input.ToolCalls))},
 		},
-		"temperature": 0,
+		"temperature":     0,
 		"response_format": map[string]string{"type": "json_object"},
 	})
 	if err != nil {

@@ -71,12 +71,12 @@ func (b *Bedrock) Models() []ModelInfo {
 }
 
 type bedrockConverseRequest struct {
-	Messages        []bedrockMessage          `json:"messages"`
-	System          []bedrockContentBlock     `json:"system,omitempty"`
-	InferenceConfig *bedrockInferenceConfig   `json:"inferenceConfig,omitempty"`
-	ToolConfig      *bedrockToolConfig        `json:"toolConfig,omitempty"`
-	GuardrailConfig *bedrockGuardrailConfig   `json:"guardrailConfig,omitempty"`
-	AdditionalModelRequestFields map[string]any `json:"additionalModelRequestFields,omitempty"`
+	Messages                     []bedrockMessage        `json:"messages"`
+	System                       []bedrockContentBlock   `json:"system,omitempty"`
+	InferenceConfig              *bedrockInferenceConfig `json:"inferenceConfig,omitempty"`
+	ToolConfig                   *bedrockToolConfig      `json:"toolConfig,omitempty"`
+	GuardrailConfig              *bedrockGuardrailConfig `json:"guardrailConfig,omitempty"`
+	AdditionalModelRequestFields map[string]any          `json:"additionalModelRequestFields,omitempty"`
 }
 
 type bedrockMessage struct {
@@ -85,10 +85,10 @@ type bedrockMessage struct {
 }
 
 type bedrockContentBlock struct {
-	Text       string               `json:"text,omitempty"`
-	Image      *bedrockImageBlock   `json:"image,omitempty"`
-	ToolUse    *bedrockToolUse      `json:"toolUse,omitempty"`
-	ToolResult *bedrockToolResult   `json:"toolResult,omitempty"`
+	Text       string             `json:"text,omitempty"`
+	Image      *bedrockImageBlock `json:"image,omitempty"`
+	ToolUse    *bedrockToolUse    `json:"toolUse,omitempty"`
+	ToolResult *bedrockToolResult `json:"toolResult,omitempty"`
 }
 
 type bedrockImageBlock struct {
@@ -120,8 +120,8 @@ type bedrockInferenceConfig struct {
 }
 
 type bedrockToolConfig struct {
-	Tools      []bedrockTool       `json:"tools,omitempty"`
-	ToolChoice *bedrockToolChoice  `json:"toolChoice,omitempty"`
+	Tools      []bedrockTool      `json:"tools,omitempty"`
+	ToolChoice *bedrockToolChoice `json:"toolChoice,omitempty"`
 }
 
 type bedrockTool struct {
@@ -139,9 +139,9 @@ type bedrockInputSchema struct {
 }
 
 type bedrockToolChoice struct {
-	Auto *struct{}          `json:"auto,omitempty"`
-	Any  *struct{}          `json:"any,omitempty"`
-	Tool *bedrockNamedTool  `json:"tool,omitempty"`
+	Auto *struct{}         `json:"auto,omitempty"`
+	Any  *struct{}         `json:"any,omitempty"`
+	Tool *bedrockNamedTool `json:"tool,omitempty"`
 }
 
 type bedrockNamedTool struct {
