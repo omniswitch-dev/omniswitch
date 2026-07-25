@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -17,6 +18,7 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/omniswitch-dev/omniswitch/internal/cache"
+	"github.com/omniswitch-dev/omniswitch/internal/gatewayconfig"
 	"github.com/omniswitch-dev/omniswitch/internal/guardrail"
 	"github.com/omniswitch-dev/omniswitch/internal/provider"
 	"github.com/omniswitch-dev/omniswitch/internal/router"
@@ -36,6 +38,12 @@ type Handler struct {
 	streamGuardrailBuffer bool
 	maxRequestBytes       int64
 	shadowProvider        string
+	configRouters         sync.Map
+}
+
+type cachedConfigRouter struct {
+	router    *router.Router
+	updatedAt time.Time
 }
 
 // New creates a new gateway handler.
@@ -122,7 +130,20 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-	transformed, err := h.router.TransformRequest(req)
+	activeRouter := h.router
+	configRef := strings.TrimSpace(r.Header.Get("x-omniswitch-config"))
+	if configRef != "" {
+		configRouter, err := h.routerForConfig(ctx, configRef)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "invalid dynamic config")
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		activeRouter = configRouter
+		span.SetAttributes(attribute.String("sentinel.config", configRef))
+	}
+	transformed, err := activeRouter.TransformRequest(req)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid route transformation")
@@ -135,7 +156,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	traceID := requestHeaderOrNew(r, "x-omniswitch-trace-id", "trace")
 	sessionID := r.Header.Get("x-omniswitch-session-id")
 	providerHint := r.Header.Get("x-omniswitch-provider")
-	shadowHint := firstNonEmpty(r.Header.Get("x-omniswitch-shadow-provider"), h.router.ShadowProviderForModel(req.Model), h.shadowProvider)
+	shadowHint := firstNonEmpty(r.Header.Get("x-omniswitch-shadow-provider"), activeRouter.ShadowProviderForModel(req.Model), h.shadowProvider)
 	apiKeyID := r.Header.Get("x-omniswitch-key-id")
 	tenantCacheScope := h.tenantCacheScope(r)
 	ctx = WithRequestID(r.Context(), reqID)
@@ -194,6 +215,9 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	backendReq := req
 	backendReq.Stream = false
 	cacheProvider := firstNonEmpty(providerHint, "auto")
+	if configRef != "" {
+		cacheProvider = "config:" + configRef + "|" + cacheProvider
+	}
 	if cachedResp, ok := h.cachedResponse(ctx, tenantCacheScope, cacheProvider, backendReq); ok {
 		if denied, _, reason := h.outputGuardrailDisposition(ctx, reqID, &cachedResp); denied {
 			h.logRequest(ctx, logContext{
@@ -231,13 +255,13 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if req.Stream {
 		h.streamProviderResponse(w, ctx, streamContext{
 			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, BackendRequest: backendReq,
-			ProviderHint: providerHint, ShadowHint: shadowHint, APIKeyID: apiKeyID, CacheProvider: cacheProvider, CacheScope: tenantCacheScope,
+			Router: activeRouter, ProviderHint: providerHint, ShadowHint: shadowHint, APIKeyID: apiKeyID, CacheProvider: cacheProvider, CacheScope: tenantCacheScope,
 		})
 		return
 	}
 
 	// Route to provider.
-	resp, meta, err := h.router.Execute(ctx, backendReq, providerHint)
+	resp, meta, err := activeRouter.Execute(ctx, backendReq, providerHint)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "provider error")
@@ -288,7 +312,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		attribute.Int("llm.usage.total_tokens", resp.Usage.TotalTokens),
 		attribute.Float64("llm.usage.cost_usd", meta.Cost),
 	)
-	h.shadow(ctx, reqID, traceID, meta.Provider, backendReq, shadowHint)
+	h.shadow(ctx, activeRouter, reqID, traceID, meta.Provider, backendReq, shadowHint)
 
 	w.Header().Set("x-omniswitch-trace-id", traceID)
 	w.Header().Set("x-omniswitch-session-id", sessionID)
@@ -306,6 +330,7 @@ type streamContext struct {
 	SessionID      string
 	Request        provider.ChatRequest
 	BackendRequest provider.ChatRequest
+	Router         *router.Router
 	ProviderHint   string
 	ShadowHint     string
 	APIKeyID       string
@@ -388,9 +413,39 @@ func (h *Handler) logRequest(ctx context.Context, logCtx logContext) {
 	}
 }
 
+func (h *Handler) routerForConfig(ctx context.Context, ref string) (*router.Router, error) {
+	if h.store == nil {
+		return nil, fmt.Errorf("dynamic config %q requested but no store is configured", ref)
+	}
+	record, err := h.store.GetGatewayConfig(ctx, ref)
+	if err != nil {
+		return nil, fmt.Errorf("dynamic config %q not found", ref)
+	}
+	if cached, ok := h.configRouters.Load(record.Name); ok {
+		value := cached.(cachedConfigRouter)
+		if value.updatedAt.Equal(record.UpdatedAt) {
+			return value.router, nil
+		}
+	}
+	cfg, err := gatewayconfig.Parse([]byte(record.Body), "."+record.Format)
+	if err != nil {
+		return nil, fmt.Errorf("dynamic config %q is invalid: %w", record.Name, err)
+	}
+	configRouter := h.router.CloneWithRoutes(cfg.Routes)
+	h.configRouters.Store(record.Name, cachedConfigRouter{router: configRouter, updatedAt: record.UpdatedAt})
+	if record.ID != record.Name {
+		h.configRouters.Store(record.ID, cachedConfigRouter{router: configRouter, updatedAt: record.UpdatedAt})
+	}
+	return configRouter, nil
+}
+
 func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Context, streamCtx streamContext) {
 	span := oteltrace.SpanFromContext(ctx)
-	chunks, meta, err := h.router.ExecuteStream(ctx, streamCtx.BackendRequest, streamCtx.ProviderHint)
+	activeRouter := streamCtx.Router
+	if activeRouter == nil {
+		activeRouter = h.router
+	}
+	chunks, meta, err := activeRouter.ExecuteStream(ctx, streamCtx.BackendRequest, streamCtx.ProviderHint)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "provider stream error")
@@ -437,7 +492,13 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 		}
 		for _, choice := range chunk.Choices {
 			if choice.Index == 0 {
+				if choice.Delta.Role != "" {
+					aggregated.Choices[0].Message.Role = choice.Delta.Role
+				}
 				aggregated.Choices[0].Message.Content += choice.Delta.Content
+				if len(choice.Delta.ToolCalls) > 0 {
+					mergeToolCallDeltas(&aggregated.Choices[0].Message.ToolCalls, choice.Delta.ToolCalls)
+				}
 				if choice.FinishReason != "" {
 					aggregated.Choices[0].FinishReason = choice.FinishReason
 				}
@@ -502,7 +563,7 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 		attribute.Int("llm.usage.total_tokens", aggregated.Usage.TotalTokens),
 		attribute.Float64("llm.usage.cost_usd", meta.Cost),
 	)
-	h.shadow(ctx, streamCtx.ID, streamCtx.TraceID, meta.Provider, streamCtx.BackendRequest, streamCtx.ShadowHint)
+	h.shadow(ctx, activeRouter, streamCtx.ID, streamCtx.TraceID, meta.Provider, streamCtx.BackendRequest, streamCtx.ShadowHint)
 }
 
 func setStreamHeaders(w http.ResponseWriter, traceID, sessionID string) {
@@ -521,7 +582,7 @@ func (h *Handler) outputGuardrailDisposition(ctx context.Context, requestID stri
 		return false, false, ""
 	}
 	for index := range resp.Choices {
-		results := h.guardrails.EvaluateOutputContext(ctx, resp.Choices[index].Message.Content)
+		results := h.guardrails.EvaluateOutputMessageContext(ctx, resp.Choices[index].Message)
 		h.recordGuardrailResults(ctx, requestID, results)
 		for _, result := range results {
 			switch result.Action {
@@ -690,14 +751,17 @@ func (h *Handler) tenantCacheScope(r *http.Request) string {
 	return "anonymous"
 }
 
-func (h *Handler) shadow(ctx context.Context, requestID, traceID, primaryProvider string, req provider.ChatRequest, shadowProvider string) {
+func (h *Handler) shadow(ctx context.Context, activeRouter *router.Router, requestID, traceID, primaryProvider string, req provider.ChatRequest, shadowProvider string) {
 	if h.store == nil || strings.TrimSpace(shadowProvider) == "" || shadowProvider == primaryProvider {
 		return
+	}
+	if activeRouter == nil {
+		activeRouter = h.router
 	}
 	go func() {
 		shadowCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		resp, meta, err := h.router.Execute(shadowCtx, req, shadowProvider)
+		resp, meta, err := activeRouter.Execute(shadowCtx, req, shadowProvider)
 		if meta.Provider == "" {
 			meta.Provider = shadowProvider
 		}
@@ -752,8 +816,10 @@ func writeStream(w http.ResponseWriter, resp provider.ChatResponse) {
 
 	content := ""
 	finishReason := "stop"
+	var toolCalls []provider.ToolCall
 	if len(resp.Choices) > 0 {
 		content = resp.Choices[0].Message.Content
+		toolCalls = resp.Choices[0].Message.ToolCalls
 		finishReason = resp.Choices[0].FinishReason
 	}
 	if finishReason == "" {
@@ -784,6 +850,23 @@ func writeStream(w http.ResponseWriter, resp provider.ChatResponse) {
 		writeSSE(w, chunk)
 		flusher.Flush()
 	}
+	if len(toolCalls) > 0 {
+		deltas := make([]provider.ToolCall, len(toolCalls))
+		for index, call := range toolCalls {
+			i := index
+			call.Index = &i
+			deltas[index] = call
+		}
+		chunk := provider.ChatResponseChunk{
+			ID:      resp.ID,
+			Object:  "chat.completion.chunk",
+			Created: time.Now().Unix(),
+			Model:   resp.Model,
+			Choices: []provider.ChunkChoice{{Index: 0, Delta: provider.Message{ToolCalls: deltas}}},
+		}
+		writeSSE(w, chunk)
+		flusher.Flush()
+	}
 
 	finalChunk := map[string]any{
 		"id":      resp.ID,
@@ -801,6 +884,34 @@ func writeStream(w http.ResponseWriter, resp provider.ChatResponse) {
 	writeSSE(w, finalChunk)
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
+}
+
+func mergeToolCallDeltas(target *[]provider.ToolCall, deltas []provider.ToolCall) {
+	for _, delta := range deltas {
+		index := len(*target)
+		if delta.Index != nil && *delta.Index >= 0 {
+			index = *delta.Index
+		}
+		for len(*target) <= index {
+			*target = append(*target, provider.ToolCall{Type: "function"})
+		}
+		current := &(*target)[index]
+		if delta.ID != "" {
+			current.ID = delta.ID
+		}
+		if delta.Type != "" {
+			current.Type = delta.Type
+		}
+		if current.Type == "" {
+			current.Type = "function"
+		}
+		if delta.Function.Name != "" {
+			current.Function.Name += delta.Function.Name
+		}
+		if delta.Function.Arguments != "" {
+			current.Function.Arguments += delta.Function.Arguments
+		}
+	}
 }
 
 func writeSSE(w http.ResponseWriter, payload any) {

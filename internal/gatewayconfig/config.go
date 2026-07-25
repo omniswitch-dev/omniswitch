@@ -111,7 +111,9 @@ type MCP struct {
 type Guardrails struct {
 	Actions      map[string]string  `json:"actions,omitempty" yaml:"actions,omitempty"`
 	Rules        []GuardrailRule    `json:"rules,omitempty" yaml:"rules,omitempty"`
+	ToolRules    []ToolGuardrailRule `json:"tool_rules,omitempty" yaml:"tool_rules,omitempty"`
 	Webhooks     []GuardrailWebhook `json:"webhooks,omitempty" yaml:"webhooks,omitempty"`
+	LLMJudges    []LLMGuardrailJudge `json:"llm_judges,omitempty" yaml:"llm_judges,omitempty"`
 	StreamBuffer *bool              `json:"stream_buffer,omitempty" yaml:"stream_buffer,omitempty"`
 }
 
@@ -121,6 +123,15 @@ type GuardrailRule struct {
 	Pattern string `json:"pattern" yaml:"pattern"`
 	Action  string `json:"action,omitempty" yaml:"action,omitempty"`
 	Message string `json:"message,omitempty" yaml:"message,omitempty"`
+}
+
+type ToolGuardrailRule struct {
+	Name             string `json:"name" yaml:"name"`
+	Stage            string `json:"stage,omitempty" yaml:"stage,omitempty"`
+	ToolName         string `json:"tool_name,omitempty" yaml:"tool_name,omitempty"`
+	ArgumentsPattern string `json:"arguments_pattern,omitempty" yaml:"arguments_pattern,omitempty"`
+	Action           string `json:"action,omitempty" yaml:"action,omitempty"`
+	Message          string `json:"message,omitempty" yaml:"message,omitempty"`
 }
 
 // GuardrailWebhook delegates a stage to an external moderation or safety
@@ -133,6 +144,19 @@ type GuardrailWebhook struct {
 	Headers  map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
 	Timeout  *Duration         `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	FailOpen *bool             `json:"fail_open,omitempty" yaml:"fail_open,omitempty"`
+}
+
+type LLMGuardrailJudge struct {
+	Name         string            `json:"name" yaml:"name"`
+	URL          string            `json:"url" yaml:"url"`
+	Model        string            `json:"model" yaml:"model"`
+	Stage        string            `json:"stage,omitempty" yaml:"stage,omitempty"`
+	Action       string            `json:"action,omitempty" yaml:"action,omitempty"`
+	SystemPrompt string            `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
+	APIKeyEnv    string            `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+	Headers      map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	Timeout      *Duration         `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	FailOpen     *bool             `json:"fail_open,omitempty" yaml:"fail_open,omitempty"`
 }
 
 // MCPTarget is a named remote MCP server. Multiple targets are exposed through
@@ -161,12 +185,20 @@ type Observability struct {
 }
 
 type ProviderAccount struct {
-	Name         string            `json:"name" yaml:"name"`
-	Type         string            `json:"type" yaml:"type"`
-	APIKeyEnv    string            `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
-	BaseURL      string            `json:"base_url,omitempty" yaml:"base_url,omitempty"`
-	Models       []string          `json:"models,omitempty" yaml:"models,omitempty"`
-	ExtraHeaders map[string]string `json:"extra_headers,omitempty" yaml:"extra_headers,omitempty"`
+	Name              string            `json:"name" yaml:"name"`
+	Type              string            `json:"type" yaml:"type"`
+	APIKeyEnv         string            `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+	BaseURL           string            `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	Endpoint          string            `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
+	APIVersion        string            `json:"api_version,omitempty" yaml:"api_version,omitempty"`
+	Region            string            `json:"region,omitempty" yaml:"region,omitempty"`
+	AWSAccessKeyEnv    string            `json:"aws_access_key_env,omitempty" yaml:"aws_access_key_env,omitempty"`
+	AWSSecretKeyEnv    string            `json:"aws_secret_key_env,omitempty" yaml:"aws_secret_key_env,omitempty"`
+	AWSSessionTokenEnv string            `json:"aws_session_token_env,omitempty" yaml:"aws_session_token_env,omitempty"`
+	GuardrailID        string            `json:"guardrail_id,omitempty" yaml:"guardrail_id,omitempty"`
+	GuardrailVersion   string            `json:"guardrail_version,omitempty" yaml:"guardrail_version,omitempty"`
+	Models            []string          `json:"models,omitempty" yaml:"models,omitempty"`
+	ExtraHeaders      map[string]string `json:"extra_headers,omitempty" yaml:"extra_headers,omitempty"`
 }
 
 type Duration struct {
@@ -282,6 +314,21 @@ func Validate(cfg Config) error {
 		if strings.TrimSpace(account.Type) == "" {
 			return fmt.Errorf("providers[%d].type is required", i)
 		}
+		switch strings.ToLower(strings.TrimSpace(account.Type)) {
+		case "azure", "azure-openai":
+			endpoint := strings.TrimSpace(firstNonEmpty(account.Endpoint, account.BaseURL))
+			if endpoint == "" {
+				return fmt.Errorf("providers[%d].endpoint is required for azure providers", i)
+			}
+			parsed, err := url.Parse(endpoint)
+			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+				return fmt.Errorf("providers[%d].endpoint must be an absolute HTTP(S) URL", i)
+			}
+		case "bedrock", "aws-bedrock":
+			if strings.TrimSpace(account.Region) == "" {
+				return fmt.Errorf("providers[%d].region is required for bedrock providers", i)
+			}
+		}
 	}
 	for i, target := range cfg.MCP.Targets {
 		if strings.TrimSpace(target.Name) == "" {
@@ -316,6 +363,32 @@ func Validate(cfg Config) error {
 			return fmt.Errorf("guardrails.rules[%d].action must be deny, redact, warn, or log", i)
 		}
 	}
+	for i, rule := range cfg.Guardrails.ToolRules {
+		if strings.TrimSpace(rule.Name) == "" {
+			return fmt.Errorf("guardrails.tool_rules[%d].name is required", i)
+		}
+		switch rule.Stage {
+		case "", "input", "output", "both":
+		default:
+			return fmt.Errorf("guardrails.tool_rules[%d].stage must be input, output, or both", i)
+		}
+		if strings.TrimSpace(rule.ToolName) == "" && strings.TrimSpace(rule.ArgumentsPattern) == "" {
+			return fmt.Errorf("guardrails.tool_rules[%d] requires tool_name or arguments_pattern", i)
+		}
+		if strings.TrimSpace(rule.ToolName) != "" {
+			if _, err := regexp.Compile(rule.ToolName); err != nil {
+				return fmt.Errorf("guardrails.tool_rules[%d].tool_name: %w", i, err)
+			}
+		}
+		if strings.TrimSpace(rule.ArgumentsPattern) != "" {
+			if _, err := regexp.Compile(rule.ArgumentsPattern); err != nil {
+				return fmt.Errorf("guardrails.tool_rules[%d].arguments_pattern: %w", i, err)
+			}
+		}
+		if rule.Action != "" && !validGuardrailAction(rule.Action) {
+			return fmt.Errorf("guardrails.tool_rules[%d].action must be deny, redact, warn, or log", i)
+		}
+	}
 	for i, webhook := range cfg.Guardrails.Webhooks {
 		if strings.TrimSpace(webhook.Name) == "" || strings.TrimSpace(webhook.URL) == "" {
 			return fmt.Errorf("guardrails.webhooks[%d] requires name and url", i)
@@ -334,6 +407,26 @@ func Validate(cfg Config) error {
 		}
 		if webhook.Timeout != nil && webhook.Timeout.Duration <= 0 {
 			return fmt.Errorf("guardrails.webhooks[%d].timeout must be positive", i)
+		}
+	}
+	for i, judge := range cfg.Guardrails.LLMJudges {
+		if strings.TrimSpace(judge.Name) == "" || strings.TrimSpace(judge.URL) == "" || strings.TrimSpace(judge.Model) == "" {
+			return fmt.Errorf("guardrails.llm_judges[%d] requires name, url, and model", i)
+		}
+		parsed, err := url.Parse(judge.URL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("guardrails.llm_judges[%d].url must be an absolute HTTP(S) URL", i)
+		}
+		switch judge.Stage {
+		case "", "input", "output", "both":
+		default:
+			return fmt.Errorf("guardrails.llm_judges[%d].stage must be input, output, or both", i)
+		}
+		if judge.Action != "" && !validGuardrailAction(judge.Action) {
+			return fmt.Errorf("guardrails.llm_judges[%d].action must be deny, redact, warn, or log", i)
+		}
+		if judge.Timeout != nil && judge.Timeout.Duration <= 0 {
+			return fmt.Errorf("guardrails.llm_judges[%d].timeout must be positive", i)
 		}
 	}
 	for check, action := range cfg.Guardrails.Actions {
@@ -385,6 +478,15 @@ func validGuardrailAction(action string) bool {
 	default:
 		return false
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {

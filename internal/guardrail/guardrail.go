@@ -22,10 +22,12 @@ type Result struct {
 }
 
 type Engine struct {
-	checks   []Check
-	actions  map[string]string
-	rules    []Rule
-	webhooks []webhookCheck
+	checks    []Check
+	actions   map[string]string
+	rules     []Rule
+	toolRules []ToolRule
+	webhooks  []webhookCheck
+	llmJudges []llmJudgeCheck
 }
 
 type Check func(input GuardrailInput) Result
@@ -33,6 +35,7 @@ type Check func(input GuardrailInput) Result
 type GuardrailInput struct {
 	Messages []provider.Message
 	Response string
+	ToolCalls []provider.ToolCall
 	IsInput  bool
 }
 
@@ -48,9 +51,11 @@ type Rule struct {
 }
 
 type Config struct {
-	Actions  map[string]string `json:"actions,omitempty" yaml:"actions,omitempty"`
-	Rules    []Rule            `json:"rules,omitempty" yaml:"rules,omitempty"`
-	Webhooks []Webhook         `json:"webhooks,omitempty" yaml:"webhooks,omitempty"`
+	Actions   map[string]string `json:"actions,omitempty" yaml:"actions,omitempty"`
+	Rules     []Rule            `json:"rules,omitempty" yaml:"rules,omitempty"`
+	ToolRules []ToolRule        `json:"tool_rules,omitempty" yaml:"tool_rules,omitempty"`
+	Webhooks  []Webhook         `json:"webhooks,omitempty" yaml:"webhooks,omitempty"`
+	LLMJudges []LLMJudge        `json:"llm_judges,omitempty" yaml:"llm_judges,omitempty"`
 }
 
 // Webhook delegates a guardrail decision to a managed or in-house service.
@@ -69,6 +74,33 @@ type Webhook struct {
 
 type webhookCheck struct {
 	config Webhook
+	client *http.Client
+}
+
+type ToolRule struct {
+	Name             string `json:"name" yaml:"name"`
+	Stage            string `json:"stage,omitempty" yaml:"stage,omitempty"`
+	ToolName         string `json:"tool_name,omitempty" yaml:"tool_name,omitempty"`
+	ArgumentsPattern string `json:"arguments_pattern,omitempty" yaml:"arguments_pattern,omitempty"`
+	Action           string `json:"action,omitempty" yaml:"action,omitempty"`
+	Message          string `json:"message,omitempty" yaml:"message,omitempty"`
+}
+
+type LLMJudge struct {
+	Name         string            `json:"name" yaml:"name"`
+	URL          string            `json:"url" yaml:"url"`
+	Model        string            `json:"model" yaml:"model"`
+	Stage        string            `json:"stage,omitempty" yaml:"stage,omitempty"`
+	Action       string            `json:"action,omitempty" yaml:"action,omitempty"`
+	SystemPrompt string            `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
+	APIKey       string            `json:"api_key,omitempty" yaml:"api_key,omitempty"`
+	Headers      map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	Timeout      time.Duration     `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	FailOpen     bool              `json:"fail_open,omitempty" yaml:"fail_open,omitempty"`
+}
+
+type llmJudgeCheck struct {
+	config LLMJudge
 	client *http.Client
 }
 
@@ -102,13 +134,28 @@ func NewEngineWithConfig(config Config) *Engine {
 		}
 		rules = append(rules, rule)
 	}
+	toolRules := make([]ToolRule, 0, len(config.ToolRules))
+	for _, rule := range config.ToolRules {
+		if normalized, ok := normalizeToolRule(rule); ok {
+			toolRules = append(toolRules, normalized)
+		}
+	}
 	webhooks := make([]webhookCheck, 0, len(config.Webhooks))
 	for _, webhook := range config.Webhooks {
 		if normalized, ok := normalizeWebhook(webhook); ok {
 			webhooks = append(webhooks, webhookCheck{config: normalized, client: &http.Client{Timeout: normalized.Timeout}})
 		}
 	}
-	return &Engine{checks: []Check{checkPII, checkPromptInjection, checkSQLInjection, checkToxicContent, checkCodeLeakage}, actions: actions, rules: rules, webhooks: webhooks}
+	llmJudges := make([]llmJudgeCheck, 0, len(config.LLMJudges))
+	for _, judge := range config.LLMJudges {
+		if normalized, ok := normalizeLLMJudge(judge); ok {
+			llmJudges = append(llmJudges, llmJudgeCheck{config: normalized, client: &http.Client{Timeout: normalized.Timeout}})
+		}
+	}
+	return &Engine{
+		checks: []Check{checkPII, checkPromptInjection, checkSQLInjection, checkToxicContent, checkCodeLeakage},
+		actions: actions, rules: rules, toolRules: toolRules, webhooks: webhooks, llmJudges: llmJudges,
+	}
 }
 
 func (e *Engine) EvaluateInput(messages []provider.Message) []Result {
@@ -125,6 +172,10 @@ func (e *Engine) EvaluateInputContext(ctx context.Context, messages []provider.M
 
 func (e *Engine) EvaluateOutputContext(ctx context.Context, response string) []Result {
 	return e.evaluate(ctx, GuardrailInput{Response: response, IsInput: false})
+}
+
+func (e *Engine) EvaluateOutputMessageContext(ctx context.Context, message provider.Message) []Result {
+	return e.evaluate(ctx, GuardrailInput{Response: message.Content, ToolCalls: message.ToolCalls, IsInput: false})
 }
 
 func (e *Engine) evaluate(ctx context.Context, input GuardrailInput) []Result {
@@ -152,6 +203,27 @@ func (e *Engine) evaluate(ctx context.Context, input GuardrailInput) []Result {
 		}
 		triggered = append(triggered, Result{Triggered: true, Type: rule.Name, Action: rule.Action, Message: rule.Message, Details: rule.Pattern})
 	}
+	for _, rule := range e.toolRules {
+		if rule.Stage != "both" && rule.Stage != stage {
+			continue
+		}
+		for _, call := range input.ToolCalls {
+			if !toolRuleMatches(rule, call) {
+				continue
+			}
+			message := rule.Message
+			if message == "" {
+				message = "Tool guardrail triggered: " + rule.Name
+			}
+			triggered = append(triggered, Result{
+				Triggered: true,
+				Type:      "tool:" + rule.Name,
+				Action:    rule.Action,
+				Message:   message,
+				Details:   call.Function.Name,
+			})
+		}
+	}
 	for _, webhook := range e.webhooks {
 		if !webhook.appliesTo(stage) {
 			continue
@@ -168,7 +240,71 @@ func (e *Engine) evaluate(ctx context.Context, input GuardrailInput) []Result {
 			triggered = append(triggered, result)
 		}
 	}
+	for _, judge := range e.llmJudges {
+		if !judge.appliesTo(stage) {
+			continue
+		}
+		result, err := judge.Evaluate(ctx, input)
+		if err != nil {
+			if judge.config.FailOpen {
+				continue
+			}
+			triggered = append(triggered, Result{Triggered: true, Type: "llm:" + judge.config.Name, Action: judge.config.Action, Message: "LLM guardrail unavailable: " + judge.config.Name, Details: err.Error()})
+			continue
+		}
+		if result.Triggered {
+			triggered = append(triggered, result)
+		}
+	}
 	return triggered
+}
+
+func normalizeToolRule(rule ToolRule) (ToolRule, bool) {
+	rule.Name = strings.TrimSpace(rule.Name)
+	if rule.Name == "" {
+		return ToolRule{}, false
+	}
+	rule.Stage = strings.ToLower(strings.TrimSpace(rule.Stage))
+	if rule.Stage == "" {
+		rule.Stage = "output"
+	}
+	if rule.Stage != "input" && rule.Stage != "output" && rule.Stage != "both" {
+		return ToolRule{}, false
+	}
+	if strings.TrimSpace(rule.ToolName) != "" {
+		if _, err := regexp.Compile(rule.ToolName); err != nil {
+			return ToolRule{}, false
+		}
+	}
+	if strings.TrimSpace(rule.ArgumentsPattern) != "" {
+		if _, err := regexp.Compile(rule.ArgumentsPattern); err != nil {
+			return ToolRule{}, false
+		}
+	}
+	rule.Action = strings.ToLower(strings.TrimSpace(rule.Action))
+	if rule.Action == "" {
+		rule.Action = "deny"
+	}
+	if !validAction(rule.Action) {
+		return ToolRule{}, false
+	}
+	return rule, true
+}
+
+func toolRuleMatches(rule ToolRule, call provider.ToolCall) bool {
+	if strings.TrimSpace(rule.ToolName) != "" {
+		pattern := regexp.MustCompile(rule.ToolName)
+		if !pattern.MatchString(call.Function.Name) {
+			return false
+		}
+	}
+	if strings.TrimSpace(rule.ArgumentsPattern) != "" {
+		pattern := regexp.MustCompile(rule.ArgumentsPattern)
+		if !pattern.MatchString(call.Function.Arguments) {
+			return false
+		}
+	}
+	return strings.TrimSpace(rule.ToolName) != "" || strings.TrimSpace(rule.ArgumentsPattern) != ""
 }
 
 func normalizeWebhook(webhook Webhook) (Webhook, bool) {
@@ -201,8 +337,46 @@ func normalizeWebhook(webhook Webhook) (Webhook, bool) {
 	return webhook, true
 }
 
+func normalizeLLMJudge(judge LLMJudge) (LLMJudge, bool) {
+	judge.Name = strings.TrimSpace(judge.Name)
+	judge.URL = strings.TrimSpace(judge.URL)
+	judge.Model = strings.TrimSpace(judge.Model)
+	if judge.Name == "" || judge.URL == "" || judge.Model == "" {
+		return LLMJudge{}, false
+	}
+	parsed, err := url.Parse(judge.URL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return LLMJudge{}, false
+	}
+	judge.Stage = strings.ToLower(strings.TrimSpace(judge.Stage))
+	if judge.Stage == "" {
+		judge.Stage = "both"
+	}
+	if judge.Stage != "input" && judge.Stage != "output" && judge.Stage != "both" {
+		return LLMJudge{}, false
+	}
+	judge.Action = strings.ToLower(strings.TrimSpace(judge.Action))
+	if judge.Action == "" {
+		judge.Action = "deny"
+	}
+	if !validAction(judge.Action) {
+		return LLMJudge{}, false
+	}
+	if judge.Timeout <= 0 {
+		judge.Timeout = 10 * time.Second
+	}
+	if strings.TrimSpace(judge.SystemPrompt) == "" {
+		judge.SystemPrompt = "You are a strict safety evaluator. Return compact JSON with fields triggered (boolean), message (string), and details (string)."
+	}
+	return judge, true
+}
+
 func (webhook webhookCheck) appliesTo(stage string) bool {
 	return webhook.config.Stage == "both" || webhook.config.Stage == stage
+}
+
+func (judge llmJudgeCheck) appliesTo(stage string) bool {
+	return judge.config.Stage == "both" || judge.config.Stage == stage
 }
 
 func (webhook webhookCheck) Evaluate(ctx context.Context, input GuardrailInput) (Result, error) {
@@ -252,6 +426,73 @@ func (webhook webhookCheck) Evaluate(ctx context.Context, input GuardrailInput) 
 		message = "External guardrail triggered: " + webhook.config.Name
 	}
 	return Result{Triggered: true, Type: "webhook:" + webhook.config.Name, Action: webhook.config.Action, Message: message, Details: decision.Details}, nil
+}
+
+func (judge llmJudgeCheck) Evaluate(ctx context.Context, input GuardrailInput) (Result, error) {
+	stage := "output"
+	if input.IsInput {
+		stage = "input"
+	}
+	body, err := json.Marshal(map[string]any{
+		"model": judge.config.Model,
+		"messages": []map[string]string{
+			{"role": "system", "content": judge.config.SystemPrompt},
+			{"role": "user", "content": fmt.Sprintf("Stage: %s\n\nContent:\n%s\n\nTool calls:\n%s", stage, extractText(input), toolCallsJSON(input.ToolCalls))},
+		},
+		"temperature": 0,
+		"response_format": map[string]string{"type": "json_object"},
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, judge.config.URL, strings.NewReader(string(body)))
+	if err != nil {
+		return Result{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if judge.config.APIKey != "" {
+		request.Header.Set("Authorization", "Bearer "+judge.config.APIKey)
+	}
+	for key, value := range judge.config.Headers {
+		request.Header.Set(key, value)
+	}
+	response, err := judge.client.Do(request)
+	if err != nil {
+		return Result{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return Result{}, fmt.Errorf("unexpected status %s", response.Status)
+	}
+	var chat struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Triggered bool   `json:"triggered"`
+		Message   string `json:"message"`
+		Details   string `json:"details"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&chat); err != nil {
+		return Result{}, fmt.Errorf("decode response: %w", err)
+	}
+	decision := struct {
+		Triggered bool   `json:"triggered"`
+		Message   string `json:"message"`
+		Details   string `json:"details"`
+	}{Triggered: chat.Triggered, Message: chat.Message, Details: chat.Details}
+	if len(chat.Choices) > 0 && strings.TrimSpace(chat.Choices[0].Message.Content) != "" {
+		_ = json.Unmarshal([]byte(extractJSONObject(chat.Choices[0].Message.Content)), &decision)
+	}
+	if !decision.Triggered {
+		return Result{}, nil
+	}
+	message := strings.TrimSpace(decision.Message)
+	if message == "" {
+		message = "LLM guardrail triggered: " + judge.config.Name
+	}
+	return Result{Triggered: true, Type: "llm:" + judge.config.Name, Action: judge.config.Action, Message: message, Details: decision.Details}, nil
 }
 
 func validAction(action string) bool {
@@ -355,6 +596,27 @@ func extractText(input GuardrailInput) string {
 		parts = append(parts, msg.Text())
 	}
 	return strings.Join(parts, "\n")
+}
+
+func toolCallsJSON(toolCalls []provider.ToolCall) string {
+	if len(toolCalls) == 0 {
+		return "[]"
+	}
+	data, err := json.Marshal(toolCalls)
+	if err != nil {
+		return "[]"
+	}
+	return string(data)
+}
+
+func extractJSONObject(text string) string {
+	text = strings.TrimSpace(text)
+	start := strings.Index(text, "{")
+	end := strings.LastIndex(text, "}")
+	if start >= 0 && end >= start {
+		return text[start : end+1]
+	}
+	return text
 }
 
 func Now() time.Time { return time.Now().UTC() }

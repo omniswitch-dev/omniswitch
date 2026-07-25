@@ -5,6 +5,10 @@ func EstimateCost(providerName, model string, usage Usage) float64 {
 	switch providerName {
 	case "anthropic":
 		return anthropicPricing(model).Cost(usage.PromptTokens, usage.CompletionTokens)
+	case "azure":
+		return openAIPricing(model).Cost(usage.PromptTokens, usage.CompletionTokens)
+	case "bedrock":
+		return bedrockPricing(model).Cost(usage.PromptTokens, usage.CompletionTokens)
 	case "google":
 		return geminiPricing(model).Cost(usage.PromptTokens, usage.CompletionTokens)
 	case "groq":

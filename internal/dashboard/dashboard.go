@@ -1,14 +1,20 @@
 package dashboard
 
 import (
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/omniswitch-dev/omniswitch/internal/gatewayconfig"
 	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
@@ -17,12 +23,17 @@ var staticFiles embed.FS
 
 // Handler serves the dashboard API and embedded web UI.
 type Handler struct {
-	store *store.Store
+	store      *store.Store
+	configPath string
 }
 
 // New creates a new dashboard handler.
 func New(st *store.Store) *Handler {
 	return &Handler{store: st}
+}
+
+func (h *Handler) SetConfigPath(path string) {
+	h.configPath = strings.TrimSpace(path)
 }
 
 // RegisterRoutes adds dashboard routes to the given mux.
@@ -31,6 +42,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/logs", h.getLogs)
 	mux.HandleFunc("/api/metrics", h.getMetrics)
 	mux.HandleFunc("/api/metrics/providers", h.getProviderMetrics)
+	mux.HandleFunc("/api/analytics/cost", h.getCostAnalytics)
+	mux.HandleFunc("/api/traces/", h.getTrace)
+	mux.HandleFunc("/api/config/raw", h.rawConfig)
+	mux.HandleFunc("/api/configs", h.configs)
 	mux.HandleFunc("/api/health", h.health)
 
 	// Serve embedded static files at root.
@@ -121,6 +136,166 @@ func (h *Handler) getProviderMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"providers": metrics})
 }
 
+func (h *Handler) getCostAnalytics(w http.ResponseWriter, r *http.Request) {
+	since := windowStart(r.URL.Query().Get("window"))
+	groupBy := r.URL.Query().Get("groupBy")
+	var keyID string
+	if scoped := scopedAPIKeyID(r); scoped != "" {
+		keyID = scoped
+	}
+	rows, err := h.store.GetCostAnalytics(r.Context(), since, groupBy, keyID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if rows == nil {
+		rows = []store.CostAnalyticsRow{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"groupBy": firstNonEmpty(groupBy, "day"), "rows": rows})
+}
+
+func (h *Handler) getTrace(w http.ResponseWriter, r *http.Request) {
+	traceID := strings.TrimPrefix(r.URL.Path, "/api/traces/")
+	traceID = strings.TrimSpace(traceID)
+	if traceID == "" {
+		writeError(w, http.StatusBadRequest, "trace id is required")
+		return
+	}
+	detail, err := h.store.GetTrace(r.Context(), traceID, scopedAPIKeyID(r))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "trace not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+func (h *Handler) configs(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ref := strings.TrimSpace(r.URL.Query().Get("id"))
+		if ref == "" {
+			ref = strings.TrimSpace(r.URL.Query().Get("name"))
+		}
+		if ref != "" {
+			record, err := h.store.GetGatewayConfig(r.Context(), ref)
+			if err != nil {
+				writeError(w, http.StatusNotFound, "config not found")
+				return
+			}
+			writeJSON(w, http.StatusOK, record)
+			return
+		}
+		includeDisabled, _ := strconv.ParseBool(r.URL.Query().Get("include_disabled"))
+		records, err := h.store.ListGatewayConfigs(r.Context(), includeDisabled)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if records == nil {
+			records = []store.GatewayConfigRecord{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"configs": records})
+	case http.MethodPost:
+		var req struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Format      string `json:"format"`
+			Body        string `json:"body"`
+			Enabled     *bool  `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		req.Name = strings.TrimSpace(req.Name)
+		if req.Name == "" || strings.TrimSpace(req.Body) == "" {
+			writeError(w, http.StatusBadRequest, "name and body are required")
+			return
+		}
+		format := normalizedConfigFormat(req.Format)
+		if _, err := gatewayconfig.Parse([]byte(req.Body), "."+format); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		enabled := true
+		if req.Enabled != nil {
+			enabled = *req.Enabled
+		}
+		id := strings.TrimSpace(req.ID)
+		if id == "" {
+			id = newID("cfg")
+		}
+		now := time.Now().UTC()
+		record := store.GatewayConfigRecord{
+			ID: id, Name: req.Name, Description: req.Description, Format: format,
+			Body: req.Body, CreatedAt: now, UpdatedAt: now, Enabled: enabled,
+		}
+		if err := h.store.UpsertGatewayConfig(r.Context(), record); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, record)
+	case http.MethodDelete:
+		ref := strings.TrimSpace(r.URL.Query().Get("id"))
+		if ref == "" {
+			ref = strings.TrimSpace(r.URL.Query().Get("name"))
+		}
+		if ref == "" {
+			writeError(w, http.StatusBadRequest, "id or name is required")
+			return
+		}
+		if err := h.store.DeleteGatewayConfig(r.Context(), ref); err != nil {
+			writeError(w, http.StatusNotFound, "config not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Handler) rawConfig(w http.ResponseWriter, r *http.Request) {
+	if h.configPath == "" {
+		writeError(w, http.StatusNotFound, "OMNISWITCH_CONFIG is not set")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		body, err := os.ReadFile(h.configPath)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		format := normalizedConfigFormat("")
+		if strings.EqualFold(configExt(h.configPath), ".json") {
+			format = "json"
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"path": h.configPath, "format": format, "body": string(body)})
+	case http.MethodPost:
+		var req struct {
+			Body   string `json:"body"`
+			Format string `json:"format"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		format := normalizedConfigFormat(req.Format)
+		if _, err := gatewayconfig.Parse([]byte(req.Body), "."+format); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := os.WriteFile(h.configPath, []byte(req.Body), 0o644); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"saved": true, "path": h.configPath})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // scopedAPIKeyID returns the key scope for non-administrative callers. The
 // authentication middleware owns these internal headers; callers cannot set
 // them when authentication is enabled because it overwrites their values.
@@ -137,6 +312,52 @@ func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
 		"status": "healthy",
 		"time":   time.Now().UTC(),
 	})
+}
+
+func windowStart(window string) time.Time {
+	now := time.Now().UTC()
+	switch strings.TrimSpace(window) {
+	case "1h":
+		return now.Add(-1 * time.Hour)
+	case "6h":
+		return now.Add(-6 * time.Hour)
+	case "7d":
+		return now.Add(-7 * 24 * time.Hour)
+	case "30d":
+		return now.Add(-30 * 24 * time.Hour)
+	default:
+		return now.Add(-24 * time.Hour)
+	}
+}
+
+func normalizedConfigFormat(format string) string {
+	switch strings.ToLower(strings.TrimPrefix(strings.TrimSpace(format), ".")) {
+	case "json":
+		return "json"
+	default:
+		return "yaml"
+	}
+}
+
+func configExt(path string) string {
+	return strings.ToLower(filepath.Ext(path))
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func newID(prefix string) string {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%s_%d_%s", prefix, time.Now().UnixNano(), hex.EncodeToString(b[:]))
 }
 
 func (h *Handler) prometheus(w http.ResponseWriter, r *http.Request) {

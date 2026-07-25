@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -45,6 +46,8 @@ type geminiRequest struct {
 	Contents          []geminiContent         `json:"contents"`
 	SystemInstruction *geminiContent          `json:"systemInstruction,omitempty"`
 	GenerationConfig  *geminiGenerationConfig `json:"generationConfig,omitempty"`
+	Tools             []geminiTool            `json:"tools,omitempty"`
+	ToolConfig        *geminiToolConfig       `json:"toolConfig,omitempty"`
 }
 
 type geminiContent struct {
@@ -53,7 +56,50 @@ type geminiContent struct {
 }
 
 type geminiPart struct {
-	Text string `json:"text"`
+	Text             string                  `json:"text,omitempty"`
+	InlineData       *geminiBlob             `json:"inlineData,omitempty"`
+	FileData         *geminiFileData         `json:"fileData,omitempty"`
+	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`
+	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"`
+}
+
+type geminiBlob struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
+}
+
+type geminiFileData struct {
+	MimeType string `json:"mimeType,omitempty"`
+	FileURI  string `json:"fileUri"`
+}
+
+type geminiFunctionCall struct {
+	Name string         `json:"name"`
+	Args map[string]any `json:"args,omitempty"`
+}
+
+type geminiFunctionResponse struct {
+	Name     string         `json:"name"`
+	Response map[string]any `json:"response"`
+}
+
+type geminiTool struct {
+	FunctionDeclarations []geminiFunctionDeclaration `json:"functionDeclarations,omitempty"`
+}
+
+type geminiFunctionDeclaration struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Parameters  any    `json:"parameters,omitempty"`
+}
+
+type geminiToolConfig struct {
+	FunctionCallingConfig *geminiFunctionCallingConfig `json:"functionCallingConfig,omitempty"`
+}
+
+type geminiFunctionCallingConfig struct {
+	Mode                 string   `json:"mode,omitempty"`
+	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
 }
 
 type geminiGenerationConfig struct {
@@ -67,7 +113,8 @@ type geminiResponse struct {
 	Candidates []struct {
 		Content struct {
 			Parts []struct {
-				Text string `json:"text"`
+				Text         string              `json:"text"`
+				FunctionCall *geminiFunctionCall `json:"functionCall,omitempty"`
 			} `json:"parts"`
 			Role string `json:"role"`
 		} `json:"content"`
@@ -84,30 +131,7 @@ func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 	start := time.Now()
 	meta := ProviderMeta{Provider: "google", Model: req.Model, Timestamp: start}
 
-	gemReq := geminiRequest{
-		GenerationConfig: &geminiGenerationConfig{
-			Temperature: req.Temperature,
-			MaxTokens:   req.MaxTokens,
-			TopP:        req.TopP,
-		},
-	}
-
-	for _, msg := range req.Messages {
-		if msg.Role == "system" {
-			gemReq.SystemInstruction = &geminiContent{
-				Parts: []geminiPart{{Text: msg.Text()}},
-			}
-			continue
-		}
-		role := msg.Role
-		if role == "assistant" {
-			role = "model"
-		}
-		gemReq.Contents = append(gemReq.Contents, geminiContent{
-			Role:  role,
-			Parts: []geminiPart{{Text: msg.Text()}},
-		})
-	}
+	gemReq := toGeminiRequest(req)
 
 	body, err := json.Marshal(gemReq)
 	if err != nil {
@@ -153,13 +177,30 @@ func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 
 	content := ""
 	finishReason := "stop"
+	var toolCalls []ToolCall
 	if len(gemResp.Candidates) > 0 {
 		candidate := gemResp.Candidates[0]
-		for _, part := range candidate.Content.Parts {
+		for index, part := range candidate.Content.Parts {
 			content += part.Text
+			if part.FunctionCall != nil {
+				args, _ := json.Marshal(part.FunctionCall.Args)
+				i := index
+				toolCalls = append(toolCalls, ToolCall{
+					Index: &i,
+					ID:    fmt.Sprintf("call_%d", index),
+					Type:  "function",
+					Function: FunctionCall{
+						Name:      part.FunctionCall.Name,
+						Arguments: string(args),
+					},
+				})
+			}
 		}
 		if candidate.FinishReason == "MAX_TOKENS" {
 			finishReason = "length"
+		}
+		if len(toolCalls) > 0 {
+			finishReason = "tool_calls"
 		}
 	}
 
@@ -171,7 +212,7 @@ func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 		Choices: []Choice{
 			{
 				Index:        0,
-				Message:      Message{Role: "assistant", Content: content},
+				Message:      Message{Role: "assistant", Content: content, ToolCalls: toolCalls},
 				FinishReason: finishReason,
 			},
 		},
@@ -227,6 +268,27 @@ func toGeminiRequest(req ChatRequest) geminiRequest {
 		},
 	}
 
+	if len(req.Tools) > 0 {
+		tool := geminiTool{FunctionDeclarations: make([]geminiFunctionDeclaration, 0, len(req.Tools))}
+		for _, openAITool := range req.Tools {
+			if openAITool.Type != "" && openAITool.Type != "function" {
+				continue
+			}
+			tool.FunctionDeclarations = append(tool.FunctionDeclarations, geminiFunctionDeclaration{
+				Name:        openAITool.Function.Name,
+				Description: openAITool.Function.Description,
+				Parameters:  openAITool.Function.Parameters,
+			})
+		}
+		if len(tool.FunctionDeclarations) > 0 {
+			gemReq.Tools = []geminiTool{tool}
+		}
+	}
+	if req.ToolChoice != nil {
+		gemReq.ToolConfig = geminiToolChoice(req.ToolChoice)
+	}
+
+	toolCallNames := map[string]string{}
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {
 			gemReq.SystemInstruction = &geminiContent{
@@ -234,16 +296,108 @@ func toGeminiRequest(req ChatRequest) geminiRequest {
 			}
 			continue
 		}
+		for _, call := range msg.ToolCalls {
+			if call.ID != "" && call.Function.Name != "" {
+				toolCallNames[call.ID] = call.Function.Name
+			}
+		}
 		role := msg.Role
 		if role == "assistant" {
 			role = "model"
+		} else if role == "tool" {
+			role = "function"
 		}
+		parts := geminiMessageParts(msg, toolCallNames)
 		gemReq.Contents = append(gemReq.Contents, geminiContent{
 			Role:  role,
-			Parts: []geminiPart{{Text: msg.Text()}},
+			Parts: parts,
 		})
 	}
 	return gemReq
+}
+
+func geminiMessageParts(msg Message, toolCallNames map[string]string) []geminiPart {
+	if msg.Role == "tool" {
+		var response any
+		if err := json.Unmarshal([]byte(msg.Text()), &response); err != nil {
+			response = map[string]any{"content": msg.Text()}
+		}
+		wrapped, ok := response.(map[string]any)
+		if !ok {
+			wrapped = map[string]any{"content": response}
+		}
+		return []geminiPart{{
+			FunctionResponse: &geminiFunctionResponse{
+				Name:     firstNonEmptyString(toolCallNames[msg.ToolCallID], msg.ToolCallID),
+				Response: wrapped,
+			},
+		}}
+	}
+	if len(msg.ContentParts) == 0 {
+		if msg.Text() == "" {
+			return []geminiPart{}
+		}
+		return []geminiPart{{Text: msg.Text()}}
+	}
+	parts := make([]geminiPart, 0, len(msg.ContentParts))
+	for _, part := range msg.ContentParts {
+		switch part.Type {
+		case "text", "input_text":
+			if part.Text != "" {
+				parts = append(parts, geminiPart{Text: part.Text})
+			}
+		case "image_url", "input_image":
+			if part.ImageURL == nil {
+				continue
+			}
+			if decoded, ok := parseDataURL(part.ImageURL.URL); ok {
+				parts = append(parts, geminiPart{InlineData: &geminiBlob{
+					MimeType: decoded.MediaType,
+					Data:     decoded.Data,
+				}})
+				continue
+			}
+			parts = append(parts, geminiPart{FileData: &geminiFileData{
+				MimeType: mediaTypeFromURL(part.ImageURL.URL),
+				FileURI:  part.ImageURL.URL,
+			}})
+		case "input_audio":
+			if part.InputAudio != nil {
+				mimeType := "audio/" + strings.TrimPrefix(part.InputAudio.Format, ".")
+				parts = append(parts, geminiPart{InlineData: &geminiBlob{
+					MimeType: mimeType,
+					Data:     part.InputAudio.Data,
+				}})
+			}
+		}
+	}
+	if len(parts) == 0 && msg.Text() != "" {
+		return []geminiPart{{Text: msg.Text()}}
+	}
+	return parts
+}
+
+func geminiToolChoice(choice any) *geminiToolConfig {
+	config := &geminiToolConfig{FunctionCallingConfig: &geminiFunctionCallingConfig{Mode: "AUTO"}}
+	switch value := choice.(type) {
+	case string:
+		switch value {
+		case "none":
+			config.FunctionCallingConfig.Mode = "NONE"
+		case "required":
+			config.FunctionCallingConfig.Mode = "ANY"
+		default:
+			config.FunctionCallingConfig.Mode = "AUTO"
+		}
+	case map[string]any:
+		if function, ok := value["function"].(map[string]any); ok {
+			if name, ok := function["name"].(string); ok && name != "" {
+				config.FunctionCallingConfig.Mode = "ANY"
+				config.FunctionCallingConfig.AllowedFunctionNames = []string{name}
+			}
+		}
+	}
+	return config
 }
 
 func geminiPricing(model string) ModelPricing {

@@ -43,16 +43,29 @@ func (a *Anthropic) Models() []ModelInfo {
 
 // anthropicRequest is the Anthropic API request format.
 type anthropicRequest struct {
-	Model     string             `json:"model"`
-	Messages  []anthropicMessage `json:"messages"`
-	MaxTokens int                `json:"max_tokens"`
-	System    string             `json:"system,omitempty"`
-	Stream    bool               `json:"stream,omitempty"`
+	Model      string               `json:"model"`
+	Messages   []anthropicMessage   `json:"messages"`
+	MaxTokens  int                  `json:"max_tokens"`
+	System     string               `json:"system,omitempty"`
+	Stream     bool                 `json:"stream,omitempty"`
+	Tools      []anthropicTool      `json:"tools,omitempty"`
+	ToolChoice *anthropicToolChoice `json:"tool_choice,omitempty"`
+}
+
+type anthropicTool struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	InputSchema any    `json:"input_schema"`
+}
+
+type anthropicToolChoice struct {
+	Type string `json:"type"`
+	Name string `json:"name,omitempty"`
 }
 
 type anthropicMessage struct {
 	Role    string `json:"role"`
-	Content string `json:"content"`
+	Content any    `json:"content"`
 }
 
 // anthropicResponse is the Anthropic API response format.
@@ -61,8 +74,11 @@ type anthropicResponse struct {
 	Type    string `json:"type"`
 	Model   string `json:"model"`
 	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type  string          `json:"type"`
+		Text  string          `json:"text,omitempty"`
+		ID    string          `json:"id,omitempty"`
+		Name  string          `json:"name,omitempty"`
+		Input json.RawMessage `json:"input,omitempty"`
 	} `json:"content"`
 	StopReason string `json:"stop_reason"`
 	Usage      struct {
@@ -119,11 +135,26 @@ func (a *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 	}
 
 	// Convert Anthropic response back to OpenAI format.
-	content := ""
+	var content string
+	var toolCalls []ToolCall
 	for _, block := range anthResp.Content {
 		if block.Type == "text" {
 			content += block.Text
+		} else if block.Type == "tool_use" {
+			toolCalls = append(toolCalls, ToolCall{
+				ID:   block.ID,
+				Type: "function",
+				Function: FunctionCall{
+					Name:      block.Name,
+					Arguments: string(block.Input),
+				},
+			})
 		}
+	}
+
+	finishReason := mapAnthropicStopReason(anthResp.StopReason)
+	if len(toolCalls) > 0 && anthResp.StopReason == "tool_use" {
+		finishReason = "tool_calls"
 	}
 
 	chatResp := ChatResponse{
@@ -133,9 +164,13 @@ func (a *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 		Model:   anthResp.Model,
 		Choices: []Choice{
 			{
-				Index:        0,
-				Message:      Message{Role: "assistant", Content: content},
-				FinishReason: mapAnthropicStopReason(anthResp.StopReason),
+				Index: 0,
+				Message: Message{
+					Role:      "assistant",
+					Content:   content,
+					ToolCalls: toolCalls,
+				},
+				FinishReason: finishReason,
 			},
 		},
 		Usage: Usage{
@@ -193,14 +228,98 @@ func toAnthropicRequest(req ChatRequest, stream bool) anthropicRequest {
 		anthReq.MaxTokens = *req.MaxTokens
 	}
 
+	// Convert tools
+	for _, t := range req.Tools {
+		schema := t.Function.Parameters
+		if schema == nil {
+			schema = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+		anthReq.Tools = append(anthReq.Tools, anthropicTool{
+			Name:        t.Function.Name,
+			Description: t.Function.Description,
+			InputSchema: schema,
+		})
+	}
+
+	// Convert tool_choice
+	if req.ToolChoice != nil {
+		switch v := req.ToolChoice.(type) {
+		case string:
+			if v == "auto" || v == "none" {
+				anthReq.ToolChoice = &anthropicToolChoice{Type: v}
+			} else if v == "required" {
+				anthReq.ToolChoice = &anthropicToolChoice{Type: "any"}
+			}
+		case map[string]any:
+			if f, ok := v["function"].(map[string]any); ok {
+				if name, ok := f["name"].(string); ok {
+					anthReq.ToolChoice = &anthropicToolChoice{Type: "tool", Name: name}
+				}
+			}
+		}
+	}
+
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {
 			anthReq.System = msg.Text()
 			continue
 		}
+
+		var content any = msg.Text()
+
+		// Assistant message with tool_calls → Anthropic tool_use blocks
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			var blocks []any
+			if msg.Text() != "" {
+				blocks = append(blocks, map[string]any{"type": "text", "text": msg.Text()})
+			}
+			for _, tc := range msg.ToolCalls {
+				input := json.RawMessage(tc.Function.Arguments)
+				if len(input) == 0 {
+					input = json.RawMessage(`{}`)
+				}
+				blocks = append(blocks, map[string]any{
+					"type":  "tool_use",
+					"id":    tc.ID,
+					"name":  tc.Function.Name,
+					"input": input,
+				})
+			}
+			content = blocks
+		} else if msg.Role == "tool" {
+			// Tool result → Anthropic user message with tool_result block
+			content = []any{
+				map[string]any{
+					"type":        "tool_result",
+					"tool_use_id": msg.ToolCallID,
+					"content":     msg.Text(),
+				},
+			}
+			msg.Role = "user"
+		} else if len(msg.ContentParts) > 0 {
+			// Vision / multimodal → Anthropic content blocks
+			var blocks []any
+			for _, part := range msg.ContentParts {
+				if part.Type == "text" {
+					blocks = append(blocks, map[string]any{"type": "text", "text": part.Text})
+				} else if part.Type == "image_url" && part.ImageURL != nil {
+					source := map[string]any{"type": "url", "url": part.ImageURL.URL}
+					if decoded, ok := parseDataURL(part.ImageURL.URL); ok {
+						source = map[string]any{
+							"type":       "base64",
+							"media_type": decoded.MediaType,
+							"data":       decoded.Data,
+						}
+					}
+					blocks = append(blocks, map[string]any{"type": "image", "source": source})
+				}
+			}
+			content = blocks
+		}
+
 		anthReq.Messages = append(anthReq.Messages, anthropicMessage{
 			Role:    msg.Role,
-			Content: msg.Text(),
+			Content: content,
 		})
 	}
 	return anthReq

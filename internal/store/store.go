@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/omniswitch-dev/omniswitch/internal/cache"
@@ -178,6 +179,33 @@ type WorkspaceMember struct {
 	UserID      string    `json:"user_id"`
 	Role        string    `json:"role"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+type GatewayConfigRecord struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description,omitempty"`
+	Format      string    `json:"format"`
+	Body        string    `json:"body"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Enabled     bool      `json:"enabled"`
+}
+
+type CostAnalyticsRow struct {
+	Group        string  `json:"group"`
+	RequestCount int     `json:"request_count"`
+	TotalCost    float64 `json:"total_cost"`
+	TotalTokens  int     `json:"total_tokens"`
+	AvgLatencyMs float64 `json:"avg_latency_ms"`
+}
+
+type TraceDetail struct {
+	TraceID         string           `json:"trace_id"`
+	Logs            []RequestLog     `json:"logs"`
+	GuardrailEvents []GuardrailEvent `json:"guardrail_events"`
+	ShadowLogs      []ShadowLog      `json:"shadow_logs"`
+	Feedback        []Feedback       `json:"feedback,omitempty"`
 }
 
 // VirtualKeyRecord stores an encrypted provider API key mapping.
@@ -352,8 +380,20 @@ func (s *Store) migrate() error {
 			enabled INTEGER DEFAULT 1,
 			metadata TEXT
 		)`,
+		`CREATE TABLE IF NOT EXISTS gateway_configs (
+			id TEXT PRIMARY KEY,
+			name TEXT UNIQUE NOT NULL,
+			description TEXT,
+			format TEXT NOT NULL DEFAULT 'yaml',
+			body TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			enabled INTEGER DEFAULT 1
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_trace ON request_logs(trace_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_session ON request_logs(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_api_key ON request_logs(api_key_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_provider ON request_logs(provider)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_status ON request_logs(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_guardrail_request ON guardrail_events(request_id)`,
@@ -364,6 +404,7 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_workspaces_org ON workspaces(organization_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_virtual_keys_name ON virtual_keys(name)`,
+		`CREATE INDEX IF NOT EXISTS idx_gateway_configs_name ON gateway_configs(name)`,
 	}
 
 	for _, m := range migrations {
@@ -480,6 +521,215 @@ func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, statu
 		logs = append(logs, l)
 	}
 	return logs, total, rows.Err()
+}
+
+func (s *Store) UpsertGatewayConfig(ctx context.Context, record GatewayConfigRecord) error {
+	now := time.Now().UTC()
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = now
+	}
+	if record.UpdatedAt.IsZero() {
+		record.UpdatedAt = now
+	}
+	if strings.TrimSpace(record.Format) == "" {
+		record.Format = "yaml"
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO gateway_configs (id, name, description, format, body, created_at, updated_at, enabled)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET
+			description = excluded.description,
+			format = excluded.format,
+			body = excluded.body,
+			updated_at = excluded.updated_at,
+			enabled = excluded.enabled`,
+		record.ID,
+		record.Name,
+		record.Description,
+		record.Format,
+		record.Body,
+		record.CreatedAt.Format(time.RFC3339Nano),
+		record.UpdatedAt.Format(time.RFC3339Nano),
+		boolToInt(record.Enabled),
+	)
+	return err
+}
+
+func (s *Store) GetGatewayConfig(ctx context.Context, ref string) (GatewayConfigRecord, error) {
+	var record GatewayConfigRecord
+	var createdAt, updatedAt string
+	var enabled int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, name, COALESCE(description, ''), format, body, created_at, updated_at, enabled
+		FROM gateway_configs
+		WHERE (id = ? OR name = ?) AND enabled = 1`,
+		ref,
+		ref,
+	).Scan(&record.ID, &record.Name, &record.Description, &record.Format, &record.Body, &createdAt, &updatedAt, &enabled)
+	if err != nil {
+		return record, err
+	}
+	record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	record.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	record.Enabled = enabled == 1
+	return record, nil
+}
+
+func (s *Store) ListGatewayConfigs(ctx context.Context, includeDisabled bool) ([]GatewayConfigRecord, error) {
+	where := "enabled = 1"
+	if includeDisabled {
+		where = "1=1"
+	}
+	rows, err := s.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT id, name, COALESCE(description, ''), format, body, created_at, updated_at, enabled
+		FROM gateway_configs WHERE %s ORDER BY updated_at DESC`, where),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []GatewayConfigRecord
+	for rows.Next() {
+		var record GatewayConfigRecord
+		var createdAt, updatedAt string
+		var enabled int
+		if err := rows.Scan(&record.ID, &record.Name, &record.Description, &record.Format, &record.Body, &createdAt, &updatedAt, &enabled); err != nil {
+			return nil, err
+		}
+		record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		record.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+		record.Enabled = enabled == 1
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+func (s *Store) DeleteGatewayConfig(ctx context.Context, ref string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE gateway_configs SET enabled = 0, updated_at = ? WHERE id = ? OR name = ?`,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		ref,
+		ref,
+	)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) GetCostAnalytics(ctx context.Context, since time.Time, groupBy, apiKeyID string) ([]CostAnalyticsRow, error) {
+	expr, err := analyticsGroupExpression(groupBy)
+	if err != nil {
+		return nil, err
+	}
+	where := "timestamp >= ?"
+	args := []any{since.Format(time.RFC3339Nano)}
+	if apiKeyID != "" {
+		where += " AND api_key_id = ?"
+		args = append(args, apiKeyID)
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT %s AS bucket,
+			COUNT(*) AS request_count,
+			COALESCE(SUM(cost), 0) AS total_cost,
+			COALESCE(SUM(total_tokens), 0) AS total_tokens,
+			COALESCE(AVG(latency_ms), 0) AS avg_latency_ms
+		FROM request_logs
+		WHERE %s
+		GROUP BY bucket
+		ORDER BY total_cost DESC, bucket ASC`, expr, where), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var rowsOut []CostAnalyticsRow
+	for rows.Next() {
+		var row CostAnalyticsRow
+		if err := rows.Scan(&row.Group, &row.RequestCount, &row.TotalCost, &row.TotalTokens, &row.AvgLatencyMs); err != nil {
+			return nil, err
+		}
+		rowsOut = append(rowsOut, row)
+	}
+	return rowsOut, rows.Err()
+}
+
+func (s *Store) GetTrace(ctx context.Context, traceID, apiKeyID string) (TraceDetail, error) {
+	detail := TraceDetail{TraceID: traceID}
+	where := "trace_id = ?"
+	args := []any{traceID}
+	if apiKeyID != "" {
+		where += " AND api_key_id = ?"
+		args = append(args, apiKeyID)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT id, timestamp, trace_id, session_id, provider, model, api_key_id, status,
+			input_tokens, output_tokens, total_tokens, latency_ms, cost, COALESCE(request_body, ''),
+			COALESCE(response_body, ''), decision, decision_reason, error_message, cached
+		FROM request_logs WHERE %s ORDER BY timestamp ASC`, where),
+		args...,
+	)
+	if err != nil {
+		return detail, err
+	}
+	defer rows.Close()
+	requestIDs := []string{}
+	for rows.Next() {
+		var l RequestLog
+		var ts string
+		var cached int
+		if err := rows.Scan(&l.ID, &ts, &l.TraceID, &l.SessionID, &l.Provider, &l.Model, &l.APIKeyID,
+			&l.Status, &l.InputTokens, &l.OutputTokens, &l.TotalTokens, &l.LatencyMs, &l.Cost,
+			&l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached); err != nil {
+			return detail, err
+		}
+		l.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
+		l.Cached = cached == 1
+		detail.Logs = append(detail.Logs, l)
+		requestIDs = append(requestIDs, l.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return detail, err
+	}
+	if len(requestIDs) == 0 {
+		return detail, sql.ErrNoRows
+	}
+	guardrailEvents, err := s.listGuardrailEventsForRequests(ctx, requestIDs)
+	if err != nil {
+		return detail, err
+	}
+	detail.GuardrailEvents = guardrailEvents
+	shadowLogs, err := s.listShadowLogsForTrace(ctx, traceID)
+	if err != nil {
+		return detail, err
+	}
+	detail.ShadowLogs = shadowLogs
+	feedback, err := s.ListFeedback(ctx, 100, "", traceID)
+	if err != nil {
+		return detail, err
+	}
+	detail.Feedback = feedback
+	return detail, nil
+}
+
+func analyticsGroupExpression(groupBy string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(groupBy)) {
+	case "", "day":
+		return "substr(timestamp, 1, 10)", nil
+	case "provider":
+		return "COALESCE(NULLIF(provider, ''), 'unknown')", nil
+	case "model":
+		return "COALESCE(NULLIF(model, ''), 'unknown')", nil
+	case "api_key_id", "api_key":
+		return "COALESCE(NULLIF(api_key_id, ''), 'anonymous')", nil
+	case "session_id", "session":
+		return "COALESCE(NULLIF(session_id, ''), 'none')", nil
+	case "status":
+		return "COALESCE(NULLIF(status, ''), 'unknown')", nil
+	default:
+		return "", fmt.Errorf("unsupported groupBy %q", groupBy)
+	}
 }
 
 // GetMetrics returns aggregated metrics for the given time window.
@@ -764,6 +1014,40 @@ func (s *Store) InsertGuardrailEvent(ctx context.Context, e GuardrailEvent) erro
 	return err
 }
 
+func (s *Store) listGuardrailEventsForRequests(ctx context.Context, requestIDs []string) ([]GuardrailEvent, error) {
+	if len(requestIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(requestIDs))
+	args := make([]any, len(requestIDs))
+	for i, id := range requestIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	rows, err := s.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT id, request_id, timestamp, guardrail_type, action, matched, details
+		FROM guardrail_events WHERE request_id IN (%s) ORDER BY timestamp ASC`, strings.Join(placeholders, ",")),
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []GuardrailEvent
+	for rows.Next() {
+		var event GuardrailEvent
+		var timestamp string
+		var matched int
+		if err := rows.Scan(&event.ID, &event.RequestID, &timestamp, &event.Type, &event.Action, &matched, &event.Details); err != nil {
+			return nil, err
+		}
+		event.Timestamp, _ = time.Parse(time.RFC3339Nano, timestamp)
+		event.Matched = matched == 1
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
 func (s *Store) GetAPIKeyByID(ctx context.Context, id string) (APIKey, error) {
 	var key APIKey
 	var createdAt, metaStr string
@@ -952,6 +1236,29 @@ func (s *Store) ListShadowLogs(ctx context.Context, requestID string) ([]ShadowL
 	}
 	defer rows.Close()
 
+	var logs []ShadowLog
+	for rows.Next() {
+		var entry ShadowLog
+		var timestamp string
+		if err := rows.Scan(&entry.ID, &entry.RequestID, &entry.TraceID, &timestamp, &entry.PrimaryProvider, &entry.ShadowProvider, &entry.Model, &entry.LatencyMs, &entry.Cost, &entry.Status, &entry.ErrorMessage); err != nil {
+			return nil, err
+		}
+		entry.Timestamp, _ = time.Parse(time.RFC3339Nano, timestamp)
+		logs = append(logs, entry)
+	}
+	return logs, rows.Err()
+}
+
+func (s *Store) listShadowLogsForTrace(ctx context.Context, traceID string) ([]ShadowLog, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, request_id, trace_id, timestamp, primary_provider, shadow_provider, model, latency_ms, cost, status, error_message
+		FROM shadow_requests WHERE trace_id = ? ORDER BY timestamp ASC`,
+		traceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	var logs []ShadowLog
 	for rows.Next() {
 		var entry ShadowLog

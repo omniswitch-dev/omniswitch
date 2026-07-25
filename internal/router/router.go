@@ -85,6 +85,22 @@ func (r *Router) SetRoute(model string, route Route) {
 	r.routes[model] = route
 }
 
+// CloneWithRoutes returns a request-scoped router that inherits the registry,
+// base routes, and circuit breaker, then overlays the supplied routes.
+func (r *Router) CloneWithRoutes(overrides map[string]Route) *Router {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cloned := New(r.registry)
+	cloned.breakers = r.breakers
+	for model, route := range r.routes {
+		cloned.routes[model] = route
+	}
+	for model, route := range overrides {
+		cloned.routes[model] = route
+	}
+	return cloned
+}
+
 // TransformRequest applies Portkey-style request shaping to the logical route.
 // Defaults only fill omitted fields; overrides always win; drops run last.
 func (r *Router) TransformRequest(req provider.ChatRequest) (provider.ChatRequest, error) {

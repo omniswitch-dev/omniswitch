@@ -17,6 +17,35 @@ type ChatRequest struct {
 	TopP        *float64  `json:"top_p,omitempty"`
 	Stream      bool      `json:"stream,omitempty"`
 	Stop        []string  `json:"stop,omitempty"`
+	Tools       []Tool    `json:"tools,omitempty"`
+	ToolChoice  any       `json:"tool_choice,omitempty"`
+}
+
+// Tool represents an OpenAI-compatible tool definition.
+type Tool struct {
+	Type     string       `json:"type"`
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction describes a callable function.
+type ToolFunction struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Parameters  any    `json:"parameters,omitempty"`
+}
+
+// ToolCall represents an LLM-initiated function invocation.
+type ToolCall struct {
+	Index    *int         `json:"index,omitempty"`
+	ID       string       `json:"id,omitempty"`
+	Type     string       `json:"type,omitempty"`
+	Function FunctionCall `json:"function,omitempty"`
+}
+
+// FunctionCall holds the function name and its JSON-encoded arguments.
+type FunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // Message represents a single message in the chat conversation.
@@ -24,12 +53,15 @@ type Message struct {
 	Role         string        `json:"role"`
 	Content      string        `json:"content"`
 	ContentParts []ContentPart `json:"-"`
+	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID   string        `json:"tool_call_id,omitempty"`
 }
 
 type ContentPart struct {
-	Type     string    `json:"type"`
-	Text     string    `json:"text,omitempty"`
-	ImageURL *ImageURL `json:"image_url,omitempty"`
+	Type       string      `json:"type"`
+	Text       string      `json:"text,omitempty"`
+	ImageURL   *ImageURL   `json:"image_url,omitempty"`
+	InputAudio *InputAudio `json:"input_audio,omitempty"`
 }
 
 type ImageURL struct {
@@ -37,15 +69,24 @@ type ImageURL struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+type InputAudio struct {
+	Data   string `json:"data"`
+	Format string `json:"format"`
+}
+
 func (m *Message) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
+		Role       string          `json:"role"`
+		Content    json.RawMessage `json:"content"`
+		ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
+		ToolCallID string          `json:"tool_call_id,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	m.Role = raw.Role
+	m.ToolCalls = raw.ToolCalls
+	m.ToolCallID = raw.ToolCallID
 	if len(raw.Content) == 0 || string(raw.Content) == "null" {
 		m.Content = ""
 		m.ContentParts = nil
@@ -67,17 +108,22 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 }
 
 func (m Message) MarshalJSON() ([]byte, error) {
-	payload := struct {
-		Role    string `json:"role"`
-		Content any    `json:"content"`
-	}{
-		Role:    m.Role,
-		Content: m.Content,
+	type wire struct {
+		Role       string     `json:"role"`
+		Content    any        `json:"content"`
+		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+		ToolCallID string     `json:"tool_call_id,omitempty"`
+	}
+	w := wire{
+		Role:       m.Role,
+		Content:    m.Content,
+		ToolCalls:  m.ToolCalls,
+		ToolCallID: m.ToolCallID,
 	}
 	if len(m.ContentParts) > 0 {
-		payload.Content = m.ContentParts
+		w.Content = m.ContentParts
 	}
-	return json.Marshal(payload)
+	return json.Marshal(w)
 }
 
 func (m Message) Text() string {

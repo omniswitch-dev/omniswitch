@@ -22,6 +22,11 @@ func streamOpenAICompatible(ctx context.Context, client *http.Client, url string
 		meta.Error = err.Error()
 		return nil, meta, fmt.Errorf("marshal stream request: %w", err)
 	}
+	return streamOpenAICompatibleBody(ctx, client, url, apiKey, body, req.Model, providerName, extraHeaders, start)
+}
+
+func streamOpenAICompatibleBody(ctx context.Context, client *http.Client, url string, apiKey string, body []byte, model string, providerName string, extraHeaders map[string]string, start time.Time) (<-chan ChatResponseChunk, ProviderMeta, error) {
+	meta := ProviderMeta{Provider: providerName, Model: model, Timestamp: start}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		meta.Error = err.Error()
@@ -83,8 +88,10 @@ func StreamFromResponse(ctx context.Context, resp ChatResponse) <-chan ChatRespo
 		defer close(chunks)
 		content := ""
 		finishReason := "stop"
+		var toolCalls []ToolCall
 		if len(resp.Choices) > 0 {
 			content = resp.Choices[0].Message.Content
+			toolCalls = resp.Choices[0].Message.ToolCalls
 			finishReason = resp.Choices[0].FinishReason
 		}
 		words := strings.Fields(content)
@@ -107,6 +114,21 @@ func StreamFromResponse(ctx context.Context, resp ChatResponse) <-chan ChatRespo
 				Created: time.Now().Unix(),
 				Model:   resp.Model,
 				Choices: []ChunkChoice{{Index: 0, Delta: Message{Content: token}}},
+			}
+		}
+		if len(toolCalls) > 0 {
+			deltas := make([]ToolCall, len(toolCalls))
+			for index, call := range toolCalls {
+				i := index
+				call.Index = &i
+				deltas[index] = call
+			}
+			chunks <- ChatResponseChunk{
+				ID:      resp.ID,
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   resp.Model,
+				Choices: []ChunkChoice{{Index: 0, Delta: Message{ToolCalls: deltas}}},
 			}
 		}
 		chunks <- ChatResponseChunk{
@@ -147,6 +169,7 @@ func streamAnthropic(ctx context.Context, body io.ReadCloser, fallbackModel stri
 			}
 			var event struct {
 				Type    string `json:"type"`
+				Index   int    `json:"index"`
 				Message struct {
 					ID    string `json:"id"`
 					Model string `json:"model"`
@@ -154,10 +177,17 @@ func streamAnthropic(ctx context.Context, body io.ReadCloser, fallbackModel stri
 						InputTokens int `json:"input_tokens"`
 					} `json:"usage"`
 				} `json:"message"`
+				ContentBlock struct {
+					Type  string          `json:"type"`
+					ID    string          `json:"id"`
+					Name  string          `json:"name"`
+					Input json.RawMessage `json:"input"`
+				} `json:"content_block"`
 				Delta struct {
-					Type       string `json:"type"`
-					Text       string `json:"text"`
-					StopReason string `json:"stop_reason"`
+					Type        string `json:"type"`
+					Text        string `json:"text"`
+					PartialJSON string `json:"partial_json"`
+					StopReason  string `json:"stop_reason"`
 				} `json:"delta"`
 				Usage struct {
 					OutputTokens int `json:"output_tokens"`
@@ -175,6 +205,29 @@ func streamAnthropic(ctx context.Context, body io.ReadCloser, fallbackModel stri
 					model = event.Message.Model
 				}
 				usage.PromptTokens = event.Message.Usage.InputTokens
+			case "content_block_start":
+				if event.ContentBlock.Type == "tool_use" {
+					index := event.Index
+					args := string(event.ContentBlock.Input)
+					if args == "{}" {
+						args = ""
+					}
+					chunks <- ChatResponseChunk{
+						ID:      id,
+						Object:  "chat.completion.chunk",
+						Created: time.Now().Unix(),
+						Model:   model,
+						Choices: []ChunkChoice{{Index: 0, Delta: Message{ToolCalls: []ToolCall{{
+							Index: &index,
+							ID:    event.ContentBlock.ID,
+							Type:  "function",
+							Function: FunctionCall{
+								Name:      event.ContentBlock.Name,
+								Arguments: args,
+							},
+						}}}}},
+					}
+				}
 			case "content_block_delta":
 				if event.Delta.Text != "" {
 					chunks <- ChatResponseChunk{
@@ -185,10 +238,26 @@ func streamAnthropic(ctx context.Context, body io.ReadCloser, fallbackModel stri
 						Choices: []ChunkChoice{{Index: 0, Delta: Message{Content: event.Delta.Text}}},
 					}
 				}
+				if event.Delta.Type == "input_json_delta" && event.Delta.PartialJSON != "" {
+					index := event.Index
+					chunks <- ChatResponseChunk{
+						ID:      id,
+						Object:  "chat.completion.chunk",
+						Created: time.Now().Unix(),
+						Model:   model,
+						Choices: []ChunkChoice{{Index: 0, Delta: Message{ToolCalls: []ToolCall{{
+							Index:    &index,
+							Function: FunctionCall{Arguments: event.Delta.PartialJSON},
+						}}}}},
+					}
+				}
 			case "message_delta":
 				usage.CompletionTokens = event.Usage.OutputTokens
 				usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 				finish := mapAnthropicStopReason(event.Delta.StopReason)
+				if event.Delta.StopReason == "tool_use" {
+					finish = "tool_calls"
+				}
 				if finish == "" {
 					finish = "stop"
 				}
@@ -236,10 +305,24 @@ func streamGemini(ctx context.Context, body io.ReadCloser, model string) <-chan 
 			}
 			finishReason := ""
 			text := ""
+			var toolCalls []ToolCall
 			if len(response.Candidates) > 0 {
 				candidate := response.Candidates[0]
-				for _, part := range candidate.Content.Parts {
+				for index, part := range candidate.Content.Parts {
 					text += part.Text
+					if part.FunctionCall != nil {
+						args, _ := json.Marshal(part.FunctionCall.Args)
+						i := index
+						toolCalls = append(toolCalls, ToolCall{
+							Index: &i,
+							ID:    fmt.Sprintf("call_%d", index),
+							Type:  "function",
+							Function: FunctionCall{
+								Name:      part.FunctionCall.Name,
+								Arguments: string(args),
+							},
+						})
+					}
 				}
 				switch candidate.FinishReason {
 				case "MAX_TOKENS":
@@ -248,6 +331,9 @@ func streamGemini(ctx context.Context, body io.ReadCloser, model string) <-chan 
 					finishReason = "stop"
 				default:
 					finishReason = strings.ToLower(candidate.FinishReason)
+				}
+				if len(toolCalls) > 0 {
+					finishReason = "tool_calls"
 				}
 			}
 			usage := Usage{
@@ -260,7 +346,7 @@ func streamGemini(ctx context.Context, body io.ReadCloser, model string) <-chan 
 				Object:  "chat.completion.chunk",
 				Created: time.Now().Unix(),
 				Model:   model,
-				Choices: []ChunkChoice{{Index: 0, Delta: Message{Content: text}, FinishReason: finishReason}},
+				Choices: []ChunkChoice{{Index: 0, Delta: Message{Content: text, ToolCalls: toolCalls}, FinishReason: finishReason}},
 			}
 			if usage.TotalTokens > 0 {
 				chunk.Usage = &usage

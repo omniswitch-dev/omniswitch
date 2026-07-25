@@ -80,6 +80,9 @@ func main() {
 	registerEnvProvider(registry, "anthropic", "ANTHROPIC_API_KEY")
 	registerEnvProvider(registry, "google", "GOOGLE_API_KEY")
 	registerEnvProvider(registry, "groq", "GROQ_API_KEY")
+	registerEnvProvider(registry, "cohere", "COHERE_API_KEY")
+	registerAzureEnvProvider(registry)
+	registerBedrockEnvProvider(registry)
 	for _, account := range settings.providerAccounts {
 		registerProviderAccount(registry, account)
 	}
@@ -115,6 +118,7 @@ func main() {
 	evalHandler := eval.New()
 	vaultHandler := vault.NewHandler(vaultManager)
 	dash := dashboard.New(st)
+	dash.SetConfigPath(settings.configPath)
 
 	// Build mux.
 	mux := http.NewServeMux()
@@ -629,6 +633,15 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 			})
 		}
 	}
+	if cfg.Guardrails.ToolRules != nil {
+		settings.guardrailConfig.ToolRules = make([]guardrail.ToolRule, 0, len(cfg.Guardrails.ToolRules))
+		for _, rule := range cfg.Guardrails.ToolRules {
+			settings.guardrailConfig.ToolRules = append(settings.guardrailConfig.ToolRules, guardrail.ToolRule{
+				Name: rule.Name, Stage: rule.Stage, ToolName: rule.ToolName,
+				ArgumentsPattern: rule.ArgumentsPattern, Action: rule.Action, Message: rule.Message,
+			})
+		}
+	}
 	if cfg.Guardrails.Webhooks != nil {
 		settings.guardrailConfig.Webhooks = make([]guardrail.Webhook, 0, len(cfg.Guardrails.Webhooks))
 		for _, webhook := range cfg.Guardrails.Webhooks {
@@ -643,6 +656,23 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 				configured.FailOpen = *webhook.FailOpen
 			}
 			settings.guardrailConfig.Webhooks = append(settings.guardrailConfig.Webhooks, configured)
+		}
+	}
+	if cfg.Guardrails.LLMJudges != nil {
+		settings.guardrailConfig.LLMJudges = make([]guardrail.LLMJudge, 0, len(cfg.Guardrails.LLMJudges))
+		for _, judge := range cfg.Guardrails.LLMJudges {
+			configured := guardrail.LLMJudge{
+				Name: judge.Name, URL: judge.URL, Model: judge.Model, Stage: judge.Stage, Action: judge.Action,
+				SystemPrompt: judge.SystemPrompt, APIKey: os.Getenv(strings.TrimSpace(judge.APIKeyEnv)),
+				Headers: expandHeaderValues(judge.Headers),
+			}
+			if judge.Timeout != nil {
+				configured.Timeout = judge.Timeout.Duration
+			}
+			if judge.FailOpen != nil {
+				configured.FailOpen = *judge.FailOpen
+			}
+			settings.guardrailConfig.LLMJudges = append(settings.guardrailConfig.LLMJudges, configured)
 		}
 	}
 	if cfg.Guardrails.StreamBuffer != nil {
@@ -803,8 +833,12 @@ func runtimeConfigSummary(settings runtimeSettings, registry *provider.Registry)
 			"actions":        cloneStringMap(settings.guardrailConfig.Actions),
 			"rule_count":     len(settings.guardrailConfig.Rules),
 			"rules":          guardrailRuleSummaries(settings.guardrailConfig.Rules),
+			"tool_rule_count": len(settings.guardrailConfig.ToolRules),
+			"tool_rules":      guardrailToolRuleSummaries(settings.guardrailConfig.ToolRules),
 			"webhook_count":  len(settings.guardrailConfig.Webhooks),
 			"webhooks":       guardrailWebhookSummaries(settings.guardrailConfig.Webhooks),
+			"llm_judge_count": len(settings.guardrailConfig.LLMJudges),
+			"llm_judges":      guardrailLLMJudgeSummaries(settings.guardrailConfig.LLMJudges),
 			"moderation_api": true,
 		},
 		"providers": map[string]any{
@@ -858,6 +892,19 @@ func guardrailRuleSummaries(rules []guardrail.Rule) []map[string]string {
 	return summaries
 }
 
+func guardrailToolRuleSummaries(rules []guardrail.ToolRule) []map[string]string {
+	summaries := make([]map[string]string, 0, len(rules))
+	for _, rule := range rules {
+		summaries = append(summaries, map[string]string{
+			"name":      rule.Name,
+			"stage":     rule.Stage,
+			"tool_name": rule.ToolName,
+			"action":    rule.Action,
+		})
+	}
+	return summaries
+}
+
 func guardrailWebhookSummaries(webhooks []guardrail.Webhook) []map[string]any {
 	summaries := make([]map[string]any, 0, len(webhooks))
 	for _, webhook := range webhooks {
@@ -867,6 +914,21 @@ func guardrailWebhookSummaries(webhooks []guardrail.Webhook) []map[string]any {
 			"action":    webhook.Action,
 			"timeout":   webhook.Timeout.String(),
 			"fail_open": webhook.FailOpen,
+		})
+	}
+	return summaries
+}
+
+func guardrailLLMJudgeSummaries(judges []guardrail.LLMJudge) []map[string]any {
+	summaries := make([]map[string]any, 0, len(judges))
+	for _, judge := range judges {
+		summaries = append(summaries, map[string]any{
+			"name":      judge.Name,
+			"stage":     judge.Stage,
+			"model":     judge.Model,
+			"action":    judge.Action,
+			"timeout":   judge.Timeout.String(),
+			"fail_open": judge.FailOpen,
 		})
 	}
 	return summaries
@@ -1062,6 +1124,15 @@ func parseCSV(value string) []string {
 	return out
 }
 
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 func mergeStringMaps(base, override map[string]string) map[string]string {
 	if len(base) == 0 && len(override) == 0 {
 		return nil
@@ -1107,8 +1178,71 @@ func registerEnvProvider(registry *provider.Registry, providerType string, envKe
 	}
 }
 
+func registerAzureEnvProvider(registry *provider.Registry) {
+	apiKey := os.Getenv("AZURE_OPENAI_API_KEY")
+	endpoint := os.Getenv("AZURE_OPENAI_ENDPOINT")
+	if apiKey == "" || endpoint == "" {
+		return
+	}
+	models := parseCSV(os.Getenv("AZURE_OPENAI_MODELS"))
+	azure := provider.NewAzureOpenAI("azure", endpoint, apiKey, os.Getenv("AZURE_OPENAI_API_VERSION"), models)
+	registry.Register(azure)
+	log.Printf("registered provider: %s", azure.Name())
+}
+
+func registerBedrockEnvProvider(registry *provider.Registry) {
+	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	if accessKey == "" || secretKey == "" {
+		return
+	}
+	region := firstNonEmpty(os.Getenv("AWS_REGION"), os.Getenv("AWS_DEFAULT_REGION"), "us-east-1")
+	bedrock := provider.NewBedrock("bedrock", region, accessKey, secretKey, os.Getenv("AWS_SESSION_TOKEN"), parseCSV(os.Getenv("OMNISWITCH_BEDROCK_MODELS"))).
+		WithGuardrail(os.Getenv("OMNISWITCH_BEDROCK_GUARDRAIL_ID"), os.Getenv("OMNISWITCH_BEDROCK_GUARDRAIL_VERSION"))
+	registry.Register(bedrock)
+	log.Printf("registered provider: %s", bedrock.Name())
+}
+
 func registerProviderAccount(registry *provider.Registry, account gatewayconfig.ProviderAccount) {
 	providerType := strings.ToLower(strings.TrimSpace(account.Type))
+
+	switch providerType {
+	case "azure", "azure-openai":
+		envKey := strings.TrimSpace(account.APIKeyEnv)
+		if envKey == "" {
+			envKey = "AZURE_OPENAI_API_KEY"
+		}
+		apiKey := os.Getenv(envKey)
+		if apiKey == "" {
+			log.Printf("skipping Azure provider account %q: env %s is not set", account.Name, envKey)
+			return
+		}
+		endpoint := firstNonEmpty(account.Endpoint, account.BaseURL, os.Getenv("AZURE_OPENAI_ENDPOINT"))
+		if endpoint == "" {
+			log.Printf("skipping Azure provider account %q: endpoint is required", account.Name)
+			return
+		}
+		azure := provider.NewAzureOpenAI(account.Name, endpoint, apiKey, account.APIVersion, account.Models)
+		registry.Register(azure)
+		log.Printf("registered Azure OpenAI provider: %s (%s)", azure.Name(), endpoint)
+		return
+	case "bedrock", "aws-bedrock":
+		accessEnv := firstNonEmpty(account.AWSAccessKeyEnv, "AWS_ACCESS_KEY_ID")
+		secretEnv := firstNonEmpty(account.AWSSecretKeyEnv, "AWS_SECRET_ACCESS_KEY")
+		sessionEnv := firstNonEmpty(account.AWSSessionTokenEnv, "AWS_SESSION_TOKEN")
+		accessKey := os.Getenv(accessEnv)
+		secretKey := os.Getenv(secretEnv)
+		if accessKey == "" || secretKey == "" {
+			log.Printf("skipping Bedrock provider account %q: env %s/%s must be set", account.Name, accessEnv, secretEnv)
+			return
+		}
+		region := firstNonEmpty(account.Region, os.Getenv("AWS_REGION"), os.Getenv("AWS_DEFAULT_REGION"))
+		bedrock := provider.NewBedrock(account.Name, region, accessKey, secretKey, os.Getenv(sessionEnv), account.Models).
+			WithGuardrail(account.GuardrailID, account.GuardrailVersion)
+		registry.Register(bedrock)
+		log.Printf("registered Bedrock provider: %s (%s)", bedrock.Name(), region)
+		return
+	}
 
 	// Custom or generic OpenAI-compatible provider with explicit base_url.
 	if providerType == "custom" || account.BaseURL != "" {
@@ -1212,6 +1346,8 @@ func newProvider(providerType string, apiKey string) provider.Provider {
 		return provider.NewGoogle(apiKey)
 	case "groq":
 		return provider.NewGroq(apiKey)
+	case "cohere":
+		return provider.NewCohere(apiKey)
 	default:
 		return nil
 	}
@@ -1227,6 +1363,10 @@ func defaultProviderKeyEnv(providerType string) string {
 		return "GOOGLE_API_KEY"
 	case "groq":
 		return "GROQ_API_KEY"
+	case "cohere":
+		return "COHERE_API_KEY"
+	case "azure", "azure-openai":
+		return "AZURE_OPENAI_API_KEY"
 	default:
 		return ""
 	}
