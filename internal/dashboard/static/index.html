@@ -56,6 +56,34 @@ tr:hover{background:var(--surface2)}
 .key-display{background:var(--bg);padding:12px;border-radius:8px;font-family:monospace;font-size:13px;word-break:break-all;margin:12px 0;border:1px solid var(--accent)}
 @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 .card,.panel{animation:fadeIn .3s ease}
+.pg-layout{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pg-output{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;min-height:300px;max-height:500px;overflow-y:auto;font-size:14px;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+.pg-controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+.pg-controls label{font-size:12px;color:var(--text2)}
+.pg-controls input[type=range]{width:100px;accent-color:var(--accent)}
+.pg-controls select,.pg-controls input{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:13px}
+.pg-meta{display:flex;gap:16px;margin-top:12px;font-size:12px;color:var(--text2)}
+.pg-meta span{background:var(--surface2);padding:4px 10px;border-radius:6px}
+.config-editor{width:100%;min-height:300px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:14px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:13px;resize:vertical;tab-size:2}
+.config-list-item{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border)}
+.config-list-item:hover{background:var(--surface2)}
+.toggle{position:relative;width:40px;height:22px;cursor:pointer}
+.toggle input{opacity:0;width:0;height:0}
+.toggle .slider{position:absolute;inset:0;background:var(--border);border-radius:11px;transition:.2s}
+.toggle input:checked+.slider{background:var(--green)}
+.toggle .slider::before{content:'';position:absolute;height:16px;width:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s}
+.toggle input:checked+.slider::before{transform:translateX(18px)}
+.trace-timeline{padding:16px 20px}
+.trace-span{display:flex;align-items:center;gap:12px;padding:8px 0;border-left:2px solid var(--border);margin-left:12px;padding-left:16px}
+.trace-span .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.trace-span .info{flex:1}
+.trace-span .info .name{font-size:13px;font-weight:600}
+.trace-span .info .detail{font-size:12px;color:var(--text2)}
+.trace-span .duration{font-size:13px;font-weight:600;color:var(--accent2)}
+.trace-bar{height:6px;border-radius:3px;margin-top:4px}
+.clickable{cursor:pointer}
+.clickable:hover{text-decoration:underline;color:var(--accent2)}
+@media(max-width:900px){.pg-layout{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -63,7 +91,9 @@ tr:hover{background:var(--surface2)}
   <div class="logo"><span>🛡️</span> OmniSwitch</div>
   <ul class="nav">
     <li class="active" data-section="overview"><span class="icon">📊</span>Overview</li>
+    <li data-section="playground"><span class="icon">🎮</span>Playground</li>
     <li data-section="logs"><span class="icon">📝</span>Request Logs</li>
+    <li data-section="configs"><span class="icon">⚙️</span>Configs</li>
     <li data-section="guardrails"><span class="icon">🔒</span>Guardrails</li>
     <li data-section="prompts"><span class="icon">💬</span>Prompts</li>
     <li data-section="keys"><span class="icon">🔑</span>API Keys</li>
@@ -152,22 +182,72 @@ tr:hover{background:var(--surface2)}
   <div class="panel"><div class="panel-header"><h2>Provider Performance</h2></div><div id="provider-table"></div></div>
 </div>
 
+<!-- PLAYGROUND -->
+<div id="playground" class="section">
+  <div class="header"><h1>Playground</h1></div>
+  <div class="pg-controls">
+    <label>Model</label><input id="pg-model" value="gpt-4o-mini" style="width:200px" placeholder="e.g. gpt-4o-mini">
+    <label>Temp <span id="pg-temp-val">0.7</span></label><input type="range" id="pg-temp" min="0" max="2" step="0.1" value="0.7" oninput="document.getElementById('pg-temp-val').textContent=this.value">
+    <label>Max Tokens</label><input type="number" id="pg-max" value="1024" style="width:80px">
+    <label>Stream</label><input type="checkbox" id="pg-stream" checked>
+  </div>
+  <div class="pg-layout">
+    <div>
+      <div class="form-group"><label>System Prompt</label><textarea id="pg-system" style="min-height:80px" placeholder="You are a helpful assistant."></textarea></div>
+      <div class="form-group"><label>User Message</label><textarea id="pg-user" style="min-height:140px" placeholder="Type your message here..."></textarea></div>
+      <button class="btn btn-primary" onclick="runPlayground()" id="pg-send">▶ Send</button>
+    </div>
+    <div>
+      <label style="font-size:13px;color:var(--text2);margin-bottom:6px;display:block">Response</label>
+      <div class="pg-output" id="pg-response">Send a message to see the response here...</div>
+      <div class="pg-meta" id="pg-meta"></div>
+    </div>
+  </div>
+</div>
+
+<!-- CONFIGS -->
+<div id="configs" class="section">
+  <div class="header"><h1>Gateway Configs</h1></div>
+  <div class="panel">
+    <div class="panel-header"><h2>Create / Edit Config</h2></div>
+    <div style="padding:20px">
+      <div class="form-group"><label>Config Name</label><input id="cfg-name" placeholder="e.g. production-routing"></div>
+      <div class="form-group"><label>Description</label><input id="cfg-desc" placeholder="Optional description"></div>
+      <div class="form-group"><label>Config Body (YAML)</label><textarea class="config-editor" id="cfg-body" placeholder="providers:&#10;  - name: openai&#10;    type: openai&#10;    api_key: ${OPENAI_API_KEY}&#10;    models: [gpt-4o-mini]"></textarea></div>
+      <button class="btn btn-primary" onclick="createConfig()">Save Config</button>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-header"><h2>Saved Configs</h2></div>
+    <div id="configs-list"></div>
+  </div>
+</div>
+
+<!-- TRACE DETAIL (overlay) -->
+<div id="trace-detail" class="section">
+  <div class="header"><h1>Trace Detail</h1><button class="btn" onclick="showSection('logs')" style="background:var(--surface2);color:var(--text)">← Back to Logs</button></div>
+  <div id="trace-content"></div>
+</div>
+
 </main>
 <script>
 const API = '';
 
 // Navigation
+function showSection(name) {
+  document.querySelectorAll('.nav li').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.section').forEach(x => x.classList.remove('active'));
+  const li = document.querySelector(`.nav li[data-section="${name}"]`);
+  if(li) li.classList.add('active');
+  document.getElementById(name).classList.add('active');
+  if(name === 'logs') loadLogs();
+  if(name === 'keys') loadKeys();
+  if(name === 'prompts') loadPrompts();
+  if(name === 'providers') loadProviders();
+  if(name === 'configs') loadConfigs();
+}
 document.querySelectorAll('.nav li').forEach(li => {
-  li.addEventListener('click', () => {
-    document.querySelectorAll('.nav li').forEach(x => x.classList.remove('active'));
-    document.querySelectorAll('.section').forEach(x => x.classList.remove('active'));
-    li.classList.add('active');
-    document.getElementById(li.dataset.section).classList.add('active');
-    if(li.dataset.section === 'logs') loadLogs();
-    if(li.dataset.section === 'keys') loadKeys();
-    if(li.dataset.section === 'prompts') loadPrompts();
-    if(li.dataset.section === 'providers') loadProviders();
-  });
+  li.addEventListener('click', () => showSection(li.dataset.section));
 });
 
 async function fetchJSON(url) {
@@ -202,11 +282,12 @@ async function loadRecentLogs() {
 
 function renderLogsTable(id, logs) {
   if(!logs.length) { document.getElementById(id).innerHTML='<div class="empty">No requests yet. Send a request to /v1/chat/completions to get started.</div>'; return; }
-  let html = '<table><thead><tr><th>Time</th><th>Provider</th><th>Model</th><th>Status</th><th>Latency</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Time</th><th>Provider</th><th>Model</th><th>Status</th><th>Latency</th><th>Tokens</th><th>Cost</th><th>Trace</th></tr></thead><tbody>';
   logs.forEach(l => {
     const time = new Date(l.timestamp).toLocaleString();
     const statusClass = l.status==='success'?'badge-success':l.status==='denied'?'badge-denied':'badge-error';
-    html += `<tr><td>${time}</td><td><span class="provider-badge">${l.provider||'-'}</span></td><td>${l.model||'-'}</td><td><span class="badge-sm ${statusClass}">${l.status}</span></td><td>${(l.latency_ms||0).toFixed(0)}ms</td><td>${l.total_tokens||0}</td><td>$${(l.cost||0).toFixed(5)}</td></tr>`;
+    const traceLink = l.trace_id ? `<span class="clickable" onclick="viewTrace('${l.trace_id}')">${l.trace_id.slice(0,8)}…</span>` : '—';
+    html += `<tr><td>${time}</td><td><span class="provider-badge">${l.provider||'-'}</span></td><td>${l.model||'-'}</td><td><span class="badge-sm ${statusClass}">${l.status}</span></td><td>${(l.latency_ms||0).toFixed(0)}ms</td><td>${l.total_tokens||0}</td><td>$${(l.cost||0).toFixed(5)}</td><td>${traceLink}</td></tr>`;
   });
   html += '</tbody></table>';
   document.getElementById(id).innerHTML = html;
@@ -290,9 +371,106 @@ async function loadProviders() {
   document.getElementById('provider-table').innerHTML = html;
 }
 
+// Playground
+async function runPlayground() {
+  const model = document.getElementById('pg-model').value;
+  const system = document.getElementById('pg-system').value;
+  const user = document.getElementById('pg-user').value;
+  const temp = parseFloat(document.getElementById('pg-temp').value);
+  const maxTokens = parseInt(document.getElementById('pg-max').value);
+  const stream = document.getElementById('pg-stream').checked;
+  if(!user) return alert('Enter a message');
+  const messages = [];
+  if(system) messages.push({role:'system',content:system});
+  messages.push({role:'user',content:user});
+  const body = {model, messages, temperature:temp, max_tokens:maxTokens, stream};
+  const out = document.getElementById('pg-response');
+  const meta = document.getElementById('pg-meta');
+  out.textContent = '';
+  meta.innerHTML = '<span>Sending\u2026</span>';
+  document.getElementById('pg-send').disabled = true;
+  const start = Date.now();
+  try {
+    if(stream) {
+      const resp = await fetch('/v1/chat/completions', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while(true) {
+        const {done, value} = await reader.read();
+        if(done) break;
+        buffer += decoder.decode(value, {stream:true});
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for(const line of lines) {
+          if(!line.startsWith('data: ')) continue;
+          const payload = line.slice(6).trim();
+          if(payload === '[DONE]') continue;
+          try { const chunk = JSON.parse(payload); out.textContent += chunk.choices?.[0]?.delta?.content || ''; } catch(e) {}
+        }
+      }
+    } else {
+      const resp = await postJSON('/v1/chat/completions', body);
+      out.textContent = resp.choices?.[0]?.message?.content || JSON.stringify(resp, null, 2);
+    }
+    meta.innerHTML = `<span>\u23f1 ${Date.now()-start}ms</span><span>\ud83d\udce6 ${model}</span>`;
+  } catch(e) { out.textContent = 'Error: ' + e.message; meta.innerHTML = ''; }
+  document.getElementById('pg-send').disabled = false;
+}
+
+// Configs
+async function loadConfigs() {
+  const data = await fetchJSON('/api/configs?include_disabled=true');
+  const configs = data?.configs || [];
+  const el = document.getElementById('configs-list');
+  if(!configs.length) { el.innerHTML = '<div class="empty">No configs yet. Create one above.</div>'; return; }
+  let html = '';
+  configs.forEach(c => {
+    html += `<div class="config-list-item"><div><strong>${c.name}</strong><br><span style="font-size:12px;color:var(--text2)">${c.description||c.id} \xb7 ${c.format}</span></div><div style="display:flex;gap:12px;align-items:center"><label class="toggle"><input type="checkbox" ${c.enabled?'checked':''} onchange="toggleConfig('${c.id}',this.checked)"><span class="slider"></span></label><button class="btn btn-danger" style="padding:4px 12px;font-size:12px" onclick="deleteConfig('${c.id}')">Delete</button></div></div>`;
+  });
+  el.innerHTML = html;
+}
+async function createConfig() {
+  const name = document.getElementById('cfg-name').value;
+  const desc = document.getElementById('cfg-desc').value;
+  const body = document.getElementById('cfg-body').value;
+  if(!name || !body) return alert('Name and body are required');
+  const resp = await postJSON('/api/configs', {name, description:desc, body, format:'yaml'});
+  if(resp.error) { alert(resp.error); return; }
+  document.getElementById('cfg-name').value=''; document.getElementById('cfg-desc').value=''; document.getElementById('cfg-body').value='';
+  loadConfigs();
+}
+async function deleteConfig(id) { if(!confirm('Delete?')) return; await fetch(`/api/configs?id=${id}`,{method:'DELETE'}); loadConfigs(); }
+async function toggleConfig(id, enabled) { await postJSON('/api/configs', {id, enabled, name:'_', body:'providers: []'}); loadConfigs(); }
+
+// Trace Waterfall
+async function viewTrace(traceId) {
+  const data = await fetchJSON(`/api/traces/${traceId}`);
+  if(!data) { alert('Trace not found'); return; }
+  showSection('trace-detail');
+  const el = document.getElementById('trace-content');
+  const spans = data.spans || data.logs || [];
+  let cards = `<div class="cards"><div class="card"><div class="label">Trace ID</div><div class="value" style="font-size:14px;word-break:break-all">${traceId}</div></div><div class="card green"><div class="label">Spans</div><div class="value">${Math.max(spans.length,1)}</div></div></div>`;
+  let timeline = '<div class="panel"><div class="panel-header"><h2>Timeline</h2></div><div class="trace-timeline">';
+  if(!spans.length) {
+    const c = data.status==='success'?'var(--green)':'var(--red)';
+    timeline += `<div class="trace-span"><div class="dot" style="background:${c}"></div><div class="info"><div class="name">${data.provider||'gateway'} \u2192 ${data.model||'?'}</div><div class="detail">Status: ${data.status||'?'} \xb7 Tokens: ${data.total_tokens||0} \xb7 $${(data.cost||0).toFixed(5)}</div><div class="trace-bar" style="width:100%;background:${c}"></div></div><div class="duration">${(data.latency_ms||0).toFixed(0)}ms</div></div>`;
+  } else {
+    const mx = Math.max(...spans.map(s=>s.latency_ms||0),1);
+    spans.forEach(s => {
+      const c = s.status==='success'?'var(--green)':s.status==='denied'?'var(--yellow)':'var(--red)';
+      const w = Math.max(((s.latency_ms||0)/mx)*100,5);
+      timeline += `<div class="trace-span"><div class="dot" style="background:${c}"></div><div class="info"><div class="name">${s.provider||s.type||'span'} \u2192 ${s.model||''}</div><div class="detail">${s.status||'ok'} \xb7 ${s.total_tokens||0} tokens</div><div class="trace-bar" style="width:${w}%;background:${c}"></div></div><div class="duration">${(s.latency_ms||0).toFixed(0)}ms</div></div>`;
+    });
+  }
+  timeline += '</div></div>';
+  el.innerHTML = cards + timeline;
+}
+
 // Init
 loadMetrics();
 setInterval(loadMetrics, 15000);
 </script>
 </body>
 </html>
+
