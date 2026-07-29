@@ -51,7 +51,13 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Serve embedded static files at root.
 	staticFS, _ := fs.Sub(staticFiles, "static")
 	fileServer := http.FileServer(http.FS(staticFS))
-	mux.Handle("/", fileServer)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if isDashboardRoute(r.URL.Path) {
+			serveDashboardIndex(w, r)
+			return
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 // RegisterPrometheus registers a lightweight Prometheus text endpoint. It is
@@ -236,6 +242,27 @@ func (h *Handler) configs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusCreated, record)
+	case http.MethodPatch:
+		ref := strings.TrimSpace(r.URL.Query().Get("id"))
+		if ref == "" {
+			ref = strings.TrimSpace(r.URL.Query().Get("name"))
+		}
+		var req struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if ref == "" || req.Enabled == nil {
+			writeError(w, http.StatusBadRequest, "id or name and enabled are required")
+			return
+		}
+		if err := h.store.SetGatewayConfigEnabled(r.Context(), ref, *req.Enabled); err != nil {
+			writeError(w, http.StatusNotFound, "config not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": *req.Enabled})
 	case http.MethodDelete:
 		ref := strings.TrimSpace(r.URL.Query().Get("id"))
 		if ref == "" {
@@ -293,6 +320,32 @@ func (h *Handler) rawConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"saved": true, "path": h.configPath})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func isDashboardRoute(path string) bool {
+	switch path {
+	case "/", "/overview", "/playground", "/logs", "/configs", "/guardrails", "/prompts", "/keys", "/providers":
+		return true
+	default:
+		return strings.HasPrefix(path, "/traces/")
+	}
+}
+
+func serveDashboardIndex(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := staticFiles.ReadFile("static/index.html")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(body)
 	}
 }
 

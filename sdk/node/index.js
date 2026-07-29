@@ -1,161 +1,187 @@
+"use strict";
+
 /**
- * Sentinel AI Gateway - Node.js/TypeScript SDK
+ * OmniSwitch Node.js SDK.
  *
- * Drop-in replacement for the OpenAI Node.js client that routes all
- * requests through your self-hosted Sentinel AI Gateway.
- *
- * Installation:
- *   npm install sentinel-ai   (or copy this file into your project)
- *
- * Requires: openai >= 4.0
- *   npm install openai
- *
- * Usage:
- *   import { Sentinel } from 'sentinel-ai';
- *   const client = new Sentinel({ gatewayUrl: 'http://localhost:8080' });
- *   const response = await client.chat.completions.create({
- *     model: 'gpt-4o-mini',
- *     messages: [{ role: 'user', content: 'Hello!' }],
- *   });
- *   console.log(response.choices[0].message.content);
+ * A small wrapper around the official OpenAI Node.js client that routes
+ * requests through a self-hosted OmniSwitch gateway and injects OmniSwitch
+ * routing, config, tracing, and session headers.
  */
 
 const OpenAI = require("openai").default || require("openai");
 
 const DEFAULT_GATEWAY_URL = "http://localhost:8080/v1";
 
-/**
- * @typedef {Object} SentinelOptions
- * @property {string} [gatewayUrl] - Base URL of the Sentinel gateway.
- * @property {string} [apiKey] - Sentinel API key (or provider key for unauthenticated gateways).
- * @property {string} [provider] - Force a specific provider (x-sentinel-provider header).
- * @property {string} [traceId] - Trace ID for agent observability.
- * @property {string} [sessionId] - Session ID for conversation grouping.
- * @property {string} [shadowProvider] - Provider for async shadow comparison.
- */
+function normalizeGatewayUrl(gatewayUrl) {
+  const value = String(gatewayUrl || DEFAULT_GATEWAY_URL).trim() || DEFAULT_GATEWAY_URL;
+  const trimmed = value.replace(/\/+$/, "");
+  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
 
-class Sentinel extends OpenAI {
+function firstValue(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim() !== "") {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function buildHeaders(defaultHeaders = {}, options = {}) {
+  const headers = { ...defaultHeaders };
+  if (options.config) headers["x-omniswitch-config"] = options.config;
+  if (options.provider) headers["x-omniswitch-provider"] = options.provider;
+  if (options.traceId) headers["x-omniswitch-trace-id"] = options.traceId;
+  if (options.sessionId) headers["x-omniswitch-session-id"] = options.sessionId;
+  if (options.shadowProvider) {
+    headers["x-omniswitch-shadow-provider"] = options.shadowProvider;
+  }
+  return headers;
+}
+
+class OmniSwitch extends OpenAI {
   /**
-   * Create a Sentinel AI Gateway client.
-   *
-   * @param {SentinelOptions & import('openai').ClientOptions} [options={}]
-   *
-   * @example
-   * // Basic usage
-   * const client = new Sentinel();
-   * const resp = await client.chat.completions.create({
-   *   model: 'gpt-4o-mini',
-   *   messages: [{ role: 'user', content: 'Hello!' }],
-   * });
-   *
-   * @example
-   * // Force Anthropic provider
-   * const client = new Sentinel({ provider: 'anthropic' });
-   *
-   * @example
-   * // With observability
-   * const client = new Sentinel({
-   *   traceId: 'agent-run-001',
-   *   sessionId: 'conv-abc',
-   * });
-   *
-   * @example
-   * // Streaming
-   * const stream = await client.chat.completions.create({
-   *   model: 'gpt-4o-mini',
-   *   messages: [{ role: 'user', content: 'Tell me a story' }],
-   *   stream: true,
-   * });
-   * for await (const chunk of stream) {
-   *   process.stdout.write(chunk.choices[0]?.delta?.content || '');
-   * }
+   * @param {OmniSwitchOptions & import("openai").ClientOptions} [options]
    */
   constructor(options = {}) {
     const {
       gatewayUrl,
+      config,
       provider,
       traceId,
       sessionId,
       shadowProvider,
+      defaultHeaders,
       ...openaiOptions
     } = options;
 
-    let baseURL =
-      gatewayUrl ||
-      process.env.SENTINEL_GATEWAY_URL ||
-      DEFAULT_GATEWAY_URL;
-    if (!baseURL.endsWith("/v1")) {
-      baseURL = baseURL.replace(/\/+$/, "") + "/v1";
-    }
-
-    const apiKey =
-      openaiOptions.apiKey ||
-      process.env.SENTINEL_API_KEY ||
-      "sentinel-no-auth";
-
-    // Build Sentinel-specific headers.
-    const defaultHeaders = { ...(openaiOptions.defaultHeaders || {}) };
-    if (provider) defaultHeaders["x-sentinel-provider"] = provider;
-    if (traceId) defaultHeaders["x-sentinel-trace-id"] = traceId;
-    if (sessionId) defaultHeaders["x-sentinel-session-id"] = sessionId;
-    if (shadowProvider)
-      defaultHeaders["x-sentinel-shadow-provider"] = shadowProvider;
+    const baseURL = normalizeGatewayUrl(
+      firstValue(
+        gatewayUrl,
+        process.env.OMNISWITCH_GATEWAY_URL,
+        process.env.SENTINEL_GATEWAY_URL,
+        DEFAULT_GATEWAY_URL,
+      ),
+    );
+    const apiKey = firstValue(
+      openaiOptions.apiKey,
+      process.env.OMNISWITCH_API_KEY,
+      process.env.SENTINEL_API_KEY,
+      "omniswitch-no-auth",
+    );
+    const headers = buildHeaders(defaultHeaders, {
+      config: firstValue(config, process.env.OMNISWITCH_CONFIG),
+      provider: firstValue(provider, process.env.OMNISWITCH_PROVIDER),
+      traceId: firstValue(traceId, process.env.OMNISWITCH_TRACE_ID),
+      sessionId: firstValue(sessionId, process.env.OMNISWITCH_SESSION_ID),
+      shadowProvider: firstValue(
+        shadowProvider,
+        process.env.OMNISWITCH_SHADOW_PROVIDER,
+      ),
+    });
 
     super({
       ...openaiOptions,
       apiKey,
       baseURL,
-      defaultHeaders:
-        Object.keys(defaultHeaders).length > 0 ? defaultHeaders : undefined,
+      defaultHeaders: Object.keys(headers).length > 0 ? headers : undefined,
+    });
+
+    this._omniswitch = {
+      gatewayUrl: baseURL,
+      apiKey,
+      headers,
+      clientOptions: { ...openaiOptions },
+    };
+  }
+
+  /**
+   * Return a new client that sends x-omniswitch-config.
+   * @param {string} config
+   * @returns {OmniSwitch}
+   */
+  withConfig(config) {
+    return this._clone({
+      ...this._omniswitch.headers,
+      "x-omniswitch-config": config,
     });
   }
 
   /**
-   * Return a new client with trace/session headers for per-request observability.
+   * Return a new client with trace and optional session headers.
    * @param {string} traceId
    * @param {string} [sessionId]
-   * @returns {Sentinel}
+   * @returns {OmniSwitch}
    */
   withTrace(traceId, sessionId) {
-    const headers = { ...(this._options?.defaultHeaders || {}) };
-    headers["x-sentinel-trace-id"] = traceId;
-    if (sessionId) headers["x-sentinel-session-id"] = sessionId;
-    return new Sentinel({
-      gatewayUrl: this.baseURL?.replace(/\/v1$/, ""),
-      apiKey: this.apiKey,
+    const headers = {
+      ...this._omniswitch.headers,
+      "x-omniswitch-trace-id": traceId,
+    };
+    if (sessionId !== undefined) {
+      headers["x-omniswitch-session-id"] = sessionId;
+    }
+    return this._clone(headers);
+  }
+
+  /**
+   * Return a new client that forces a specific provider or alias.
+   * @param {string} provider
+   * @returns {OmniSwitch}
+   */
+  withProvider(provider) {
+    return this._clone({
+      ...this._omniswitch.headers,
+      "x-omniswitch-provider": provider,
+    });
+  }
+
+  _clone(headers) {
+    return new OmniSwitch({
+      ...this._omniswitch.clientOptions,
+      gatewayUrl: this._omniswitch.gatewayUrl,
+      apiKey: this._omniswitch.apiKey,
       defaultHeaders: headers,
     });
   }
 }
 
+// Backwards-compatible alias for early SDK examples.
+const Sentinel = OmniSwitch;
+
 /**
- * One-shot convenience function for quick chat completions.
+ * One-shot convenience function for chat completions.
  *
  * @param {string} model
- * @param {Array<{role: string, content: string}>} messages
- * @param {SentinelOptions} [options={}]
- * @returns {Promise<import('openai').ChatCompletion>}
- *
- * @example
- * const { chat } = require('sentinel-ai');
- * const resp = await chat('gpt-4o-mini', [{ role: 'user', content: 'Hi!' }]);
- * console.log(resp.choices[0].message.content);
+ * @param {Array<{role: string, content: unknown, [key: string]: unknown}>} messages
+ * @param {OmniSwitchOptions} [options]
+ * @param {Record<string, unknown>} [requestOptions]
+ * @returns {Promise<import("openai").ChatCompletion>}
  */
-async function chat(model, messages, options = {}) {
-  const client = new Sentinel(options);
-  return client.chat.completions.create({ model, messages });
+async function chat(model, messages, options = {}, requestOptions = {}) {
+  const client = new OmniSwitch(options);
+  return client.chat.completions.create({ model, messages, ...requestOptions });
 }
 
 /**
  * List all models available on the gateway.
- * @param {string} [gatewayUrl]
+ * @param {string | OmniSwitchOptions} [options]
  * @returns {Promise<Array<{id: string, owned_by: string}>>}
  */
-async function listModels(gatewayUrl) {
-  const client = new Sentinel({ gatewayUrl });
+async function listModels(options) {
+  const clientOptions =
+    typeof options === "string" ? { gatewayUrl: options } : options || {};
+  const client = new OmniSwitch(clientOptions);
   const models = await client.models.list();
-  return models.data.map((m) => ({ id: m.id, owned_by: m.owned_by }));
+  return models.data.map((model) => ({ id: model.id, owned_by: model.owned_by }));
 }
 
-module.exports = { Sentinel, chat, listModels };
-module.exports.default = Sentinel;
+module.exports = {
+  OmniSwitch,
+  Sentinel,
+  chat,
+  listModels,
+  normalizeGatewayUrl,
+  buildHeaders,
+};
+module.exports.default = OmniSwitch;

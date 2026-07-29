@@ -23,6 +23,7 @@ Headers:
 
 - `Authorization: Bearer <omniswitch-api-key>` when `OMNISWITCH_AUTH=true`
 - `x-omniswitch-provider`: force a provider or provider alias
+- `x-omniswitch-config`: use a dynamic gateway config by name or ID
 - `x-omniswitch-shadow-provider`: run a secondary provider asynchronously
 - `x-omniswitch-trace-id`: group calls into a trace
 - `x-omniswitch-session-id`: group calls into an agent session

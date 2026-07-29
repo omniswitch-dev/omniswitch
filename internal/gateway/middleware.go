@@ -211,6 +211,11 @@ func requiredRole(method, path string) string {
 			return "member"
 		}
 		return "viewer"
+	case "/api/configs", "/api/config/raw":
+		if method != http.MethodGet {
+			return "admin"
+		}
+		return "viewer"
 	default:
 		return "viewer"
 	}

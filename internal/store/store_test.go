@@ -263,6 +263,61 @@ func TestStoreSemanticCacheBudgetAndShadowLogs(t *testing.T) {
 	}
 }
 
+func TestStoreGatewayConfigs(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	body := `apiVersion: omniswitch.dev/v1
+kind: GatewayConfig
+routes:
+  gpt-4o-mini:
+    provider: openai
+`
+	record := GatewayConfigRecord{
+		ID:        "cfg_1",
+		Name:      "production-routing",
+		Format:    "yaml",
+		Body:      body,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		Enabled:   true,
+	}
+	if err := st.UpsertGatewayConfig(ctx, record); err != nil {
+		t.Fatalf("UpsertGatewayConfig() error = %v", err)
+	}
+	record.Name = "renamed-routing"
+	record.Description = "updated"
+	if err := st.UpsertGatewayConfig(ctx, record); err != nil {
+		t.Fatalf("UpsertGatewayConfig(rename) error = %v", err)
+	}
+	if err := st.SetGatewayConfigEnabled(ctx, record.ID, false); err != nil {
+		t.Fatalf("SetGatewayConfigEnabled(false) error = %v", err)
+	}
+
+	records, err := st.ListGatewayConfigs(ctx, true)
+	if err != nil {
+		t.Fatalf("ListGatewayConfigs() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records len = %d, want 1", len(records))
+	}
+	if records[0].Name != "renamed-routing" || records[0].Description != "updated" || records[0].Body != body || records[0].Enabled {
+		t.Fatalf("record = %+v, want renamed disabled record with unchanged body", records[0])
+	}
+	if _, err := st.GetGatewayConfig(ctx, record.ID); err == nil {
+		t.Fatalf("GetGatewayConfig(disabled) error = nil, want not found")
+	}
+	if err := st.SetGatewayConfigEnabled(ctx, record.Name, true); err != nil {
+		t.Fatalf("SetGatewayConfigEnabled(true) error = %v", err)
+	}
+	enabled, err := st.GetGatewayConfig(ctx, record.ID)
+	if err != nil {
+		t.Fatalf("GetGatewayConfig(enabled) error = %v", err)
+	}
+	if !enabled.Enabled || enabled.Body != body {
+		t.Fatalf("enabled record = %+v, want enabled record with unchanged body", enabled)
+	}
+}
+
 func TestStoreOrganizationsWorkspacesAndMembers(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()

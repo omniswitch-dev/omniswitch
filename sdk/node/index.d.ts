@@ -1,34 +1,53 @@
 import OpenAI from "openai";
 
-export interface SentinelOptions extends OpenAI.ClientOptions {
-  /** Base URL of the Sentinel gateway, with or without a trailing /v1. */
+export interface OmniSwitchOptions extends OpenAI.ClientOptions {
+  /** Gateway URL with or without a trailing /v1. */
   gatewayUrl?: string;
-  /** Force routing to a named Sentinel provider. */
+  /** Dynamic config name or ID sent as x-omniswitch-config. */
+  config?: string;
+  /** Force routing to a named provider or alias. */
   provider?: string;
-  /** Trace ID used to group requests in Sentinel observability. */
+  /** Trace ID used to group requests in OmniSwitch observability. */
   traceId?: string;
-  /** Session ID used to group requests in Sentinel observability. */
+  /** Session ID used to group requests in OmniSwitch observability. */
   sessionId?: string;
-  /** Provider used for an asynchronous shadow comparison. */
+  /** Provider used for asynchronous shadow comparison. */
   shadowProvider?: string;
 }
 
-export interface SentinelModel {
+export interface OmniSwitchModel {
   id: string;
   owned_by: string;
 }
 
-export class Sentinel extends OpenAI {
-  constructor(options?: SentinelOptions);
-  withTrace(traceId: string, sessionId?: string): Sentinel;
+export class OmniSwitch extends OpenAI {
+  constructor(options?: OmniSwitchOptions);
+  withConfig(config: string): OmniSwitch;
+  withTrace(traceId: string, sessionId?: string): OmniSwitch;
+  withProvider(provider: string): OmniSwitch;
 }
+
+export class Sentinel extends OmniSwitch {}
 
 export function chat(
   model: string,
   messages: Array<{ role: string; content: unknown; [key: string]: unknown }>,
-  options?: SentinelOptions,
+  options?: OmniSwitchOptions,
+  requestOptions?: Record<string, unknown>,
 ): Promise<unknown>;
 
-export function listModels(gatewayUrl?: string): Promise<SentinelModel[]>;
+export function listModels(
+  options?: string | OmniSwitchOptions,
+): Promise<OmniSwitchModel[]>;
 
-export default Sentinel;
+export function normalizeGatewayUrl(gatewayUrl?: string): string;
+
+export function buildHeaders(
+  defaultHeaders?: Record<string, string>,
+  options?: Pick<
+    OmniSwitchOptions,
+    "config" | "provider" | "traceId" | "sessionId" | "shadowProvider"
+  >,
+): Record<string, string>;
+
+export default OmniSwitch;

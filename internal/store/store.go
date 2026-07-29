@@ -534,6 +534,26 @@ func (s *Store) UpsertGatewayConfig(ctx context.Context, record GatewayConfigRec
 	if strings.TrimSpace(record.Format) == "" {
 		record.Format = "yaml"
 	}
+	if strings.TrimSpace(record.ID) != "" {
+		result, err := s.db.ExecContext(ctx,
+			`UPDATE gateway_configs
+			SET name = ?, description = ?, format = ?, body = ?, updated_at = ?, enabled = ?
+			WHERE id = ?`,
+			record.Name,
+			record.Description,
+			record.Format,
+			record.Body,
+			record.UpdatedAt.Format(time.RFC3339Nano),
+			boolToInt(record.Enabled),
+			record.ID,
+		)
+		if err != nil {
+			return err
+		}
+		if affected, err := result.RowsAffected(); err == nil && affected > 0 {
+			return nil
+		}
+	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO gateway_configs (id, name, description, format, body, created_at, updated_at, enabled)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -553,6 +573,23 @@ func (s *Store) UpsertGatewayConfig(ctx context.Context, record GatewayConfigRec
 		boolToInt(record.Enabled),
 	)
 	return err
+}
+
+func (s *Store) SetGatewayConfigEnabled(ctx context.Context, ref string, enabled bool) error {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE gateway_configs SET enabled = ?, updated_at = ? WHERE id = ? OR name = ?`,
+		boolToInt(enabled),
+		time.Now().UTC().Format(time.RFC3339Nano),
+		ref,
+		ref,
+	)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *Store) GetGatewayConfig(ctx context.Context, ref string) (GatewayConfigRecord, error) {

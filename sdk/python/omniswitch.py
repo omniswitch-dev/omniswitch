@@ -1,41 +1,22 @@
-# OmniSwitch Python SDK
-#
-# A thin wrapper around the official OpenAI Python package that routes
-# all requests through your self-hosted OmniSwitch AI Gateway.
-#
-# Installation:
-#   pip install sentinel-ai  (or copy this file into your project)
-#
-# Requires: openai>=1.0
-#   pip install openai
-#
-# Usage:
-#   from sentinel import OmniSwitch
-#   client = OmniSwitch(gateway_url="http://localhost:8080")
-#   response = client.chat.completions.create(
-#       model="gpt-4o-mini",
-#       messages=[{"role": "user", "content": "Hello!"}],
-#   )
-#   print(response.choices[0].message.content)
-
 """
-OmniSwitch AI Gateway - Python SDK
+OmniSwitch Python SDK.
 
-Drop-in replacement for the OpenAI Python client that routes all requests
-through your self-hosted OmniSwitch gateway with full observability.
+A small wrapper around the official OpenAI Python client that routes requests
+through a self-hosted OmniSwitch gateway and injects OmniSwitch routing,
+configuration, tracing, and session headers.
 """
 
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 try:
     from openai import OpenAI
-except ImportError:
+except ImportError as exc:  # pragma: no cover - exercised by packaging users.
     raise ImportError(
         "The 'openai' package is required. Install it with: pip install openai>=1.0"
-    )
+    ) from exc
 
 __version__ = "0.1.0"
 
@@ -44,134 +25,153 @@ DEFAULT_GATEWAY_URL = "http://localhost:8080/v1"
 
 class OmniSwitch(OpenAI):
     """
-    OmniSwitch AI Gateway client.
-
-    A thin wrapper over the official OpenAI client that points all traffic
-    at your self-hosted OmniSwitch gateway. Supports every feature the gateway
-    exposes: multi-provider routing, streaming, caching, guardrails, budgets,
-    and agent observability.
+    OpenAI-compatible client for OmniSwitch.
 
     Args:
-        gateway_url: Base URL of the OmniSwitch gateway (default: http://localhost:8080/v1).
-                     Can also be set via OMNISWITCH_GATEWAY_URL env var.
-        api_key: OmniSwitch API key for authenticated gateways.
-                 Can also be set via OMNISWITCH_API_KEY env var.
-                 If your gateway has auth disabled, pass any non-empty string.
-        provider: Force requests to a specific provider (e.g. "anthropic").
-                  Maps to the x-omniswitch-provider header.
-        trace_id: Trace ID for grouping requests across an agent run.
-        session_id: Session ID for grouping a conversation.
-        shadow_provider: Provider to call asynchronously for shadow comparison.
-        **kwargs: Any additional kwargs passed to openai.OpenAI().
-
-    Examples:
-        # Basic usage - auto-routes by model name
-        client = OmniSwitch()
-        resp = client.chat.completions.create(
-            model="claude-sonnet-4-20250514",
-            messages=[{"role": "user", "content": "Hello!"}],
-        )
-
-        # Force a specific provider
-        client = OmniSwitch(provider="anthropic")
-
-        # With observability headers
-        client = OmniSwitch(trace_id="agent-run-001", session_id="conv-abc")
-
-        # Streaming
-        stream = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": "Tell me a story"}],
-            stream=True,
-        )
-        for chunk in stream:
-            print(chunk.choices[0].delta.content or "", end="")
-
-        # With custom Ollama provider
-        client = OmniSwitch(provider="ollama")
-        resp = client.chat.completions.create(
-            model="llama3.2",
-            messages=[{"role": "user", "content": "Hello!"}],
-        )
+        gateway_url: Gateway URL with or without a trailing /v1. Defaults to
+            OMNISWITCH_GATEWAY_URL or http://localhost:8080/v1.
+        api_key: OmniSwitch API key. Defaults to OMNISWITCH_API_KEY. Use any
+            non-empty value when the gateway has authentication disabled.
+        config: Dynamic config name or ID sent as x-omniswitch-config.
+        provider: Provider or provider alias sent as x-omniswitch-provider.
+        trace_id: Trace ID sent as x-omniswitch-trace-id.
+        session_id: Session ID sent as x-omniswitch-session-id.
+        shadow_provider: Shadow provider sent as x-omniswitch-shadow-provider.
+        default_headers: Additional default headers for every request.
+        **kwargs: Additional options passed to openai.OpenAI.
     """
 
     def __init__(
         self,
         gateway_url: Optional[str] = None,
         api_key: Optional[str] = None,
+        config: Optional[str] = None,
         provider: Optional[str] = None,
         trace_id: Optional[str] = None,
         session_id: Optional[str] = None,
         shadow_provider: Optional[str] = None,
+        default_headers: Optional[Mapping[str, str]] = None,
         **kwargs: Any,
     ) -> None:
-        base_url = gateway_url or os.environ.get("OMNISWITCH_GATEWAY_URL", DEFAULT_GATEWAY_URL)
-        if not base_url.endswith("/v1"):
-            base_url = base_url.rstrip("/") + "/v1"
+        base_url = normalize_gateway_url(
+            gateway_url or os.environ.get("OMNISWITCH_GATEWAY_URL", DEFAULT_GATEWAY_URL)
+        )
+        key = api_key or os.environ.get("OMNISWITCH_API_KEY", "omniswitch-no-auth")
+        headers = build_headers(
+            default_headers,
+            config=config or os.environ.get("OMNISWITCH_CONFIG"),
+            provider=provider or os.environ.get("OMNISWITCH_PROVIDER"),
+            trace_id=trace_id or os.environ.get("OMNISWITCH_TRACE_ID"),
+            session_id=session_id or os.environ.get("OMNISWITCH_SESSION_ID"),
+            shadow_provider=shadow_provider or os.environ.get("OMNISWITCH_SHADOW_PROVIDER"),
+        )
 
-        key = api_key or os.environ.get("OMNISWITCH_API_KEY", "sentinel-no-auth")
-
-        # Build default headers for OmniSwitch-specific features.
-        default_headers = kwargs.pop("default_headers", {}) or {}
-        if provider:
-            default_headers["x-omniswitch-provider"] = provider
-        if trace_id:
-            default_headers["x-omniswitch-trace-id"] = trace_id
-        if session_id:
-            default_headers["x-omniswitch-session-id"] = session_id
-        if shadow_provider:
-            default_headers["x-omniswitch-shadow-provider"] = shadow_provider
+        self._omniswitch_gateway_url = base_url
+        self._omniswitch_api_key = key
+        self._omniswitch_headers = dict(headers)
+        self._omniswitch_client_kwargs = dict(kwargs)
 
         super().__init__(
             api_key=key,
             base_url=base_url,
-            default_headers=default_headers if default_headers else None,
+            default_headers=headers or None,
             **kwargs,
         )
 
+    def with_config(self, config: str) -> "OmniSwitch":
+        """Return a new client that sends x-omniswitch-config."""
+        headers = dict(self._omniswitch_headers)
+        headers["x-omniswitch-config"] = config
+        return self._clone(headers)
+
     def with_trace(self, trace_id: str, session_id: Optional[str] = None) -> "OmniSwitch":
-        """
-        Return a new client instance with the given trace/session IDs.
-        Useful for per-request observability without creating a new client.
-        """
-        headers = dict(self._custom_headers or {})
+        """Return a new client with trace and optional session headers."""
+        headers = dict(self._omniswitch_headers)
         headers["x-omniswitch-trace-id"] = trace_id
-        if session_id:
+        if session_id is not None:
             headers["x-omniswitch-session-id"] = session_id
-        gateway_url = str(self.base_url)
-        if gateway_url.endswith("/v1"):
-            gateway_url = gateway_url[:-3]
+        return self._clone(headers)
+
+    def with_provider(self, provider: str) -> "OmniSwitch":
+        """Return a new client that forces a specific provider or alias."""
+        headers = dict(self._omniswitch_headers)
+        headers["x-omniswitch-provider"] = provider
+        return self._clone(headers)
+
+    def _clone(self, headers: Mapping[str, str]) -> "OmniSwitch":
         return OmniSwitch(
-            gateway_url=gateway_url,
-            api_key=self.api_key,
+            gateway_url=self._omniswitch_gateway_url,
+            api_key=self._omniswitch_api_key,
             default_headers=headers,
+            **self._omniswitch_client_kwargs,
         )
 
 
-def list_models(gateway_url: Optional[str] = None) -> list[dict]:
-    """Convenience function to list all models available on the gateway."""
-    client = OmniSwitch(gateway_url=gateway_url)
+# Backwards-compatible alias for early SDK examples.
+Sentinel = OmniSwitch
+
+
+def normalize_gateway_url(gateway_url: str) -> str:
+    """Normalize a gateway URL to the OpenAI-compatible /v1 base URL."""
+    value = gateway_url.strip() or DEFAULT_GATEWAY_URL
+    if not value.rstrip("/").endswith("/v1"):
+        value = value.rstrip("/") + "/v1"
+    return value.rstrip("/")
+
+
+def build_headers(
+    default_headers: Optional[Mapping[str, str]] = None,
+    *,
+    config: Optional[str] = None,
+    provider: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    shadow_provider: Optional[str] = None,
+) -> dict[str, str]:
+    """Build OmniSwitch headers while preserving caller-provided headers."""
+    headers = dict(default_headers or {})
+    if config:
+        headers["x-omniswitch-config"] = config
+    if provider:
+        headers["x-omniswitch-provider"] = provider
+    if trace_id:
+        headers["x-omniswitch-trace-id"] = trace_id
+    if session_id:
+        headers["x-omniswitch-session-id"] = session_id
+    if shadow_provider:
+        headers["x-omniswitch-shadow-provider"] = shadow_provider
+    return headers
+
+
+def list_models(gateway_url: Optional[str] = None, api_key: Optional[str] = None) -> list[dict[str, str]]:
+    """List models exposed by the OmniSwitch gateway."""
+    client = OmniSwitch(gateway_url=gateway_url, api_key=api_key)
     models = client.models.list()
-    return [{"id": m.id, "owned_by": m.owned_by} for m in models.data]
+    return [{"id": model.id, "owned_by": model.owned_by} for model in models.data]
 
 
 def chat(
     model: str,
-    messages: list[dict],
+    messages: list[dict[str, Any]],
+    *,
     gateway_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    config: Optional[str] = None,
     provider: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     stream: bool = False,
     **kwargs: Any,
-):
-    """
-    One-shot convenience function for quick chat completions.
-
-    Examples:
-        from sentinel import chat
-        response = chat("gpt-4o-mini", [{"role": "user", "content": "Hi!"}])
-        print(response.choices[0].message.content)
-    """
-    client = OmniSwitch(gateway_url=gateway_url, provider=provider)
+) -> Any:
+    """One-shot convenience wrapper around chat.completions.create."""
+    client = OmniSwitch(
+        gateway_url=gateway_url,
+        api_key=api_key,
+        config=config,
+        provider=provider,
+        trace_id=trace_id,
+        session_id=session_id,
+    )
     return client.chat.completions.create(
         model=model,
         messages=messages,

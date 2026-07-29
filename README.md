@@ -144,7 +144,31 @@ Portkey and AgentGateway comparison.
 OmniSwitch works with normal OpenAI-compatible clients by setting the base URL
 to your gateway and using an OmniSwitch API key when authentication is enabled.
 The lightweight SDK wrappers in `sdk/` add convenience headers for traces,
-sessions, provider overrides, and virtual key routing.
+sessions, provider overrides, dynamic configs, and virtual key routing.
+
+Python:
+
+```python
+from omniswitch import OmniSwitch
+
+client = OmniSwitch(
+    gateway_url="http://localhost:8080",
+    api_key="sk-omniswitch-...",
+    config="production-routing",
+)
+```
+
+Node.js:
+
+```js
+const { OmniSwitch } = require("omniswitch");
+
+const client = new OmniSwitch({
+  gatewayUrl: "http://localhost:8080",
+  apiKey: "sk-omniswitch-...",
+  config: "production-routing",
+});
+```
 
 ## Repository Map
 

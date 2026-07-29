@@ -3,474 +3,1137 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OmniSwitch — AI Gateway Dashboard</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<title>OmniSwitch - AI Gateway Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a2e;--border:#2a2a3e;--text:#e4e4f0;--text2:#8888a8;--accent:#6c5ce7;--accent2:#a29bfe;--green:#00e676;--red:#ff5252;--yellow:#ffd740;--blue:#448aff}
-body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex}
-.sidebar{width:240px;background:var(--surface);border-right:1px solid var(--border);padding:20px 0;display:flex;flex-direction:column;position:fixed;height:100vh;z-index:10}
-.logo{padding:0 20px 24px;font-size:20px;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;display:flex;align-items:center;gap:10px}
-.logo span{font-size:24px}
-.nav{list-style:none;flex:1}
-.nav li{padding:10px 20px;cursor:pointer;color:var(--text2);font-size:14px;font-weight:500;border-left:3px solid transparent;transition:all .2s}
-.nav li:hover,.nav li.active{color:var(--text);background:var(--surface2);border-left-color:var(--accent)}
-.nav li .icon{margin-right:10px;font-size:16px}
-.main{margin-left:240px;flex:1;padding:24px;min-height:100vh}
-.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}
-.header h1{font-size:24px;font-weight:600}
-.header .badge{background:var(--green);color:#000;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:24px}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;position:relative;overflow:hidden}
-.card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--accent),var(--accent2))}
-.card.green::before{background:linear-gradient(90deg,var(--green),#69f0ae)}
-.card.red::before{background:linear-gradient(90deg,var(--red),#ff8a80)}
-.card.yellow::before{background:linear-gradient(90deg,var(--yellow),#ffe57f)}
-.card .label{font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
-.card .value{font-size:28px;font-weight:700}
-.card .sub{font-size:12px;color:var(--text2);margin-top:4px}
-.panel{background:var(--surface);border:1px solid var(--border);border-radius:12px;margin-bottom:24px;overflow:hidden}
-.panel-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
-.panel-header h2{font-size:16px;font-weight:600}
-.panel-header .filters{display:flex;gap:8px}
-.panel-header select,.panel-header input{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:6px;font-size:13px;font-family:inherit}
+*{box-sizing:border-box}
+:root{
+  --bg:#0d0f12;
+  --surface:#15181d;
+  --surface-2:#1d2229;
+  --surface-3:#242a32;
+  --border:#313841;
+  --text:#eef2f5;
+  --muted:#9aa5b1;
+  --faint:#69737f;
+  --accent:#20c7b5;
+  --accent-2:#f3b14b;
+  --green:#36d399;
+  --red:#fb7185;
+  --yellow:#facc15;
+  --blue:#60a5fa;
+  --shadow:0 18px 40px rgba(0,0,0,.24);
+}
+body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font-family:Inter,Arial,sans-serif;display:flex}
+button,input,select,textarea{font:inherit}
+button{border:0}
+.sidebar{width:232px;background:#111419;border-right:1px solid var(--border);padding:18px 0;position:fixed;inset:0 auto 0 0;z-index:20;display:flex;flex-direction:column}
+.logo{padding:0 18px 18px;font-size:19px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:10px}
+.logo-mark{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:inline-block;position:relative}
+.logo-mark:after{content:"";position:absolute;inset:7px;border:2px solid rgba(13,15,18,.8);border-radius:5px}
+.nav{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+.nav button{width:100%;background:transparent;color:var(--muted);padding:10px 18px;text-align:left;border-left:3px solid transparent;cursor:pointer;font-size:14px;font-weight:600}
+.nav button:hover,.nav button.active{color:var(--text);background:var(--surface-2);border-left-color:var(--accent)}
+.main{margin-left:232px;padding:24px;min-height:100vh;width:calc(100% - 232px)}
+.section{display:none;animation:fadeIn .18s ease}
+.section.active{display:block}
+.page-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px}
+.page-header h1{font-size:24px;line-height:1.15;margin:0;font-weight:700}
+.page-header p{margin:6px 0 0;color:var(--muted);font-size:13px}
+.badge{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:5px 10px;font-size:12px;font-weight:700;background:rgba(54,211,153,.14);color:var(--green);border:1px solid rgba(54,211,153,.28);white-space:nowrap}
+.metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin-bottom:20px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:18px;box-shadow:var(--shadow);position:relative;overflow:hidden}
+.card:before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:var(--accent)}
+.card.warn:before{background:var(--accent-2)}
+.card.good:before{background:var(--green)}
+.card.bad:before{background:var(--red)}
+.label{color:var(--muted);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+.value{font-size:28px;font-weight:700;margin-top:8px;line-height:1}
+.sub{font-size:12px;color:var(--muted);margin-top:8px}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:20px;box-shadow:var(--shadow);overflow:hidden}
+.panel-header{padding:15px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:12px}
+.panel-header h2{font-size:15px;margin:0;font-weight:700}
+.panel-body{padding:18px}
+.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.field label,.inline-field label{color:var(--muted);font-size:12px;font-weight:700}
+.inline-field{display:flex;align-items:center;gap:8px}
+input,select,textarea{background:var(--surface-2);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:9px 11px;outline:none}
+input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(32,199,181,.12)}
+textarea{width:100%;resize:vertical;min-height:110px;line-height:1.5}
+input[type=range]{padding:0;accent-color:var(--accent)}
+input[type=checkbox]{accent-color:var(--accent)}
+.btn{border-radius:6px;padding:9px 14px;background:var(--surface-3);color:var(--text);font-weight:700;cursor:pointer;border:1px solid var(--border)}
+.btn:hover{border-color:var(--accent);transform:translateY(-1px)}
+.btn:disabled{opacity:.55;cursor:not-allowed;transform:none}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#061210}
+.btn-danger{background:rgba(251,113,133,.12);border-color:rgba(251,113,133,.4);color:var(--red)}
+.btn-small{padding:5px 9px;font-size:12px}
+.link-button{background:transparent;border:0;color:var(--accent);padding:0;font-weight:700;cursor:pointer}
+.link-button:hover{text-decoration:underline}
 table{width:100%;border-collapse:collapse}
-th{text-align:left;padding:12px 16px;font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border)}
-td{padding:12px 16px;font-size:13px;border-bottom:1px solid var(--border)}
-tr:hover{background:var(--surface2)}
-.badge-sm{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
-.badge-success{background:rgba(0,230,118,.15);color:var(--green)}
-.badge-error{background:rgba(255,82,82,.15);color:var(--red)}
-.badge-denied{background:rgba(255,215,64,.15);color:var(--yellow)}
-.provider-badge{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:500;background:var(--surface2)}
-.section{display:none}.section.active{display:block}
-.form-group{margin-bottom:16px}
-.form-group label{display:block;font-size:13px;color:var(--text2);margin-bottom:6px}
-.form-group input,.form-group textarea,.form-group select{width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:8px;font-size:14px;font-family:inherit}
-.form-group textarea{min-height:120px;resize:vertical}
-.btn{padding:10px 20px;border-radius:8px;font-size:14px;font-weight:600;border:none;cursor:pointer;transition:all .2s}
-.btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
-.btn-primary:hover{opacity:.9;transform:translateY(-1px)}
-.btn-danger{background:rgba(255,82,82,.2);color:var(--red);border:1px solid var(--red)}
-.empty{text-align:center;padding:40px;color:var(--text2)}
-.key-display{background:var(--bg);padding:12px;border-radius:8px;font-family:monospace;font-size:13px;word-break:break-all;margin:12px 0;border:1px solid var(--accent)}
-@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-.card,.panel{animation:fadeIn .3s ease}
-.pg-layout{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.pg-output{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;min-height:300px;max-height:500px;overflow-y:auto;font-size:14px;line-height:1.7;white-space:pre-wrap;word-break:break-word}
-.pg-controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
-.pg-controls label{font-size:12px;color:var(--text2)}
-.pg-controls input[type=range]{width:100px;accent-color:var(--accent)}
-.pg-controls select,.pg-controls input{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:13px}
-.pg-meta{display:flex;gap:16px;margin-top:12px;font-size:12px;color:var(--text2)}
-.pg-meta span{background:var(--surface2);padding:4px 10px;border-radius:6px}
-.config-editor{width:100%;min-height:300px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:14px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:13px;resize:vertical;tab-size:2}
-.config-list-item{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border)}
-.config-list-item:hover{background:var(--surface2)}
-.toggle{position:relative;width:40px;height:22px;cursor:pointer}
-.toggle input{opacity:0;width:0;height:0}
-.toggle .slider{position:absolute;inset:0;background:var(--border);border-radius:11px;transition:.2s}
-.toggle input:checked+.slider{background:var(--green)}
-.toggle .slider::before{content:'';position:absolute;height:16px;width:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s}
-.toggle input:checked+.slider::before{transform:translateX(18px)}
-.trace-timeline{padding:16px 20px}
-.trace-span{display:flex;align-items:center;gap:12px;padding:8px 0;border-left:2px solid var(--border);margin-left:12px;padding-left:16px}
-.trace-span .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
-.trace-span .info{flex:1}
-.trace-span .info .name{font-size:13px;font-weight:600}
-.trace-span .info .detail{font-size:12px;color:var(--text2)}
-.trace-span .duration{font-size:13px;font-weight:600;color:var(--accent2)}
-.trace-bar{height:6px;border-radius:3px;margin-top:4px}
-.clickable{cursor:pointer}
-.clickable:hover{text-decoration:underline;color:var(--accent2)}
-@media(max-width:900px){.pg-layout{grid-template-columns:1fr}}
+th{text-align:left;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border);padding:12px 14px}
+td{font-size:13px;border-bottom:1px solid var(--border);padding:12px 14px;color:var(--text)}
+tr:hover td{background:rgba(255,255,255,.025)}
+code{background:var(--surface-2);border:1px solid var(--border);border-radius:5px;padding:2px 6px;color:var(--accent-2)}
+.badge-sm{display:inline-flex;border-radius:999px;padding:3px 8px;font-size:11px;font-weight:700}
+.status-success{background:rgba(54,211,153,.13);color:var(--green)}
+.status-error{background:rgba(251,113,133,.14);color:var(--red)}
+.status-denied{background:rgba(250,204,21,.14);color:var(--yellow)}
+.status-neutral{background:rgba(154,165,177,.14);color:var(--muted)}
+.provider-badge{background:var(--surface-2);border:1px solid var(--border);border-radius:999px;padding:3px 8px;font-size:12px;color:var(--text)}
+.empty{padding:34px;text-align:center;color:var(--muted);font-size:13px}
+.muted{color:var(--muted)}
+.grid-2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+.grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.form-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px}
+.status-line{min-height:20px;font-size:13px;color:var(--muted)}
+.status-line.ok{color:var(--green)}
+.status-line.err{color:var(--red)}
+.output{background:#0a0c0f;border:1px solid var(--border);border-radius:8px;min-height:342px;max-height:560px;overflow:auto;padding:16px;white-space:pre-wrap;word-break:break-word;line-height:1.65;font-size:14px}
+.meta-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.chip{display:inline-flex;align-items:center;border:1px solid var(--border);background:var(--surface-2);border-radius:999px;padding:5px 9px;font-size:12px;color:var(--muted)}
+.code-input{min-height:320px;font-family:"Cascadia Mono","Consolas",monospace;font-size:13px;tab-size:2;background:#0a0c0f}
+.config-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:14px 16px;border-bottom:1px solid var(--border)}
+.config-row:hover{background:rgba(255,255,255,.025)}
+.config-title{font-weight:700}
+.config-meta{color:var(--muted);font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.switch{position:relative;display:inline-flex;width:42px;height:24px;align-items:center;cursor:pointer}
+.switch input{position:absolute;opacity:0;pointer-events:none}
+.switch span{position:absolute;inset:0;background:var(--surface-3);border:1px solid var(--border);border-radius:999px;transition:.18s}
+.switch span:before{content:"";position:absolute;width:16px;height:16px;left:3px;top:3px;border-radius:50%;background:var(--muted);transition:.18s}
+.switch input:checked+span{background:rgba(54,211,153,.2);border-color:rgba(54,211,153,.55)}
+.switch input:checked+span:before{transform:translateX(18px);background:var(--green)}
+.waterfall{display:flex;flex-direction:column;gap:12px;padding:18px}
+.waterfall-row{display:grid;grid-template-columns:190px minmax(180px,1fr) 86px;gap:12px;align-items:center}
+.span-label{min-width:0}
+.span-label strong{display:block;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.span-label span{display:block;color:var(--muted);font-size:12px;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.track{height:18px;background:#0a0c0f;border:1px solid var(--border);border-radius:999px;position:relative;overflow:hidden}
+.bar{position:absolute;top:3px;height:10px;border-radius:999px;left:var(--left);width:var(--width);background:var(--accent)}
+.bar.success{background:var(--green)}
+.bar.error{background:var(--red)}
+.bar.denied{background:var(--yellow)}
+.bar.event{background:var(--blue)}
+.duration{text-align:right;color:var(--muted);font-size:12px;font-weight:700}
+.trace-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;padding:18px;border-bottom:1px solid var(--border)}
+.trace-summary .mini{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:12px}
+.trace-summary .mini strong{display:block;font-size:18px;margin-top:5px;word-break:break-word}
+.raw-block{background:#0a0c0f;border:1px solid var(--border);border-radius:8px;padding:12px;overflow:auto;max-height:280px;font-family:"Cascadia Mono","Consolas",monospace;font-size:12px;line-height:1.55}
+.api-key-row{display:grid;grid-template-columns:minmax(220px,1fr) 160px;gap:10px;align-items:end;margin-bottom:14px}
+@keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:980px){
+  .grid-2,.grid-3,.api-key-row{grid-template-columns:1fr}
+  .waterfall-row{grid-template-columns:1fr}
+  .duration{text-align:left}
+}
+@media(max-width:780px){
+  body{display:block}
+  .sidebar{position:sticky;width:100%;height:auto;inset:auto;padding:12px 0}
+  .logo{padding:0 14px 12px}
+  .nav{flex-direction:row;overflow-x:auto;padding:0 10px 4px}
+  .nav button{white-space:nowrap;border-left:0;border-bottom:3px solid transparent;border-radius:6px;padding:9px 12px}
+  .nav button.active{border-left-color:transparent;border-bottom-color:var(--accent)}
+  .main{margin-left:0;width:100%;padding:16px}
+  .page-header{flex-direction:column}
+  th,td{padding:10px 9px}
+}
 </style>
 </head>
 <body>
-<nav class="sidebar">
-  <div class="logo"><span>🛡️</span> OmniSwitch</div>
+<nav class="sidebar" aria-label="Dashboard">
+  <div class="logo"><span class="logo-mark" aria-hidden="true"></span>OmniSwitch</div>
   <ul class="nav">
-    <li class="active" data-section="overview"><span class="icon">📊</span>Overview</li>
-    <li data-section="playground"><span class="icon">🎮</span>Playground</li>
-    <li data-section="logs"><span class="icon">📝</span>Request Logs</li>
-    <li data-section="configs"><span class="icon">⚙️</span>Configs</li>
-    <li data-section="guardrails"><span class="icon">🔒</span>Guardrails</li>
-    <li data-section="prompts"><span class="icon">💬</span>Prompts</li>
-    <li data-section="keys"><span class="icon">🔑</span>API Keys</li>
-    <li data-section="providers"><span class="icon">🌐</span>Providers</li>
+    <li><button type="button" class="active" data-section="overview" data-path="/overview">Overview</button></li>
+    <li><button type="button" data-section="playground" data-path="/playground">Playground</button></li>
+    <li><button type="button" data-section="logs" data-path="/logs">Request Logs</button></li>
+    <li><button type="button" data-section="configs" data-path="/configs">Configs</button></li>
+    <li><button type="button" data-section="guardrails" data-path="/guardrails">Guardrails</button></li>
+    <li><button type="button" data-section="prompts" data-path="/prompts">Prompts</button></li>
+    <li><button type="button" data-section="keys" data-path="/keys">API Keys</button></li>
+    <li><button type="button" data-section="providers" data-path="/providers">Providers</button></li>
   </ul>
 </nav>
+
 <main class="main">
-
-<!-- OVERVIEW -->
-<div id="overview" class="section active">
-  <div class="header"><h1>Dashboard</h1><span class="badge" id="health-badge">● Healthy</span></div>
-  <div class="cards" id="metric-cards"></div>
-  <div class="panel">
-    <div class="panel-header"><h2>Recent Requests</h2>
-      <div class="filters"><select id="ov-window" onchange="loadMetrics()"><option value="1h">Last 1h</option><option value="6h">Last 6h</option><option value="24h" selected>Last 24h</option><option value="7d">Last 7d</option></select></div>
+  <section id="overview" class="section active">
+    <div class="page-header">
+      <div>
+        <h1>Dashboard</h1>
+        <p>Traffic, cost, latency, cache, and request health.</p>
+      </div>
+      <span class="badge" id="health-badge">Healthy</span>
     </div>
-    <div id="recent-logs-table"></div>
-  </div>
-</div>
+    <div class="metric-grid" id="metric-cards"></div>
+    <div class="panel">
+      <div class="panel-header">
+        <h2>Recent Requests</h2>
+        <div class="toolbar">
+          <select id="ov-window" aria-label="Metrics window">
+            <option value="1h">Last 1h</option>
+            <option value="6h">Last 6h</option>
+            <option value="24h" selected>Last 24h</option>
+            <option value="7d">Last 7d</option>
+          </select>
+        </div>
+      </div>
+      <div id="recent-logs-table"></div>
+    </div>
+  </section>
 
-<!-- LOGS -->
-<div id="logs" class="section">
-  <div class="header"><h1>Request Logs</h1></div>
-  <div class="panel">
-    <div class="panel-header"><h2>All Requests</h2>
-      <div class="filters">
-        <select id="log-provider" onchange="loadLogs()"><option value="">All Providers</option><option>openai</option><option>anthropic</option><option>google</option><option>groq</option></select>
-        <select id="log-status" onchange="loadLogs()"><option value="">All Status</option><option value="success">Success</option><option value="error">Error</option><option value="denied">Denied</option></select>
+  <section id="playground" class="section">
+    <div class="page-header">
+      <div>
+        <h1>Playground</h1>
+        <p>Run chat completions through OmniSwitch routing and guardrails.</p>
+      </div>
+      <button type="button" class="btn" id="pg-clear">Clear</button>
+    </div>
+    <div class="panel">
+      <div class="panel-body">
+        <div class="api-key-row">
+          <div class="field">
+            <label for="pg-api-key">API key</label>
+            <input id="pg-api-key" type="password" autocomplete="off" placeholder="sk-...">
+          </div>
+          <div class="field">
+            <label for="pg-config">Config</label>
+            <select id="pg-config">
+              <option value="">Default route</option>
+            </select>
+          </div>
+        </div>
+        <div class="grid-3">
+          <div class="field">
+            <label for="pg-model">Model</label>
+            <select id="pg-model"></select>
+          </div>
+          <div class="field">
+            <label for="pg-temp">Temperature <span id="pg-temp-val">0.7</span></label>
+            <input id="pg-temp" type="range" min="0" max="2" step="0.1" value="0.7">
+          </div>
+          <div class="field">
+            <label for="pg-top-p">Top P <span id="pg-top-p-val">1.0</span></label>
+            <input id="pg-top-p" type="range" min="0" max="1" step="0.05" value="1">
+          </div>
+        </div>
+        <div class="grid-2">
+          <div>
+            <div class="field">
+              <label for="pg-max">Max tokens</label>
+              <input id="pg-max" type="number" min="1" value="1024">
+            </div>
+            <div class="field">
+              <label for="pg-system">System prompt</label>
+              <textarea id="pg-system" placeholder="You are a helpful assistant."></textarea>
+            </div>
+            <div class="field">
+              <label for="pg-user">User message</label>
+              <textarea id="pg-user" placeholder="Ask something..."></textarea>
+            </div>
+            <div class="form-actions">
+              <button type="button" class="btn btn-primary" id="pg-send">Send</button>
+              <label class="inline-field"><input id="pg-stream" type="checkbox" checked> Stream</label>
+            </div>
+          </div>
+          <div>
+            <div class="field">
+              <label for="pg-response">Response</label>
+              <div class="output" id="pg-response" role="log" aria-live="polite">No output yet.</div>
+            </div>
+            <div class="meta-row" id="pg-meta"></div>
+            <div class="status-line" id="pg-status"></div>
+          </div>
+        </div>
       </div>
     </div>
-    <div id="logs-table"></div>
-  </div>
-</div>
+  </section>
 
-<!-- GUARDRAILS -->
-<div id="guardrails" class="section">
-  <div class="header"><h1>Guardrails</h1></div>
-  <div class="cards">
-    <div class="card green"><div class="label">Active Checks</div><div class="value">5</div><div class="sub">PII · Injection · SQL · Toxic · Secrets</div></div>
-    <div class="card"><div class="label">Input Guardrails</div><div class="value">3</div><div class="sub">PII, Prompt Injection, SQL Injection</div></div>
-    <div class="card"><div class="label">Output Guardrails</div><div class="value">2</div><div class="sub">Toxic Content, Secret Leakage</div></div>
-  </div>
-  <div class="panel"><div class="panel-header"><h2>Built-in Guardrail Checks</h2></div>
-    <table><thead><tr><th>Type</th><th>Direction</th><th>Action</th><th>Description</th></tr></thead>
-    <tbody>
-      <tr><td>PII Detection</td><td>Input/Output</td><td><span class="badge-sm badge-denied">warn</span></td><td>Detects emails, phones, SSNs, credit cards</td></tr>
-      <tr><td>Prompt Injection</td><td>Input</td><td><span class="badge-sm badge-error">deny</span></td><td>Blocks jailbreak and override attempts</td></tr>
-      <tr><td>SQL Injection</td><td>Input</td><td><span class="badge-sm badge-error">deny</span></td><td>Blocks DROP TABLE, UNION SELECT patterns</td></tr>
-      <tr><td>Toxic Content</td><td>Input/Output</td><td><span class="badge-sm badge-error">deny</span></td><td>Blocks harmful/abusive content</td></tr>
-      <tr><td>Secret Leakage</td><td>Output</td><td><span class="badge-sm badge-denied">warn</span></td><td>Detects API keys and credentials in responses</td></tr>
-    </tbody></table>
-  </div>
-</div>
-
-<!-- PROMPTS -->
-<div id="prompts" class="section">
-  <div class="header"><h1>Prompt Management</h1></div>
-  <div class="panel"><div class="panel-header"><h2>Create Prompt</h2></div>
-    <div style="padding:20px">
-      <div class="form-group"><label>Name</label><input id="prompt-name" placeholder="e.g. customer-support"></div>
-      <div class="form-group"><label>Template (use {{variable}} syntax)</label><textarea id="prompt-template" placeholder="You are a {{role}}. Help the user with {{topic}}."></textarea></div>
-      <button class="btn btn-primary" onclick="createPrompt()">Create Prompt</button>
+  <section id="logs" class="section">
+    <div class="page-header">
+      <div>
+        <h1>Request Logs</h1>
+        <p>Provider calls, token use, cost, decisions, and trace links.</p>
+      </div>
     </div>
-  </div>
-  <div class="panel"><div class="panel-header"><h2>Saved Prompts</h2></div><div id="prompts-list"></div></div>
-</div>
-
-<!-- API KEYS -->
-<div id="keys" class="section">
-  <div class="header"><h1>API Keys</h1></div>
-  <div class="panel"><div class="panel-header"><h2>Create Key</h2></div>
-    <div style="padding:20px">
-      <div class="form-group"><label>Name</label><input id="key-name" placeholder="e.g. production-app"></div>
-      <div class="form-group"><label>Rate Limit (req/min)</label><input id="key-rate" type="number" value="60"></div>
-      <button class="btn btn-primary" onclick="createKey()">Generate Key</button>
-      <div id="key-result"></div>
+    <div class="panel">
+      <div class="panel-header">
+        <h2>All Requests</h2>
+        <div class="toolbar">
+          <select id="log-provider" aria-label="Provider filter">
+            <option value="">All providers</option>
+            <option>openai</option>
+            <option>anthropic</option>
+            <option>google</option>
+            <option>groq</option>
+            <option>cohere</option>
+            <option>bedrock</option>
+            <option>azure</option>
+          </select>
+          <select id="log-status" aria-label="Status filter">
+            <option value="">All status</option>
+            <option value="success">Success</option>
+            <option value="error">Error</option>
+            <option value="denied">Denied</option>
+          </select>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="toolbar">
+          <input id="trace-lookup" placeholder="trace_..." aria-label="Trace ID">
+          <button type="button" class="btn" id="trace-open">Open Trace</button>
+        </div>
+      </div>
+      <div id="logs-table"></div>
     </div>
-  </div>
-  <div class="panel"><div class="panel-header"><h2>Active Keys</h2></div><div id="keys-list"></div></div>
-</div>
+  </section>
 
-<!-- PROVIDERS -->
-<div id="providers" class="section">
-  <div class="header"><h1>Provider Analytics</h1></div>
-  <div id="provider-cards" class="cards"></div>
-  <div class="panel"><div class="panel-header"><h2>Provider Performance</h2></div><div id="provider-table"></div></div>
-</div>
-
-<!-- PLAYGROUND -->
-<div id="playground" class="section">
-  <div class="header"><h1>Playground</h1></div>
-  <div class="pg-controls">
-    <label>Model</label><input id="pg-model" value="gpt-4o-mini" style="width:200px" placeholder="e.g. gpt-4o-mini">
-    <label>Temp <span id="pg-temp-val">0.7</span></label><input type="range" id="pg-temp" min="0" max="2" step="0.1" value="0.7" oninput="document.getElementById('pg-temp-val').textContent=this.value">
-    <label>Max Tokens</label><input type="number" id="pg-max" value="1024" style="width:80px">
-    <label>Stream</label><input type="checkbox" id="pg-stream" checked>
-  </div>
-  <div class="pg-layout">
-    <div>
-      <div class="form-group"><label>System Prompt</label><textarea id="pg-system" style="min-height:80px" placeholder="You are a helpful assistant."></textarea></div>
-      <div class="form-group"><label>User Message</label><textarea id="pg-user" style="min-height:140px" placeholder="Type your message here..."></textarea></div>
-      <button class="btn btn-primary" onclick="runPlayground()" id="pg-send">▶ Send</button>
+  <section id="trace-detail" class="section">
+    <div class="page-header">
+      <div>
+        <h1>Trace Detail</h1>
+        <p id="trace-subtitle">Request waterfall and related events.</p>
+      </div>
+      <button type="button" class="btn" id="trace-back">Back</button>
     </div>
-    <div>
-      <label style="font-size:13px;color:var(--text2);margin-bottom:6px;display:block">Response</label>
-      <div class="pg-output" id="pg-response">Send a message to see the response here...</div>
-      <div class="pg-meta" id="pg-meta"></div>
+    <div id="trace-content"></div>
+  </section>
+
+  <section id="configs" class="section">
+    <div class="page-header">
+      <div>
+        <h1>Gateway Configs</h1>
+        <p>Dynamic routing, guardrail, cache, and policy configs.</p>
+      </div>
+      <button type="button" class="btn" id="cfg-new">New</button>
     </div>
-  </div>
-</div>
-
-<!-- CONFIGS -->
-<div id="configs" class="section">
-  <div class="header"><h1>Gateway Configs</h1></div>
-  <div class="panel">
-    <div class="panel-header"><h2>Create / Edit Config</h2></div>
-    <div style="padding:20px">
-      <div class="form-group"><label>Config Name</label><input id="cfg-name" placeholder="e.g. production-routing"></div>
-      <div class="form-group"><label>Description</label><input id="cfg-desc" placeholder="Optional description"></div>
-      <div class="form-group"><label>Config Body (YAML)</label><textarea class="config-editor" id="cfg-body" placeholder="providers:&#10;  - name: openai&#10;    type: openai&#10;    api_key: ${OPENAI_API_KEY}&#10;    models: [gpt-4o-mini]"></textarea></div>
-      <button class="btn btn-primary" onclick="createConfig()">Save Config</button>
+    <div class="grid-2">
+      <div class="panel">
+        <div class="panel-header"><h2>Create / Edit Config</h2></div>
+        <div class="panel-body">
+          <input id="cfg-id" type="hidden">
+          <input id="cfg-original-name" type="hidden">
+          <div class="field">
+            <label for="cfg-name">Name</label>
+            <input id="cfg-name" placeholder="production-routing">
+          </div>
+          <div class="field">
+            <label for="cfg-desc">Description</label>
+            <input id="cfg-desc" placeholder="Optional">
+          </div>
+          <div class="field">
+            <label for="cfg-format">Format</label>
+            <select id="cfg-format">
+              <option value="yaml">YAML</option>
+              <option value="json">JSON</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="cfg-body">Config body</label>
+            <textarea id="cfg-body" class="code-input" spellcheck="false">apiVersion: omniswitch.dev/v1
+kind: GatewayConfig
+routes:
+  gpt-4o-mini:
+    provider: openai
+    max_retries: 1</textarea>
+          </div>
+          <div class="form-actions">
+            <button type="button" class="btn btn-primary" id="cfg-save">Save Config</button>
+            <button type="button" class="btn" id="cfg-reset">Reset</button>
+          </div>
+          <div class="status-line" id="cfg-status"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Saved Configs</h2>
+          <button type="button" class="btn btn-small" id="cfg-refresh">Refresh</button>
+        </div>
+        <div id="configs-list"></div>
+      </div>
     </div>
-  </div>
-  <div class="panel">
-    <div class="panel-header"><h2>Saved Configs</h2></div>
-    <div id="configs-list"></div>
-  </div>
-</div>
+  </section>
 
-<!-- TRACE DETAIL (overlay) -->
-<div id="trace-detail" class="section">
-  <div class="header"><h1>Trace Detail</h1><button class="btn" onclick="showSection('logs')" style="background:var(--surface2);color:var(--text)">← Back to Logs</button></div>
-  <div id="trace-content"></div>
-</div>
+  <section id="guardrails" class="section">
+    <div class="page-header">
+      <div>
+        <h1>Guardrails</h1>
+        <p>Built-in checks and stored guardrail decisions.</p>
+      </div>
+    </div>
+    <div class="metric-grid">
+      <div class="card good"><div class="label">Active Checks</div><div class="value">5</div><div class="sub">PII, injection, SQL, toxic, secrets</div></div>
+      <div class="card"><div class="label">Input Guardrails</div><div class="value">3</div><div class="sub">PII, prompt injection, SQL injection</div></div>
+      <div class="card warn"><div class="label">Output Guardrails</div><div class="value">2</div><div class="sub">Toxic content, secret leakage</div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><h2>Built-in Guardrail Checks</h2></div>
+      <table>
+        <thead><tr><th>Type</th><th>Direction</th><th>Default Action</th><th>Scope</th></tr></thead>
+        <tbody>
+          <tr><td>PII Detection</td><td>Input / Output</td><td><span class="badge-sm status-denied">warn</span></td><td>Emails, phones, SSNs, credit cards</td></tr>
+          <tr><td>Prompt Injection</td><td>Input</td><td><span class="badge-sm status-error">deny</span></td><td>Jailbreak and override attempts</td></tr>
+          <tr><td>SQL Injection</td><td>Input</td><td><span class="badge-sm status-error">deny</span></td><td>Destructive SQL patterns</td></tr>
+          <tr><td>Toxic Content</td><td>Input / Output</td><td><span class="badge-sm status-error">deny</span></td><td>Harmful or abusive content</td></tr>
+          <tr><td>Secret Leakage</td><td>Output</td><td><span class="badge-sm status-denied">warn</span></td><td>API keys and credentials</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
 
+  <section id="prompts" class="section">
+    <div class="page-header">
+      <div>
+        <h1>Prompt Management</h1>
+        <p>Versioned prompt templates with variable extraction.</p>
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="panel">
+        <div class="panel-header"><h2>Create Prompt</h2></div>
+        <div class="panel-body">
+          <div class="field"><label for="prompt-name">Name</label><input id="prompt-name" placeholder="customer-support"></div>
+          <div class="field"><label for="prompt-template">Template</label><textarea id="prompt-template" placeholder="You are a {{role}}. Help with {{topic}}."></textarea></div>
+          <button type="button" class="btn btn-primary" id="prompt-create">Create Prompt</button>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header"><h2>Saved Prompts</h2></div>
+        <div id="prompts-list"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="keys" class="section">
+    <div class="page-header">
+      <div>
+        <h1>API Keys</h1>
+        <p>Issue and revoke workload keys.</p>
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="panel">
+        <div class="panel-header"><h2>Create Key</h2></div>
+        <div class="panel-body">
+          <div class="field"><label for="key-name">Name</label><input id="key-name" placeholder="production-app"></div>
+          <div class="field"><label for="key-rate">Rate limit</label><input id="key-rate" type="number" min="1" value="60"></div>
+          <button type="button" class="btn btn-primary" id="key-create">Generate Key</button>
+          <div class="meta-row" id="key-result"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header"><h2>Active Keys</h2></div>
+        <div id="keys-list"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="providers" class="section">
+    <div class="page-header">
+      <div>
+        <h1>Provider Analytics</h1>
+        <p>Provider volume, latency, cost, and error rate.</p>
+      </div>
+    </div>
+    <div class="metric-grid" id="provider-cards"></div>
+    <div class="panel">
+      <div class="panel-header"><h2>Provider Performance</h2></div>
+      <div id="provider-table"></div>
+    </div>
+  </section>
 </main>
+
 <script>
-const API = '';
+const API = "";
+const routes = {
+  "/": "overview",
+  "/overview": "overview",
+  "/playground": "playground",
+  "/logs": "logs",
+  "/configs": "configs",
+  "/guardrails": "guardrails",
+  "/prompts": "prompts",
+  "/keys": "keys",
+  "/providers": "providers"
+};
+const fallbackModels = ["gpt-4o-mini", "gpt-4o", "claude-3-5-sonnet-latest", "gemini-1.5-flash", "llama-3.1-70b-versatile"];
+let configCache = [];
+let lastLogsSection = "logs";
+let playgroundSessionID = loadSessionID();
 
-// Navigation
-function showSection(name) {
-  document.querySelectorAll('.nav li').forEach(x => x.classList.remove('active'));
-  document.querySelectorAll('.section').forEach(x => x.classList.remove('active'));
-  const li = document.querySelector(`.nav li[data-section="${name}"]`);
-  if(li) li.classList.add('active');
-  document.getElementById(name).classList.add('active');
-  if(name === 'logs') loadLogs();
-  if(name === 'keys') loadKeys();
-  if(name === 'prompts') loadPrompts();
-  if(name === 'providers') loadProviders();
-  if(name === 'configs') loadConfigs();
+function $(id){return document.getElementById(id);}
+function escapeHTML(value){
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
 }
-document.querySelectorAll('.nav li').forEach(li => {
-  li.addEventListener('click', () => showSection(li.dataset.section));
-});
+function escapeAttr(value){return escapeHTML(value);}
+function statusClass(status){
+  if(status === "success") return "status-success";
+  if(status === "denied") return "status-denied";
+  if(status === "error") return "status-error";
+  return "status-neutral";
+}
+function shortID(value){
+  const text = String(value || "");
+  return text.length > 18 ? text.slice(0, 14) + "..." : text || "none";
+}
+function formatMoney(value){return "$" + Number(value || 0).toFixed(5);}
+function formatInt(value){return Number(value || 0).toLocaleString();}
+function formatMs(value){return Number(value || 0).toFixed(0) + "ms";}
+function parseDate(value){
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? time : Date.now();
+}
+function bearerValue(value){
+  const trimmed = String(value || "").trim();
+  if(!trimmed) return "";
+  return trimmed.toLowerCase().startsWith("bearer ") ? trimmed : "Bearer " + trimmed;
+}
+function authHeader(){
+  const key = $("pg-api-key")?.value || sessionStorage.getItem("omniswitch.playgroundKey") || "";
+  const bearer = bearerValue(key);
+  return bearer ? {"Authorization": bearer} : {};
+}
+function jsonHeaders(){
+  return {"Content-Type":"application/json", ...authHeader()};
+}
+function setStatus(id, message, type){
+  const el = $(id);
+  if(!el) return;
+  el.textContent = message || "";
+  el.className = "status-line" + (type ? " " + type : "");
+}
+function delay(ms){return new Promise(resolve => setTimeout(resolve, ms));}
+function loadSessionID(){
+  const existing = sessionStorage.getItem("omniswitch.sessionID");
+  if(existing) return existing;
+  const value = "session_" + crypto.randomUUID();
+  sessionStorage.setItem("omniswitch.sessionID", value);
+  return value;
+}
+function newTraceID(){return "trace_" + crypto.randomUUID();}
 
-async function fetchJSON(url) {
-  try { const r = await fetch(API + url); return await r.json(); }
-  catch(e) { return null; }
+async function requestJSON(url, options = {}){
+  const resp = await fetch(API + url, options);
+  const text = await resp.text();
+  let data = {};
+  if(text){
+    try{data = JSON.parse(text);}catch{data = {raw:text};}
+  }
+  if(!resp.ok){
+    throw new Error(errorMessage(data) || resp.statusText || "request failed");
+  }
+  return {data, response: resp};
+}
+function errorMessage(data){
+  if(!data) return "";
+  if(typeof data.error === "string") return data.error;
+  if(data.error && typeof data.error.message === "string") return data.error.message;
+  if(typeof data.message === "string") return data.message;
+  return "";
 }
 
-async function postJSON(url, data) {
-  const r = await fetch(API + url, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-  return await r.json();
+function showSection(name, options = {}){
+  const push = options.push !== false;
+  document.querySelectorAll(".section").forEach(section => section.classList.remove("active"));
+  document.querySelectorAll(".nav button").forEach(button => button.classList.toggle("active", button.dataset.section === name));
+  const target = $(name);
+  if(target) target.classList.add("active");
+
+  const button = document.querySelector(`.nav button[data-section="${name}"]`);
+  if(push && button?.dataset.path && location.pathname !== button.dataset.path){
+    history.pushState({section:name}, "", button.dataset.path);
+  }
+  if(name !== "trace-detail") lastLogsSection = name;
+  hydrateSection(name);
 }
 
-// Metrics
-async function loadMetrics() {
-  const window = document.getElementById('ov-window').value;
-  const m = await fetchJSON(`/api/metrics?window=${window}`);
-  if(!m) return;
-  document.getElementById('metric-cards').innerHTML = `
-    <div class="card"><div class="label">Total Requests</div><div class="value">${m.total_requests||0}</div><div class="sub">${(m.requests_per_min||0).toFixed(1)} req/min</div></div>
-    <div class="card green"><div class="label">Avg Latency</div><div class="value">${(m.avg_latency_ms||0).toFixed(0)}ms</div><div class="sub">${m.allowed_count||0} allowed</div></div>
-    <div class="card yellow"><div class="label">Total Cost</div><div class="value">$${(m.total_cost||0).toFixed(4)}</div><div class="sub">${m.total_tokens||0} tokens</div></div>
-    <div class="card red"><div class="label">Denied / Errors</div><div class="value">${(m.denied_count||0)+(m.error_count||0)}</div><div class="sub">${m.denied_count||0} denied · ${m.error_count||0} errors</div></div>
-  `;
-  loadRecentLogs();
+function routeFromLocation(){
+  if(location.pathname.startsWith("/traces/")){
+    const traceID = decodeURIComponent(location.pathname.slice("/traces/".length));
+    if(traceID) viewTrace(traceID, {push:false});
+    return;
+  }
+  showSection(routes[location.pathname] || "overview", {push:false});
 }
 
-async function loadRecentLogs() {
-  const data = await fetchJSON('/api/logs?limit=10');
-  if(!data) { document.getElementById('recent-logs-table').innerHTML='<div class="empty">No requests yet</div>'; return; }
-  renderLogsTable('recent-logs-table', data.logs||[]);
-}
-
-function renderLogsTable(id, logs) {
-  if(!logs.length) { document.getElementById(id).innerHTML='<div class="empty">No requests yet. Send a request to /v1/chat/completions to get started.</div>'; return; }
-  let html = '<table><thead><tr><th>Time</th><th>Provider</th><th>Model</th><th>Status</th><th>Latency</th><th>Tokens</th><th>Cost</th><th>Trace</th></tr></thead><tbody>';
-  logs.forEach(l => {
-    const time = new Date(l.timestamp).toLocaleString();
-    const statusClass = l.status==='success'?'badge-success':l.status==='denied'?'badge-denied':'badge-error';
-    const traceLink = l.trace_id ? `<span class="clickable" onclick="viewTrace('${l.trace_id}')">${l.trace_id.slice(0,8)}…</span>` : '—';
-    html += `<tr><td>${time}</td><td><span class="provider-badge">${l.provider||'-'}</span></td><td>${l.model||'-'}</td><td><span class="badge-sm ${statusClass}">${l.status}</span></td><td>${(l.latency_ms||0).toFixed(0)}ms</td><td>${l.total_tokens||0}</td><td>$${(l.cost||0).toFixed(5)}</td><td>${traceLink}</td></tr>`;
-  });
-  html += '</tbody></table>';
-  document.getElementById(id).innerHTML = html;
-}
-
-async function loadLogs() {
-  const p = document.getElementById('log-provider').value;
-  const s = document.getElementById('log-status').value;
-  const data = await fetchJSON(`/api/logs?limit=50&provider=${p}&status=${s}`);
-  renderLogsTable('logs-table', data?.logs||[]);
-}
-
-// Keys
-async function createKey() {
-  const name = document.getElementById('key-name').value;
-  const rate = parseInt(document.getElementById('key-rate').value)||60;
-  if(!name) return alert('Name is required');
-  const data = await postJSON('/api/keys', {name, rate_limit: rate});
-  if(data.key) {
-    document.getElementById('key-result').innerHTML = `<div class="key-display">⚠️ Copy this key now — it won't be shown again:<br><br><strong>${data.key}</strong></div>`;
-    loadKeys();
+function hydrateSection(name){
+  if(name === "overview") loadMetrics();
+  if(name === "logs") loadLogs();
+  if(name === "keys") loadKeys();
+  if(name === "prompts") loadPrompts();
+  if(name === "providers") loadProviders();
+  if(name === "configs") loadConfigs();
+  if(name === "playground") {
+    loadModels();
+    loadConfigs();
   }
 }
 
-async function loadKeys() {
-  const data = await fetchJSON('/api/keys');
-  const keys = data?.keys||[];
-  if(!keys.length) { document.getElementById('keys-list').innerHTML='<div class="empty">No API keys created yet</div>'; return; }
-  let html = '<table><thead><tr><th>Name</th><th>Prefix</th><th>Rate Limit</th><th>Created</th><th>Status</th><th>Action</th></tr></thead><tbody>';
-  keys.forEach(k => {
-    html += `<tr><td>${k.name}</td><td><code>${k.key_prefix}</code></td><td>${k.rate_limit}/min</td><td>${new Date(k.created_at).toLocaleDateString()}</td><td><span class="badge-sm ${k.enabled?'badge-success':'badge-error'}">${k.enabled?'active':'disabled'}</span></td><td><button class="btn btn-danger" onclick="deleteKey('${k.id}')" style="padding:4px 12px;font-size:12px">Revoke</button></td></tr>`;
-  });
-  html += '</tbody></table>';
-  document.getElementById('keys-list').innerHTML = html;
+document.querySelectorAll(".nav button").forEach(button => {
+  button.addEventListener("click", () => showSection(button.dataset.section));
+});
+window.addEventListener("popstate", routeFromLocation);
+
+async function loadMetrics(){
+  try{
+    const windowValue = $("ov-window").value;
+    const {data:m} = await requestJSON(`/api/metrics?window=${encodeURIComponent(windowValue)}`, {headers: authHeader()});
+    $("health-badge").textContent = "Healthy";
+    $("metric-cards").innerHTML = `
+      <div class="card"><div class="label">Total Requests</div><div class="value">${formatInt(m.total_requests)}</div><div class="sub">${Number(m.requests_per_min || 0).toFixed(1)} req/min</div></div>
+      <div class="card good"><div class="label">Avg Latency</div><div class="value">${formatMs(m.avg_latency_ms)}</div><div class="sub">${formatInt(m.allowed_count)} allowed</div></div>
+      <div class="card warn"><div class="label">Total Cost</div><div class="value">${formatMoney(m.total_cost)}</div><div class="sub">${formatInt(m.total_tokens)} tokens</div></div>
+      <div class="card bad"><div class="label">Denied / Errors</div><div class="value">${formatInt((m.denied_count || 0) + (m.error_count || 0))}</div><div class="sub">${formatInt(m.denied_count)} denied - ${formatInt(m.error_count)} errors</div></div>
+    `;
+    loadRecentLogs();
+  }catch(err){
+    $("health-badge").textContent = "Unavailable";
+    $("metric-cards").innerHTML = `<div class="empty">${escapeHTML(err.message)}</div>`;
+  }
 }
 
-async function deleteKey(id) {
-  if(!confirm('Revoke this key?')) return;
-  await fetch(`/api/keys?id=${id}`, {method:'DELETE'});
+async function loadRecentLogs(){
+  try{
+    const {data} = await requestJSON("/api/logs?limit=10", {headers: authHeader()});
+    renderLogsTable("recent-logs-table", data.logs || []);
+  }catch(err){
+    $("recent-logs-table").innerHTML = `<div class="empty">${escapeHTML(err.message)}</div>`;
+  }
+}
+
+async function loadLogs(){
+  const provider = $("log-provider").value;
+  const status = $("log-status").value;
+  try{
+    const {data} = await requestJSON(`/api/logs?limit=50&provider=${encodeURIComponent(provider)}&status=${encodeURIComponent(status)}`, {headers: authHeader()});
+    renderLogsTable("logs-table", data.logs || []);
+  }catch(err){
+    $("logs-table").innerHTML = `<div class="empty">${escapeHTML(err.message)}</div>`;
+  }
+}
+
+function renderLogsTable(id, logs){
+  const el = $(id);
+  if(!logs.length){
+    el.innerHTML = `<div class="empty">No requests yet.</div>`;
+    return;
+  }
+  const rows = logs.map(log => {
+    const trace = log.trace_id || "";
+    const traceCell = trace
+      ? `<button type="button" class="link-button trace-link" data-trace="${escapeAttr(trace)}">${escapeHTML(shortID(trace))}</button>`
+      : `<span class="muted">none</span>`;
+    return `<tr>
+      <td>${escapeHTML(new Date(log.timestamp).toLocaleString())}</td>
+      <td><span class="provider-badge">${escapeHTML(log.provider || "auto")}</span></td>
+      <td>${escapeHTML(log.model || "-")}</td>
+      <td><span class="badge-sm ${statusClass(log.status)}">${escapeHTML(log.status || "unknown")}</span></td>
+      <td>${formatMs(log.latency_ms)}</td>
+      <td>${formatInt(log.total_tokens)}</td>
+      <td>${formatMoney(log.cost)}</td>
+      <td>${log.cached ? "hit" : "miss"}</td>
+      <td>${traceCell}</td>
+    </tr>`;
+  }).join("");
+  el.innerHTML = `<table>
+    <thead><tr><th>Time</th><th>Provider</th><th>Model</th><th>Status</th><th>Latency</th><th>Tokens</th><th>Cost</th><th>Cache</th><th>Trace</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+  el.querySelectorAll(".trace-link").forEach(button => button.addEventListener("click", () => viewTrace(button.dataset.trace)));
+}
+
+async function loadModels(){
+  const select = $("pg-model");
+  if(select.dataset.loaded === "true") return;
+  const current = select.value;
+  try{
+    const {data} = await requestJSON("/v1/models", {headers: authHeader()});
+    const models = (data.data || []).map(item => item.id || item.model || "").filter(Boolean);
+    const unique = [...new Set(models.length ? models : fallbackModels)];
+    select.innerHTML = unique.map(model => `<option value="${escapeAttr(model)}">${escapeHTML(model)}</option>`).join("");
+  }catch{
+    select.innerHTML = fallbackModels.map(model => `<option value="${escapeAttr(model)}">${escapeHTML(model)}</option>`).join("");
+  }
+  if(current) select.value = current;
+  select.dataset.loaded = "true";
+}
+
+async function runPlayground(){
+  const model = $("pg-model").value || "gpt-4o-mini";
+  const system = $("pg-system").value.trim();
+  const user = $("pg-user").value.trim();
+  const temperature = Number($("pg-temp").value);
+  const topP = Number($("pg-top-p").value);
+  const maxTokens = Number($("pg-max").value || 1024);
+  const stream = $("pg-stream").checked;
+  const configRef = $("pg-config").value;
+  const apiKey = $("pg-api-key").value.trim();
+  if(apiKey) sessionStorage.setItem("omniswitch.playgroundKey", apiKey);
+  if(!user){
+    setStatus("pg-status", "User message is required.", "err");
+    return;
+  }
+  const traceID = newTraceID();
+  const messages = [];
+  if(system) messages.push({role:"system", content:system});
+  messages.push({role:"user", content:user});
+  const body = {model, messages, temperature, top_p: topP, max_tokens: maxTokens, stream};
+  const headers = {
+    "Content-Type":"application/json",
+    "x-omniswitch-trace-id":traceID,
+    "x-omniswitch-session-id":playgroundSessionID,
+    ...authHeader()
+  };
+  if(configRef) headers["x-omniswitch-config"] = configRef;
+  $("pg-response").textContent = "";
+  $("pg-meta").innerHTML = metaChips([{label:"Trace", value:traceID}, {label:"Status", value:"sending"}]);
+  setStatus("pg-status", "", "");
+  $("pg-send").disabled = true;
+  const started = performance.now();
+  let responseTraceID = traceID;
+  let usage = null;
+  try{
+    const resp = await fetch("/v1/chat/completions", {method:"POST", headers, body:JSON.stringify(body)});
+    responseTraceID = resp.headers.get("x-omniswitch-trace-id") || traceID;
+    if(!resp.ok){
+      const text = await resp.text();
+      let payload = {};
+      try{payload = JSON.parse(text);}catch{payload = {raw:text};}
+      throw new Error(errorMessage(payload) || payload.raw || resp.statusText);
+    }
+    if(stream){
+      await readStream(resp, $("pg-response"), chunk => {
+        if(chunk.usage) usage = chunk.usage;
+      });
+    }else{
+      const payload = await resp.json();
+      usage = payload.usage || null;
+      $("pg-response").textContent = renderAssistantPayload(payload);
+    }
+    await renderPlaygroundMeta(responseTraceID, model, performance.now() - started, usage);
+    setStatus("pg-status", "Completed.", "ok");
+  }catch(err){
+    $("pg-response").textContent = "Error: " + err.message;
+    $("pg-meta").innerHTML = metaChips([{label:"Trace", value:responseTraceID}, {label:"Latency", value:formatMs(performance.now() - started)}]);
+    setStatus("pg-status", "Request failed.", "err");
+  }finally{
+    $("pg-send").disabled = false;
+  }
+}
+
+async function readStream(resp, output, onChunk){
+  const reader = resp.body?.getReader();
+  if(!reader) throw new Error("Streaming response body is unavailable");
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while(true){
+    const {done, value} = await reader.read();
+    if(done) break;
+    buffer += decoder.decode(value, {stream:true});
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for(const line of lines){
+      const trimmed = line.trim();
+      if(!trimmed.startsWith("data:")) continue;
+      const payload = trimmed.slice(5).trim();
+      if(payload === "[DONE]") continue;
+      try{
+        const chunk = JSON.parse(payload);
+        onChunk?.(chunk);
+        for(const choice of chunk.choices || []){
+          const delta = choice.delta || {};
+          if(delta.content) output.textContent += delta.content;
+          if(delta.tool_calls?.length) output.textContent += "\n" + JSON.stringify(delta.tool_calls, null, 2);
+        }
+      }catch{}
+    }
+  }
+}
+
+function renderAssistantPayload(payload){
+  const first = payload.choices?.[0];
+  if(!first) return JSON.stringify(payload, null, 2);
+  const message = first.message || {};
+  const parts = [];
+  if(message.content) parts.push(message.content);
+  if(message.tool_calls?.length) parts.push(JSON.stringify(message.tool_calls, null, 2));
+  return parts.join("\n\n") || JSON.stringify(payload, null, 2);
+}
+
+async function renderPlaygroundMeta(traceID, model, elapsedMs, usage){
+  let trace = null;
+  for(let attempt = 0; attempt < 4; attempt++){
+    try{
+      const {data} = await requestJSON(`/api/traces/${encodeURIComponent(traceID)}`, {headers: authHeader()});
+      trace = data;
+      break;
+    }catch{
+      await delay(150);
+    }
+  }
+  const log = trace?.logs?.[trace.logs.length - 1] || {};
+  const inputTokens = log.input_tokens ?? usage?.prompt_tokens ?? 0;
+  const outputTokens = log.output_tokens ?? usage?.completion_tokens ?? 0;
+  const totalTokens = log.total_tokens ?? usage?.total_tokens ?? 0;
+  const cost = log.cost ?? 0;
+  $("pg-meta").innerHTML = metaChips([
+    {label:"Latency", value:formatMs(log.latency_ms || elapsedMs)},
+    {label:"Model", value:log.model || model},
+    {label:"Input", value:formatInt(inputTokens)},
+    {label:"Output", value:formatInt(outputTokens)},
+    {label:"Total", value:formatInt(totalTokens)},
+    {label:"Cost", value:formatMoney(cost)},
+    {label:"Cache", value:log.cached ? "hit" : "miss"},
+    {label:"Trace", value:shortID(traceID)}
+  ]);
+}
+
+function metaChips(items){
+  return items.map(item => `<span class="chip"><strong>${escapeHTML(item.label)}:</strong>&nbsp;${escapeHTML(item.value)}</span>`).join("");
+}
+
+async function loadConfigs(){
+  try{
+    const {data} = await requestJSON("/api/configs?include_disabled=true", {headers: authHeader()});
+    configCache = data.configs || [];
+    renderConfigList();
+    renderPlaygroundConfigs();
+  }catch(err){
+    if($("configs-list")) $("configs-list").innerHTML = `<div class="empty">${escapeHTML(err.message)}</div>`;
+  }
+}
+
+function renderPlaygroundConfigs(){
+  const select = $("pg-config");
+  if(!select) return;
+  const current = select.value;
+  const enabled = configCache.filter(config => config.enabled);
+  select.innerHTML = `<option value="">Default route</option>` + enabled.map(config => {
+    const value = config.name || config.id;
+    return `<option value="${escapeAttr(value)}">${escapeHTML(config.name)} (${escapeHTML(config.format)})</option>`;
+  }).join("");
+  if([...select.options].some(option => option.value === current)) select.value = current;
+}
+
+function renderConfigList(){
+  const el = $("configs-list");
+  if(!el) return;
+  if(!configCache.length){
+    el.innerHTML = `<div class="empty">No configs yet.</div>`;
+    return;
+  }
+  el.innerHTML = configCache.map(config => `
+    <div class="config-row">
+      <div>
+        <div class="config-title">${escapeHTML(config.name)}</div>
+        <div class="config-meta">${escapeHTML(config.description || config.id)} - ${escapeHTML(config.format)} - updated ${escapeHTML(new Date(config.updated_at).toLocaleString())}</div>
+      </div>
+      <div class="toolbar">
+        <label class="switch" title="${config.enabled ? "Enabled" : "Disabled"}">
+          <input type="checkbox" class="cfg-toggle" data-id="${escapeAttr(config.id)}" ${config.enabled ? "checked" : ""}>
+          <span></span>
+        </label>
+        <button type="button" class="btn btn-small cfg-edit" data-id="${escapeAttr(config.id)}">Edit</button>
+      </div>
+    </div>
+  `).join("");
+  el.querySelectorAll(".cfg-toggle").forEach(input => input.addEventListener("change", () => toggleConfig(input)));
+  el.querySelectorAll(".cfg-edit").forEach(button => button.addEventListener("click", () => editConfig(button.dataset.id)));
+}
+
+function resetConfigForm(){
+  $("cfg-id").value = "";
+  $("cfg-original-name").value = "";
+  $("cfg-name").value = "";
+  $("cfg-desc").value = "";
+  $("cfg-format").value = "yaml";
+  $("cfg-body").value = `apiVersion: omniswitch.dev/v1
+kind: GatewayConfig
+routes:
+  gpt-4o-mini:
+    provider: openai
+    max_retries: 1`;
+  setStatus("cfg-status", "", "");
+}
+
+function editConfig(id){
+  const config = configCache.find(item => item.id === id);
+  if(!config) return;
+  $("cfg-id").value = config.id;
+  $("cfg-original-name").value = config.name;
+  $("cfg-name").value = config.name || "";
+  $("cfg-desc").value = config.description || "";
+  $("cfg-format").value = config.format || "yaml";
+  $("cfg-body").value = config.body || "";
+  setStatus("cfg-status", `Editing ${config.name}.`, "");
+}
+
+async function saveConfig(){
+  const id = $("cfg-id").value.trim();
+  const name = $("cfg-name").value.trim();
+  const description = $("cfg-desc").value.trim();
+  const format = $("cfg-format").value;
+  const body = $("cfg-body").value.trim();
+  if(!name || !body){
+    setStatus("cfg-status", "Name and body are required.", "err");
+    return;
+  }
+  const payload = {name, description, format, body};
+  if(id) payload.id = id;
+  $("cfg-save").disabled = true;
+  try{
+    await requestJSON("/api/configs", {method:"POST", headers:jsonHeaders(), body:JSON.stringify(payload)});
+    setStatus("cfg-status", "Saved.", "ok");
+    resetConfigForm();
+    await loadConfigs();
+  }catch(err){
+    setStatus("cfg-status", err.message, "err");
+  }finally{
+    $("cfg-save").disabled = false;
+  }
+}
+
+async function toggleConfig(input){
+  const id = input.dataset.id;
+  const enabled = input.checked;
+  try{
+    await requestJSON(`/api/configs?id=${encodeURIComponent(id)}`, {method:"PATCH", headers:jsonHeaders(), body:JSON.stringify({enabled})});
+    await loadConfigs();
+  }catch(err){
+    input.checked = !enabled;
+    setStatus("cfg-status", err.message, "err");
+  }
+}
+
+async function viewTrace(traceID, options = {}){
+  if(!traceID) return;
+  const push = options.push !== false;
+  if(push) history.pushState({traceID}, "", `/traces/${encodeURIComponent(traceID)}`);
+  document.querySelectorAll(".section").forEach(section => section.classList.remove("active"));
+  document.querySelectorAll(".nav button").forEach(button => button.classList.remove("active"));
+  $("trace-detail").classList.add("active");
+  $("trace-subtitle").textContent = traceID;
+  $("trace-content").innerHTML = `<div class="panel"><div class="empty">Loading trace...</div></div>`;
+  try{
+    const {data} = await requestJSON(`/api/traces/${encodeURIComponent(traceID)}`, {headers: authHeader()});
+    renderTrace(data);
+  }catch(err){
+    $("trace-content").innerHTML = `<div class="panel"><div class="empty">${escapeHTML(err.message)}</div></div>`;
+  }
+}
+
+function renderTrace(trace){
+  const logs = trace.logs || [];
+  const guardrails = trace.guardrail_events || [];
+  const shadows = trace.shadow_logs || [];
+  const feedback = trace.feedback || [];
+  const totalCost = logs.reduce((sum, log) => sum + Number(log.cost || 0), 0) + shadows.reduce((sum, log) => sum + Number(log.cost || 0), 0);
+  const totalTokens = logs.reduce((sum, log) => sum + Number(log.total_tokens || 0), 0);
+  const latency = logs.reduce((sum, log) => sum + Number(log.latency_ms || 0), 0);
+  $("trace-content").innerHTML = `
+    <div class="panel">
+      <div class="trace-summary">
+        <div class="mini"><span class="label">Requests</span><strong>${formatInt(logs.length)}</strong></div>
+        <div class="mini"><span class="label">Guardrails</span><strong>${formatInt(guardrails.length)}</strong></div>
+        <div class="mini"><span class="label">Tokens</span><strong>${formatInt(totalTokens)}</strong></div>
+        <div class="mini"><span class="label">Cost</span><strong>${formatMoney(totalCost)}</strong></div>
+        <div class="mini"><span class="label">Latency</span><strong>${formatMs(latency)}</strong></div>
+      </div>
+      ${renderWaterfall(trace)}
+    </div>
+    <div class="panel">
+      <div class="panel-header"><h2>Trace Payload</h2></div>
+      <div class="panel-body"><pre class="raw-block">${escapeHTML(JSON.stringify({logs, guardrail_events:guardrails, shadow_logs:shadows, feedback}, null, 2))}</pre></div>
+    </div>
+  `;
+}
+
+function renderWaterfall(trace){
+  const events = buildTraceEvents(trace);
+  if(!events.length) return `<div class="empty">No trace events found.</div>`;
+  const minStart = Math.min(...events.map(event => event.start));
+  const maxEnd = Math.max(...events.map(event => event.start + event.duration));
+  const total = Math.max(maxEnd - minStart, 1);
+  const rows = events.map(event => {
+    const left = Math.max(((event.start - minStart) / total) * 100, 0);
+    const width = event.duration > 0 ? Math.max((event.duration / total) * 100, 3) : 2;
+    return `<div class="waterfall-row">
+      <div class="span-label"><strong>${escapeHTML(event.name)}</strong><span>${escapeHTML(event.detail)}</span></div>
+      <div class="track"><div class="bar ${escapeAttr(event.kind)}" style="--left:${left.toFixed(2)}%;--width:${Math.min(width, 100 - left).toFixed(2)}%"></div></div>
+      <div class="duration">${event.duration > 0 ? formatMs(event.duration) : "event"}</div>
+    </div>`;
+  }).join("");
+  return `<div class="waterfall">${rows}</div>`;
+}
+
+function buildTraceEvents(trace){
+  const events = [];
+  for(const log of trace.logs || []){
+    const start = parseDate(log.timestamp);
+    events.push({
+      start,
+      duration: Number(log.latency_ms || 0),
+      kind: log.status === "success" ? "success" : log.status === "denied" ? "denied" : "error",
+      name: `${log.provider || "gateway"} / ${log.model || "model"}`,
+      detail: `${log.status || "unknown"} - cache ${log.cached ? "hit" : "miss"} - ${formatInt(log.total_tokens)} tokens - ${formatMoney(log.cost)}`
+    });
+  }
+  for(const event of trace.guardrail_events || []){
+    events.push({
+      start: parseDate(event.timestamp),
+      duration: 0,
+      kind: event.action === "deny" ? "denied" : "event",
+      name: `Guardrail: ${event.type || "check"}`,
+      detail: `${event.action || "log"} - request ${shortID(event.request_id)}`
+    });
+  }
+  for(const shadow of trace.shadow_logs || []){
+    events.push({
+      start: parseDate(shadow.timestamp),
+      duration: Number(shadow.latency_ms || 0),
+      kind: shadow.status === "success" ? "event" : "error",
+      name: `Shadow: ${shadow.shadow_provider || "provider"}`,
+      detail: `${shadow.primary_provider || "primary"} -> ${shadow.shadow_provider || "shadow"} - ${shadow.status || "unknown"} - ${formatMoney(shadow.cost)}`
+    });
+  }
+  for(const item of trace.feedback || []){
+    events.push({
+      start: parseDate(item.timestamp),
+      duration: 0,
+      kind: "event",
+      name: `Feedback: ${item.rating || item.score || "score"}`,
+      detail: item.comment || item.user_id || "feedback"
+    });
+  }
+  return events.sort((a,b) => a.start - b.start);
+}
+
+async function createKey(){
+  const name = $("key-name").value.trim();
+  const rateLimit = Number($("key-rate").value || 60);
+  if(!name) return;
+  try{
+    const {data} = await requestJSON("/api/keys", {method:"POST", headers:jsonHeaders(), body:JSON.stringify({name, rate_limit: rateLimit})});
+    $("key-result").innerHTML = `<span class="chip"><strong>Key:</strong>&nbsp;<code>${escapeHTML(data.key || "")}</code></span>`;
+    $("key-name").value = "";
+    await loadKeys();
+  }catch(err){
+    $("key-result").innerHTML = `<span class="chip">${escapeHTML(err.message)}</span>`;
+  }
+}
+
+async function loadKeys(){
+  try{
+    const {data} = await requestJSON("/api/keys", {headers: authHeader()});
+    const keys = data.keys || [];
+    const el = $("keys-list");
+    if(!keys.length){el.innerHTML = `<div class="empty">No API keys created yet.</div>`;return;}
+    el.innerHTML = `<table><thead><tr><th>Name</th><th>Prefix</th><th>Rate Limit</th><th>Created</th><th>Status</th><th>Action</th></tr></thead><tbody>` +
+      keys.map(key => `<tr>
+        <td>${escapeHTML(key.name)}</td>
+        <td><code>${escapeHTML(key.key_prefix)}</code></td>
+        <td>${formatInt(key.rate_limit)}/min</td>
+        <td>${escapeHTML(new Date(key.created_at).toLocaleDateString())}</td>
+        <td><span class="badge-sm ${key.enabled ? "status-success" : "status-error"}">${key.enabled ? "active" : "disabled"}</span></td>
+        <td><button type="button" class="btn btn-danger btn-small key-delete" data-id="${escapeAttr(key.id)}">Revoke</button></td>
+      </tr>`).join("") + `</tbody></table>`;
+    el.querySelectorAll(".key-delete").forEach(button => button.addEventListener("click", () => deleteKey(button.dataset.id)));
+  }catch(err){
+    $("keys-list").innerHTML = `<div class="empty">${escapeHTML(err.message)}</div>`;
+  }
+}
+
+async function deleteKey(id){
+  if(!confirm("Revoke this key?")) return;
+  await requestJSON(`/api/keys?id=${encodeURIComponent(id)}`, {method:"DELETE", headers: authHeader()});
   loadKeys();
 }
 
-// Prompts
-async function createPrompt() {
-  const name = document.getElementById('prompt-name').value;
-  const template = document.getElementById('prompt-template').value;
-  if(!name||!template) return alert('Name and template required');
-  await postJSON('/api/prompts', {name, template});
-  document.getElementById('prompt-name').value = '';
-  document.getElementById('prompt-template').value = '';
+async function createPrompt(){
+  const name = $("prompt-name").value.trim();
+  const template = $("prompt-template").value.trim();
+  if(!name || !template) return;
+  await requestJSON("/api/prompts", {method:"POST", headers:jsonHeaders(), body:JSON.stringify({name, template})});
+  $("prompt-name").value = "";
+  $("prompt-template").value = "";
   loadPrompts();
 }
 
-async function loadPrompts() {
-  const data = await fetchJSON('/api/prompts');
-  const prompts = data?.prompts||[];
-  if(!prompts.length) { document.getElementById('prompts-list').innerHTML='<div class="empty">No prompts created yet</div>'; return; }
-  let html = '<table><thead><tr><th>Name</th><th>Version</th><th>Variables</th><th>Updated</th></tr></thead><tbody>';
-  prompts.forEach(p => {
-    html += `<tr><td><strong>${p.name}</strong></td><td>v${p.version}</td><td>${(p.variables||[]).map(v=>'{{'+v+'}}').join(', ')||'—'}</td><td>${new Date(p.updated_at).toLocaleDateString()}</td></tr>`;
-  });
-  html += '</tbody></table>';
-  document.getElementById('prompts-list').innerHTML = html;
-}
-
-// Providers
-async function loadProviders() {
-  const data = await fetchJSON('/api/metrics/providers');
-  const providers = data?.providers||[];
-  if(!providers.length) { document.getElementById('provider-cards').innerHTML=''; document.getElementById('provider-table').innerHTML='<div class="empty">No provider data yet</div>'; return; }
-  let cards = '';
-  providers.forEach(p => {
-    cards += `<div class="card"><div class="label">${p.provider}</div><div class="value">${p.request_count}</div><div class="sub">${(p.avg_latency_ms||0).toFixed(0)}ms avg · $${(p.total_cost||0).toFixed(4)}</div></div>`;
-  });
-  document.getElementById('provider-cards').innerHTML = cards;
-  let html = '<table><thead><tr><th>Provider</th><th>Requests</th><th>Avg Latency</th><th>Total Cost</th><th>Error Rate</th></tr></thead><tbody>';
-  providers.forEach(p => {
-    html += `<tr><td><span class="provider-badge">${p.provider}</span></td><td>${p.request_count}</td><td>${(p.avg_latency_ms||0).toFixed(0)}ms</td><td>$${(p.total_cost||0).toFixed(4)}</td><td>${((p.error_rate||0)*100).toFixed(1)}%</td></tr>`;
-  });
-  html += '</tbody></table>';
-  document.getElementById('provider-table').innerHTML = html;
-}
-
-// Playground
-async function runPlayground() {
-  const model = document.getElementById('pg-model').value;
-  const system = document.getElementById('pg-system').value;
-  const user = document.getElementById('pg-user').value;
-  const temp = parseFloat(document.getElementById('pg-temp').value);
-  const maxTokens = parseInt(document.getElementById('pg-max').value);
-  const stream = document.getElementById('pg-stream').checked;
-  if(!user) return alert('Enter a message');
-  const messages = [];
-  if(system) messages.push({role:'system',content:system});
-  messages.push({role:'user',content:user});
-  const body = {model, messages, temperature:temp, max_tokens:maxTokens, stream};
-  const out = document.getElementById('pg-response');
-  const meta = document.getElementById('pg-meta');
-  out.textContent = '';
-  meta.innerHTML = '<span>Sending\u2026</span>';
-  document.getElementById('pg-send').disabled = true;
-  const start = Date.now();
-  try {
-    if(stream) {
-      const resp = await fetch('/v1/chat/completions', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      while(true) {
-        const {done, value} = await reader.read();
-        if(done) break;
-        buffer += decoder.decode(value, {stream:true});
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
-        for(const line of lines) {
-          if(!line.startsWith('data: ')) continue;
-          const payload = line.slice(6).trim();
-          if(payload === '[DONE]') continue;
-          try { const chunk = JSON.parse(payload); out.textContent += chunk.choices?.[0]?.delta?.content || ''; } catch(e) {}
-        }
-      }
-    } else {
-      const resp = await postJSON('/v1/chat/completions', body);
-      out.textContent = resp.choices?.[0]?.message?.content || JSON.stringify(resp, null, 2);
-    }
-    meta.innerHTML = `<span>\u23f1 ${Date.now()-start}ms</span><span>\ud83d\udce6 ${model}</span>`;
-  } catch(e) { out.textContent = 'Error: ' + e.message; meta.innerHTML = ''; }
-  document.getElementById('pg-send').disabled = false;
-}
-
-// Configs
-async function loadConfigs() {
-  const data = await fetchJSON('/api/configs?include_disabled=true');
-  const configs = data?.configs || [];
-  const el = document.getElementById('configs-list');
-  if(!configs.length) { el.innerHTML = '<div class="empty">No configs yet. Create one above.</div>'; return; }
-  let html = '';
-  configs.forEach(c => {
-    html += `<div class="config-list-item"><div><strong>${c.name}</strong><br><span style="font-size:12px;color:var(--text2)">${c.description||c.id} \xb7 ${c.format}</span></div><div style="display:flex;gap:12px;align-items:center"><label class="toggle"><input type="checkbox" ${c.enabled?'checked':''} onchange="toggleConfig('${c.id}',this.checked)"><span class="slider"></span></label><button class="btn btn-danger" style="padding:4px 12px;font-size:12px" onclick="deleteConfig('${c.id}')">Delete</button></div></div>`;
-  });
-  el.innerHTML = html;
-}
-async function createConfig() {
-  const name = document.getElementById('cfg-name').value;
-  const desc = document.getElementById('cfg-desc').value;
-  const body = document.getElementById('cfg-body').value;
-  if(!name || !body) return alert('Name and body are required');
-  const resp = await postJSON('/api/configs', {name, description:desc, body, format:'yaml'});
-  if(resp.error) { alert(resp.error); return; }
-  document.getElementById('cfg-name').value=''; document.getElementById('cfg-desc').value=''; document.getElementById('cfg-body').value='';
-  loadConfigs();
-}
-async function deleteConfig(id) { if(!confirm('Delete?')) return; await fetch(`/api/configs?id=${id}`,{method:'DELETE'}); loadConfigs(); }
-async function toggleConfig(id, enabled) { await postJSON('/api/configs', {id, enabled, name:'_', body:'providers: []'}); loadConfigs(); }
-
-// Trace Waterfall
-async function viewTrace(traceId) {
-  const data = await fetchJSON(`/api/traces/${traceId}`);
-  if(!data) { alert('Trace not found'); return; }
-  showSection('trace-detail');
-  const el = document.getElementById('trace-content');
-  const spans = data.spans || data.logs || [];
-  let cards = `<div class="cards"><div class="card"><div class="label">Trace ID</div><div class="value" style="font-size:14px;word-break:break-all">${traceId}</div></div><div class="card green"><div class="label">Spans</div><div class="value">${Math.max(spans.length,1)}</div></div></div>`;
-  let timeline = '<div class="panel"><div class="panel-header"><h2>Timeline</h2></div><div class="trace-timeline">';
-  if(!spans.length) {
-    const c = data.status==='success'?'var(--green)':'var(--red)';
-    timeline += `<div class="trace-span"><div class="dot" style="background:${c}"></div><div class="info"><div class="name">${data.provider||'gateway'} \u2192 ${data.model||'?'}</div><div class="detail">Status: ${data.status||'?'} \xb7 Tokens: ${data.total_tokens||0} \xb7 $${(data.cost||0).toFixed(5)}</div><div class="trace-bar" style="width:100%;background:${c}"></div></div><div class="duration">${(data.latency_ms||0).toFixed(0)}ms</div></div>`;
-  } else {
-    const mx = Math.max(...spans.map(s=>s.latency_ms||0),1);
-    spans.forEach(s => {
-      const c = s.status==='success'?'var(--green)':s.status==='denied'?'var(--yellow)':'var(--red)';
-      const w = Math.max(((s.latency_ms||0)/mx)*100,5);
-      timeline += `<div class="trace-span"><div class="dot" style="background:${c}"></div><div class="info"><div class="name">${s.provider||s.type||'span'} \u2192 ${s.model||''}</div><div class="detail">${s.status||'ok'} \xb7 ${s.total_tokens||0} tokens</div><div class="trace-bar" style="width:${w}%;background:${c}"></div></div><div class="duration">${(s.latency_ms||0).toFixed(0)}ms</div></div>`;
-    });
+async function loadPrompts(){
+  try{
+    const {data} = await requestJSON("/api/prompts", {headers: authHeader()});
+    const prompts = data.prompts || [];
+    if(!prompts.length){$("prompts-list").innerHTML = `<div class="empty">No prompts created yet.</div>`;return;}
+    $("prompts-list").innerHTML = `<table><thead><tr><th>Name</th><th>Version</th><th>Variables</th><th>Updated</th></tr></thead><tbody>` +
+      prompts.map(prompt => `<tr>
+        <td>${escapeHTML(prompt.name)}</td>
+        <td>v${formatInt(prompt.version)}</td>
+        <td>${escapeHTML((prompt.variables || []).map(name => "{{" + name + "}}").join(", ") || "none")}</td>
+        <td>${escapeHTML(new Date(prompt.updated_at).toLocaleDateString())}</td>
+      </tr>`).join("") + `</tbody></table>`;
+  }catch(err){
+    $("prompts-list").innerHTML = `<div class="empty">${escapeHTML(err.message)}</div>`;
   }
-  timeline += '</div></div>';
-  el.innerHTML = cards + timeline;
 }
 
-// Init
+async function loadProviders(){
+  try{
+    const {data} = await requestJSON("/api/metrics/providers", {headers: authHeader()});
+    const providers = data.providers || [];
+    if(!providers.length){
+      $("provider-cards").innerHTML = "";
+      $("provider-table").innerHTML = `<div class="empty">No provider data yet.</div>`;
+      return;
+    }
+    $("provider-cards").innerHTML = providers.map(provider => `<div class="card">
+      <div class="label">${escapeHTML(provider.provider)}</div>
+      <div class="value">${formatInt(provider.request_count)}</div>
+      <div class="sub">${formatMs(provider.avg_latency_ms)} avg - ${formatMoney(provider.total_cost)}</div>
+    </div>`).join("");
+    $("provider-table").innerHTML = `<table><thead><tr><th>Provider</th><th>Requests</th><th>Avg Latency</th><th>Total Cost</th><th>Error Rate</th></tr></thead><tbody>` +
+      providers.map(provider => `<tr>
+        <td><span class="provider-badge">${escapeHTML(provider.provider)}</span></td>
+        <td>${formatInt(provider.request_count)}</td>
+        <td>${formatMs(provider.avg_latency_ms)}</td>
+        <td>${formatMoney(provider.total_cost)}</td>
+        <td>${Number((provider.error_rate || 0) * 100).toFixed(1)}%</td>
+      </tr>`).join("") + `</tbody></table>`;
+  }catch(err){
+    $("provider-table").innerHTML = `<div class="empty">${escapeHTML(err.message)}</div>`;
+  }
+}
+
+$("ov-window").addEventListener("change", loadMetrics);
+$("log-provider").addEventListener("change", loadLogs);
+$("log-status").addEventListener("change", loadLogs);
+$("trace-open").addEventListener("click", () => viewTrace($("trace-lookup").value.trim()));
+$("trace-back").addEventListener("click", () => showSection(lastLogsSection || "logs"));
+$("pg-send").addEventListener("click", runPlayground);
+$("pg-clear").addEventListener("click", () => {$("pg-response").textContent = "No output yet.";$("pg-meta").innerHTML = "";setStatus("pg-status", "", "");});
+$("pg-temp").addEventListener("input", event => {$("pg-temp-val").textContent = Number(event.target.value).toFixed(1);});
+$("pg-top-p").addEventListener("input", event => {$("pg-top-p-val").textContent = Number(event.target.value).toFixed(2);});
+$("pg-api-key").addEventListener("change", event => {
+  const value = event.target.value.trim();
+  if(value) sessionStorage.setItem("omniswitch.playgroundKey", value);
+});
+$("cfg-save").addEventListener("click", saveConfig);
+$("cfg-reset").addEventListener("click", resetConfigForm);
+$("cfg-new").addEventListener("click", resetConfigForm);
+$("cfg-refresh").addEventListener("click", loadConfigs);
+$("key-create").addEventListener("click", createKey);
+$("prompt-create").addEventListener("click", createPrompt);
+
+const storedKey = sessionStorage.getItem("omniswitch.playgroundKey");
+if(storedKey) $("pg-api-key").value = storedKey;
+routeFromLocation();
 loadMetrics();
-setInterval(loadMetrics, 15000);
+loadModels();
+loadConfigs();
+setInterval(() => {
+  if(document.visibilityState === "visible" && $("overview").classList.contains("active")) loadMetrics();
+}, 15000);
 </script>
 </body>
 </html>
-
