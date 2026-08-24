@@ -1,0 +1,110 @@
+version: 2
+
+project_name: omniswitch
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: gateway
+    main: ./cmd/gateway
+    binary: omniswitch
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+brews:
+  - repository:
+      owner: omniswitch-dev
+      name: homebrew-tap
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    folder: Formula
+    homepage: https://omniswitch.dev
+    description: Open-source AI gateway, guardrail, and agent-protocol layer
+    license: Apache-2.0
+    install: |
+      bin.install("omniswitch")
+
+dockers:
+  - image_templates:
+      - ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}-amd64
+    goos: linux
+    goarch: amd64
+    dockerfile: Dockerfile.goreleaser
+    use: buildx
+    build_flag_templates:
+      - --platform=linux/amd64
+      - --label=org.opencontainers.image.title={{ .ProjectName }}
+      - --label=org.opencontainers.image.version={{ .Version }}
+      - --label=org.opencontainers.image.source=https://github.com/omniswitch-dev/omniswitch
+      - --label=org.opencontainers.image.licenses=Apache-2.0
+  - image_templates:
+      - ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}-arm64
+    goos: linux
+    goarch: arm64
+    dockerfile: Dockerfile.goreleaser
+    use: buildx
+    build_flag_templates:
+      - --platform=linux/arm64
+      - --label=org.opencontainers.image.title={{ .ProjectName }}
+      - --label=org.opencontainers.image.version={{ .Version }}
+      - --label=org.opencontainers.image.source=https://github.com/omniswitch-dev/omniswitch
+      - --label=org.opencontainers.image.licenses=Apache-2.0
+
+docker_manifests:
+  - name_template: ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}
+    image_templates:
+      - ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}-amd64
+      - ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}-arm64
+  - name_template: ghcr.io/omniswitch-dev/omniswitch:latest
+    image_templates:
+      - ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}-amd64
+      - ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}-arm64
+
+release:
+  draft: false
+  mode: replace
+  header: |
+    ## OmniSwitch {{ .Tag }}
+    Download the archive for your platform, extract, and run `./omniswitch`.
+    Docker: `docker run -p 8080:8080 ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}`

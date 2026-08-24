@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/omniswitch-dev/omniswitch/internal/accel"
 	"github.com/omniswitch-dev/omniswitch/internal/provider"
 )
 
@@ -25,9 +26,21 @@ type Engine struct {
 	checks    []Check
 	actions   map[string]string
 	rules     []Rule
+	compiled  []compiledRule
 	toolRules []ToolRule
 	webhooks  []webhookCheck
 	llmJudges []llmJudgeCheck
+
+	// accelScanners hold the Rust-accelerated single-pass scanners for the
+	// input and output stages. nil when acceleration is unavailable; any
+	// pattern the accelerator rejects stays in compiled for the Go path.
+	accelInput  *accel.Scanner
+	accelOutput *accel.Scanner
+}
+
+type compiledRule struct {
+	rule Rule
+	re   *regexp.Regexp
 }
 
 type Check func(input GuardrailInput) Result
@@ -116,11 +129,13 @@ func NewEngineWithConfig(config Config) *Engine {
 		}
 	}
 	rules := make([]Rule, 0, len(config.Rules))
+	compiled := make([]compiledRule, 0, len(config.Rules))
 	for _, rule := range config.Rules {
 		if strings.TrimSpace(rule.Name) == "" || strings.TrimSpace(rule.Pattern) == "" {
 			continue
 		}
-		if _, err := regexp.Compile(rule.Pattern); err != nil {
+		pattern, err := regexp.Compile(rule.Pattern)
+		if err != nil {
 			continue
 		}
 		if rule.Stage == "" {
@@ -133,6 +148,7 @@ func NewEngineWithConfig(config Config) *Engine {
 			rule.Message = "Custom guardrail triggered: " + rule.Name
 		}
 		rules = append(rules, rule)
+		compiled = append(compiled, compiledRule{rule: rule, re: pattern})
 	}
 	toolRules := make([]ToolRule, 0, len(config.ToolRules))
 	for _, rule := range config.ToolRules {
@@ -152,10 +168,78 @@ func NewEngineWithConfig(config Config) *Engine {
 			llmJudges = append(llmJudges, llmJudgeCheck{config: normalized, client: &http.Client{Timeout: normalized.Timeout}})
 		}
 	}
-	return &Engine{
+	engine := &Engine{
 		checks:  []Check{checkPII, checkPromptInjection, checkSQLInjection, checkToxicContent, checkCodeLeakage},
-		actions: actions, rules: rules, toolRules: toolRules, webhooks: webhooks, llmJudges: llmJudges,
+		actions: actions, rules: rules, compiled: compiled, toolRules: toolRules, webhooks: webhooks, llmJudges: llmJudges,
 	}
+	engine.initAccelerator()
+	return engine
+}
+
+// initAccelerator builds single-pass WASM scanners for both stages. Patterns
+// rejected by the accelerator's engine are left on the Go path so behavior
+// never changes when the module is absent or a pattern is unsupported.
+func (e *Engine) initAccelerator() {
+	if !accel.Available() || len(e.compiled) == 0 {
+		return
+	}
+	inputPatterns := make([]string, 0, len(e.compiled))
+	outputPatterns := make([]string, 0, len(e.compiled))
+	for _, cr := range e.compiled {
+		stage := strings.ToLower(cr.rule.Stage)
+		if stage == "input" || stage == "both" {
+			inputPatterns = append(inputPatterns, cr.rule.Pattern)
+		} else {
+			inputPatterns = append(inputPatterns, "")
+		}
+		if stage == "output" || stage == "both" {
+			outputPatterns = append(outputPatterns, cr.rule.Pattern)
+		} else {
+			outputPatterns = append(outputPatterns, "")
+		}
+	}
+	rejected, err := accel.ValidatePatterns(append(append([]string(nil), inputPatterns...), outputPatterns...))
+	if err != nil {
+		return // pure-Go path remains authoritative.
+	}
+	rejectedSet := map[int]bool{}
+	for _, idx := range rejected {
+		rejectedSet[idx] = true
+	}
+	goInput := make([]string, len(inputPatterns))
+	goOutput := make([]string, len(outputPatterns))
+	accelInput := make([]string, len(inputPatterns))
+	accelOutput := make([]string, len(outputPatterns))
+	fallback := false
+	for i := range e.compiled {
+		if rejectedSet[i] || rejectedSet[i+len(e.compiled)] {
+			fallback = true
+			goInput[i], goOutput[i] = inputPatterns[i], outputPatterns[i]
+			continue
+		}
+		accelInput[i], accelOutput[i] = inputPatterns[i], outputPatterns[i]
+	}
+	scannerIn, errIn := accel.NewScanner(accelInput)
+	scannerOut, errOut := accel.NewScanner(accelOutput)
+	if errIn != nil || errOut != nil {
+		return
+	}
+	e.accelInput, e.accelOutput = scannerIn, scannerOut
+	if fallback {
+		e.compiled = retainGoRules(e.compiled, goInput, goOutput)
+	} else {
+		e.compiled = nil
+	}
+}
+
+func retainGoRules(compiled []compiledRule, goInput, goOutput []string) []compiledRule {
+	var kept []compiledRule
+	for i, cr := range compiled {
+		if goInput[i] != "" || goOutput[i] != "" {
+			kept = append(kept, cr)
+		}
+	}
+	return kept
 }
 
 func (e *Engine) EvaluateInput(messages []provider.Message) []Result {
@@ -193,15 +277,34 @@ func (e *Engine) evaluate(ctx context.Context, input GuardrailInput) []Result {
 	if input.IsInput {
 		stage = "input"
 	}
-	for _, rule := range e.rules {
-		if rule.Stage != "both" && rule.Stage != stage {
+	scanner := e.accelOutput
+	if input.IsInput {
+		scanner = e.accelInput
+	}
+	if scanner != nil && text != "" {
+		if matches, err := scanner.ScanFirst([]byte(text)); err == nil {
+			emitted := make(map[int]bool, len(matches))
+			for _, m := range matches {
+				if m.RuleIndex < 0 || m.RuleIndex >= len(e.rules) || emitted[m.RuleIndex] {
+					continue
+				}
+				rule := e.rules[m.RuleIndex]
+				if rule.Stage != "both" && rule.Stage != stage {
+					continue
+				}
+				emitted[m.RuleIndex] = true
+				triggered = append(triggered, Result{Triggered: true, Type: rule.Name, Action: rule.Action, Message: rule.Message, Details: rule.Pattern})
+			}
+		}
+	}
+	for _, cr := range e.compiled {
+		if cr.rule.Stage != "both" && cr.rule.Stage != stage {
 			continue
 		}
-		pattern, err := regexp.Compile(rule.Pattern)
-		if err != nil || !pattern.MatchString(text) {
+		if !cr.re.MatchString(text) {
 			continue
 		}
-		triggered = append(triggered, Result{Triggered: true, Type: rule.Name, Action: rule.Action, Message: rule.Message, Details: rule.Pattern})
+		triggered = append(triggered, Result{Triggered: true, Type: cr.rule.Name, Action: cr.rule.Action, Message: cr.rule.Message, Details: cr.rule.Pattern})
 	}
 	for _, rule := range e.toolRules {
 		if rule.Stage != "both" && rule.Stage != stage {

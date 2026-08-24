@@ -42,6 +42,17 @@ type RequestLog struct {
 	DecisionReason string    `json:"decision_reason,omitempty"`
 	ErrorMessage   string    `json:"error,omitempty"`
 	Cached         bool      `json:"cached"`
+	Metadata       string    `json:"metadata,omitempty"`
+}
+
+// TraceSpan captures a single stage of request processing for waterfall views.
+type TraceSpan struct {
+	Name       string         `json:"name"`
+	Provider   string         `json:"provider,omitempty"`
+	Start      time.Time      `json:"start"`
+	DurationMs float64        `json:"duration_ms"`
+	Status     string         `json:"status"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
 }
 
 // APIKey represents a stored API key.
@@ -418,6 +429,9 @@ func (s *Store) migrate() error {
 	if err := s.ensureColumn("request_logs", "session_id", "TEXT"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn("request_logs", "metadata", "TEXT"); err != nil {
+		return err
+	}
 	if err := s.ensureColumn("api_keys", "monthly_cost_budget", "REAL DEFAULT 0"); err != nil {
 		return err
 	}
@@ -453,12 +467,12 @@ func (s *Store) InsertLog(ctx context.Context, log RequestLog) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO request_logs (id, timestamp, trace_id, session_id, provider, model, api_key_id, status,
 			input_tokens, output_tokens, total_tokens, latency_ms, cost,
-			request_body, response_body, decision, decision_reason, error_message, cached)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			request_body, response_body, decision, decision_reason, error_message, cached, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		log.ID, log.Timestamp.Format(time.RFC3339Nano), log.TraceID, log.SessionID, log.Provider, log.Model,
 		log.APIKeyID, log.Status, log.InputTokens, log.OutputTokens, log.TotalTokens,
 		log.LatencyMs, log.Cost, log.RequestBody, log.ResponseBody,
-		log.Decision, log.DecisionReason, log.ErrorMessage, boolToInt(log.Cached),
+		log.Decision, log.DecisionReason, log.ErrorMessage, boolToInt(log.Cached), log.Metadata,
 	)
 	return err
 }
@@ -496,7 +510,7 @@ func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, statu
 	}
 
 	query := fmt.Sprintf(
-		"SELECT id, timestamp, trace_id, session_id, provider, model, api_key_id, status, input_tokens, output_tokens, total_tokens, latency_ms, cost, COALESCE(request_body, ''), COALESCE(response_body, ''), decision, decision_reason, error_message, cached FROM request_logs WHERE %s ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+		"SELECT id, timestamp, trace_id, session_id, provider, model, api_key_id, status, input_tokens, output_tokens, total_tokens, latency_ms, cost, COALESCE(request_body, ''), COALESCE(response_body, ''), decision, decision_reason, error_message, cached, COALESCE(metadata, '') FROM request_logs WHERE %s ORDER BY timestamp DESC LIMIT ? OFFSET ?",
 		where,
 	)
 	args = append(args, limit, offset)
@@ -513,7 +527,7 @@ func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, statu
 		var cached int
 		if err := rows.Scan(&l.ID, &ts, &l.TraceID, &l.SessionID, &l.Provider, &l.Model, &l.APIKeyID,
 			&l.Status, &l.InputTokens, &l.OutputTokens, &l.TotalTokens,
-			&l.LatencyMs, &l.Cost, &l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached); err != nil {
+			&l.LatencyMs, &l.Cost, &l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached, &l.Metadata); err != nil {
 			return nil, 0, err
 		}
 		l.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
@@ -703,7 +717,7 @@ func (s *Store) GetTrace(ctx context.Context, traceID, apiKeyID string) (TraceDe
 	rows, err := s.db.QueryContext(ctx,
 		fmt.Sprintf(`SELECT id, timestamp, trace_id, session_id, provider, model, api_key_id, status,
 			input_tokens, output_tokens, total_tokens, latency_ms, cost, COALESCE(request_body, ''),
-			COALESCE(response_body, ''), decision, decision_reason, error_message, cached
+			COALESCE(response_body, ''), decision, decision_reason, error_message, cached, COALESCE(metadata, '')
 		FROM request_logs WHERE %s ORDER BY timestamp ASC`, where),
 		args...,
 	)
@@ -718,7 +732,7 @@ func (s *Store) GetTrace(ctx context.Context, traceID, apiKeyID string) (TraceDe
 		var cached int
 		if err := rows.Scan(&l.ID, &ts, &l.TraceID, &l.SessionID, &l.Provider, &l.Model, &l.APIKeyID,
 			&l.Status, &l.InputTokens, &l.OutputTokens, &l.TotalTokens, &l.LatencyMs, &l.Cost,
-			&l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached); err != nil {
+			&l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached, &l.Metadata); err != nil {
 			return detail, err
 		}
 		l.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)

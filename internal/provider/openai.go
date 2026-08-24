@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -129,6 +131,172 @@ func (o *OpenAI) Embeddings(ctx context.Context, req EmbeddingRequest) (Embeddin
 	}
 	meta.Cost = EstimateCost("openai", req.Model, response.Usage)
 	return response, meta, nil
+}
+
+func (o *OpenAI) ImageGeneration(ctx context.Context, req ImageRequest) (ImageResponse, ProviderMeta, error) {
+	start := time.Now()
+	meta := ProviderMeta{Provider: "openai", Model: req.Model, Timestamp: start}
+	body, err := json.Marshal(req)
+	if err != nil {
+		meta.Error = err.Error()
+		return ImageResponse{}, meta, fmt.Errorf("marshal image request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/images/generations", bytes.NewReader(body))
+	if err != nil {
+		meta.Error = err.Error()
+		return ImageResponse{}, meta, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
+	resp, err := o.client.Do(httpReq)
+	if err != nil {
+		meta.Error = err.Error()
+		meta.Latency = time.Since(start)
+		return ImageResponse{}, meta, fmt.Errorf("openai image request: %w", err)
+	}
+	defer resp.Body.Close()
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		meta.Error = err.Error()
+		meta.Latency = time.Since(start)
+		return ImageResponse{}, meta, fmt.Errorf("read image response: %w", err)
+	}
+	meta.Latency = time.Since(start)
+	if resp.StatusCode != http.StatusOK {
+		meta.Error = string(payload)
+		return ImageResponse{}, meta, fmt.Errorf("openai image error (status %d): %s", resp.StatusCode, string(payload))
+	}
+	var response ImageResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		meta.Error = err.Error()
+		return ImageResponse{}, meta, fmt.Errorf("decode image response: %w", err)
+	}
+	meta.Cost = estimateOpenAIImageCost(req)
+	return response, meta, nil
+}
+
+func (o *OpenAI) Transcription(ctx context.Context, req TranscriptionRequest) (TranscriptionResponse, ProviderMeta, error) {
+	start := time.Now()
+	meta := ProviderMeta{Provider: "openai", Model: req.Model, Timestamp: start}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if req.File == nil {
+		return TranscriptionResponse{}, meta, fmt.Errorf("audio file is required")
+	}
+	filename := strings.TrimSpace(req.Filename)
+	if filename == "" {
+		filename = "audio"
+	}
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		return TranscriptionResponse{}, meta, fmt.Errorf("create multipart file: %w", err)
+	}
+	if _, err := io.Copy(part, req.File); err != nil {
+		return TranscriptionResponse{}, meta, fmt.Errorf("copy multipart file: %w", err)
+	}
+	if err := writer.WriteField("model", req.Model); err != nil {
+		return TranscriptionResponse{}, meta, err
+	}
+	if req.Language != "" {
+		_ = writer.WriteField("language", req.Language)
+	}
+	if req.Prompt != "" {
+		_ = writer.WriteField("prompt", req.Prompt)
+	}
+	if req.ResponseFormat != "" {
+		_ = writer.WriteField("response_format", req.ResponseFormat)
+	}
+	if req.Temperature != nil {
+		_ = writer.WriteField("temperature", fmt.Sprintf("%g", *req.Temperature))
+	}
+	if err := writer.Close(); err != nil {
+		return TranscriptionResponse{}, meta, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/audio/transcriptions", &body)
+	if err != nil {
+		return TranscriptionResponse{}, meta, err
+	}
+	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
+	httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
+	resp, err := o.client.Do(httpReq)
+	if err != nil {
+		meta.Error = err.Error()
+		meta.Latency = time.Since(start)
+		return TranscriptionResponse{}, meta, fmt.Errorf("openai transcription request: %w", err)
+	}
+	defer resp.Body.Close()
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		meta.Error = err.Error()
+		meta.Latency = time.Since(start)
+		return TranscriptionResponse{}, meta, fmt.Errorf("read transcription response: %w", err)
+	}
+	meta.Latency = time.Since(start)
+	if resp.StatusCode != http.StatusOK {
+		meta.Error = string(payload)
+		return TranscriptionResponse{}, meta, fmt.Errorf("openai transcription error (status %d): %s", resp.StatusCode, string(payload))
+	}
+	var response TranscriptionResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		meta.Error = err.Error()
+		return TranscriptionResponse{}, meta, fmt.Errorf("decode transcription response: %w", err)
+	}
+	return response, meta, nil
+}
+
+func (o *OpenAI) Speech(ctx context.Context, req SpeechRequest) (io.ReadCloser, string, ProviderMeta, error) {
+	start := time.Now()
+	meta := ProviderMeta{Provider: "openai", Model: req.Model, Timestamp: start}
+	body, err := json.Marshal(req)
+	if err != nil {
+		meta.Error = err.Error()
+		return nil, "", meta, fmt.Errorf("marshal speech request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/audio/speech", bytes.NewReader(body))
+	if err != nil {
+		meta.Error = err.Error()
+		return nil, "", meta, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
+	resp, err := o.client.Do(httpReq)
+	if err != nil {
+		meta.Error = err.Error()
+		meta.Latency = time.Since(start)
+		return nil, "", meta, fmt.Errorf("openai speech request: %w", err)
+	}
+	meta.Latency = time.Since(start)
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		payload, _ := io.ReadAll(resp.Body)
+		meta.Error = string(payload)
+		return nil, "", meta, fmt.Errorf("openai speech error (status %d): %s", resp.StatusCode, string(payload))
+	}
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "audio/mpeg"
+	}
+	return resp.Body, contentType, meta, nil
+}
+
+func estimateOpenAIImageCost(req ImageRequest) float64 {
+	n := req.N
+	if n <= 0 {
+		n = 1
+	}
+	model := strings.ToLower(req.Model)
+	quality := strings.ToLower(req.Quality)
+	size := strings.ToLower(req.Size)
+	unit := 0.04
+	if strings.Contains(model, "dall-e-2") {
+		unit = 0.02
+	} else if strings.Contains(model, "gpt-image") {
+		unit = 0.04
+	}
+	if quality == "hd" || strings.Contains(size, "1792") {
+		unit *= 2
+	}
+	return float64(n) * unit
 }
 
 func openAIPricing(model string) ModelPricing {

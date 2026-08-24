@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -110,6 +111,48 @@ func (p *AliasProvider) Rerank(ctx context.Context, req RerankRequest) (RerankRe
 		response.Model = originalModel
 	}
 	return response, meta, err
+}
+
+func (p *AliasProvider) ImageGeneration(ctx context.Context, req ImageRequest) (ImageResponse, ProviderMeta, error) {
+	provider, ok := p.inner.(ImageProvider)
+	if !ok {
+		return ImageResponse{}, ProviderMeta{Provider: p.name, Model: req.Model}, fmt.Errorf("provider %q does not support image generation", p.inner.Name())
+	}
+	originalModel := req.Model
+	req.Model = p.stripModel(req.Model)
+	response, meta, err := provider.ImageGeneration(ctx, req)
+	meta.ProviderType = p.inner.Name()
+	meta.Provider = p.name
+	meta.Model = originalModel
+	return response, meta, err
+}
+
+func (p *AliasProvider) Transcription(ctx context.Context, req TranscriptionRequest) (TranscriptionResponse, ProviderMeta, error) {
+	provider, ok := p.inner.(AudioProvider)
+	if !ok {
+		return TranscriptionResponse{}, ProviderMeta{Provider: p.name, Model: req.Model}, fmt.Errorf("provider %q does not support audio transcription", p.inner.Name())
+	}
+	originalModel := req.Model
+	req.Model = p.stripModel(req.Model)
+	response, meta, err := provider.Transcription(ctx, req)
+	meta.ProviderType = p.inner.Name()
+	meta.Provider = p.name
+	meta.Model = originalModel
+	return response, meta, err
+}
+
+func (p *AliasProvider) Speech(ctx context.Context, req SpeechRequest) (io.ReadCloser, string, ProviderMeta, error) {
+	provider, ok := p.inner.(AudioProvider)
+	if !ok {
+		return nil, "", ProviderMeta{Provider: p.name, Model: req.Model}, fmt.Errorf("provider %q does not support audio speech", p.inner.Name())
+	}
+	originalModel := req.Model
+	req.Model = p.stripModel(req.Model)
+	body, contentType, meta, err := provider.Speech(ctx, req)
+	meta.ProviderType = p.inner.Name()
+	meta.Provider = p.name
+	meta.Model = originalModel
+	return body, contentType, meta, err
 }
 
 func (p *AliasProvider) stripModel(model string) string {

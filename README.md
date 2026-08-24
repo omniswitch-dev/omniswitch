@@ -5,7 +5,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/omniswitch-dev/omniswitch/actions"><img src="https://img.shields.io/github/actions/workflow/status/omniswitch-dev/omniswitch/build.yml?branch=main&style=flat-square" alt="Build Status" /></a>
+  <a href="https://github.com/omniswitch-dev/omniswitch/actions"><img src="https://img.shields.io/github/actions/workflow/status/omniswitch-dev/omniswitch/ci.yml?branch=main&style=flat-square" alt="Build Status" /></a>
+  <a href="https://github.com/omniswitch-dev/omniswitch/releases"><img src="https://img.shields.io/github/v/release/omniswitch-dev/omniswitch?style=flat-square&color=orange" alt="Release" /></a>
+  <a href="https://github.com/omniswitch-dev/omniswitch/actions/workflows/codeql.yml"><img src="https://img.shields.io/github/actions/workflow/status/omniswitch-dev/omniswitch/codeql.yml?branch=main&label=codeql&style=flat-square" alt="CodeQL" /></a>
   <a href="https://golang.org"><img src="https://img.shields.io/github/go-mod/go-version/omniswitch-dev/omniswitch?style=flat-square&color=blue" alt="Go Version" /></a>
   <a href="https://github.com/omniswitch-dev/omniswitch/blob/main/LICENSE"><img src="https://img.shields.io/github/license/omniswitch-dev/omniswitch?style=flat-square&color=emerald" alt="License" /></a>
   <a href="https://omniswitch.dev"><img src="https://img.shields.io/badge/website-omniswitch.dev-purple?style=flat-square" alt="Website" /></a>
@@ -20,16 +22,30 @@ across multiple gateway replicas.
 ## Key Capabilities
 
 - **OpenAI-compatible gateway:** `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/embeddings`, `/v1/rerank`, `/v1/moderations`, and `/v1/models`.
-- **Provider routing:** Native OpenAI, Anthropic, Google, and Groq adapters plus any OpenAI-compatible custom endpoint.
+- **Provider routing:** Native OpenAI, Anthropic, Google, Groq adapters plus any OpenAI-compatible custom endpoint.
 - **Reliability controls:** Fallback chains, weighted variants, CEL route conditions, retries, retryable status codes, timeouts, circuit breakers, and shadow routing.
+- **Config hot-reload:** Routes, guardrails, cache posture, and circuit breaker settings reload from the config file without restarting; invalid files keep the previous configuration.
+- **Rust-accelerated guardrails:** Custom rule scanning runs in a single pass inside an embedded WebAssembly module compiled from Rust, with an identical pure-Go fallback ([benchmarks](BENCHMARKS.md)).
 - **Tenant-safe cache and quotas:** Exact and semantic cache with API key, workspace, organization, or global scope; per-key budgets; local or Redis-backed request limits.
 - **Identity and authorization:** Hashed API keys, bootstrap owner key, role gates, OIDC/JWKS workload identity, and CEL allow/deny authorization policies.
 - **Guardrails:** Built-in PII, injection, SQL, toxic, and secret checks; regex rules; webhook guardrail connectors; local OpenAI-compatible moderation; output redaction and buffered SSE protection.
 - **MCP gateway:** HTTP and streamable HTTP/SSE pass-through, persistent stdio targets, federated `tools/list`, policy-gated `tools/call`, target headers, and explicit OIDC bearer delegation.
 - **A2A gateway:** Public Agent Card discovery plus authenticated JSON-RPC `SendMessage` through the governed chat pipeline.
-- **Observability and operations:** SQLite logs, traces/sessions, feedback, provider metrics, OTLP trace export, Prometheus `/metrics`, Docker, and Kubernetes Kustomize manifests.
+- **Observability and operations:** SQLite logs, per-request trace waterfalls, traces/sessions, feedback, provider metrics, OTLP export (Langfuse/Jaeger/Tempo), Prometheus `/metrics`, Docker, and Kubernetes Kustomize manifests.
 
 ## Quickstart
+
+Install the latest release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/omniswitch-dev/omniswitch/main/install.sh | sh
+```
+
+Or via Homebrew (after the first release populates the tap):
+
+```bash
+brew install omniswitch-dev/tap/omniswitch
+```
 
 Build and run locally:
 
@@ -131,13 +147,15 @@ OMNISWITCH_CONFIG=examples/gateway-config.yaml go run ./cmd/gateway
 | Inference APIs | Chat, Responses subset, Anthropic Messages subset, embeddings, rerank, models, local moderation |
 | Routing | Fallbacks, weighted variants, CEL conditions, retries, timeouts, circuit breaker, shadow traffic |
 | Security | API keys, OIDC/JWKS, CEL authorization, workspace/org scoping, encrypted provider vault |
-| Guardrails | Built-in checks, regex rules, webhooks, redaction, buffered output checks |
+| Guardrails | Built-in checks, regex rules, webhooks, redaction, buffered output checks; single-pass Rust-WASM scanner with Go fallback |
+| Hot reload | Routes, guardrails, cache posture, circuit breaker, and shadow provider reload without restart |
 | MCP | HTTP, streamable HTTP/SSE, stdio, tool federation, policy and audit |
 | A2A | Agent Card, `SendMessage`, `GetExtendedAgentCard` |
 | Deployment | Binary, Docker Compose, Kubernetes manifests, optional Redis for shared request limits |
 
 See [docs/PORTKEY_COMPARISON.md](docs/PORTKEY_COMPARISON.md) for the full
-Portkey and AgentGateway comparison.
+Portkey and AgentGateway comparison and [BENCHMARKS.md](BENCHMARKS.md) for
+reproducible performance methodology.
 
 ## Client Integrations
 
@@ -177,8 +195,9 @@ const client = new OmniSwitch({
 - `internal/router`: Provider routing, fallbacks, retries, variants, and request shaping.
 - `internal/proxy`: MCP federation, stdio transport, and policy-enforced tool forwarding.
 - `internal/store`: SQLite persistence for keys, logs, prompts, feedback, budgets, and cache.
+- `internal/accel`: Rust-WASM guardrail accelerator host (`accel/` holds the crate).
 - `deploy/kubernetes`: Kustomize baseline for self-hosted Kubernetes deployment.
-- `docs`: API, configuration, deployment, architecture, and comparison docs.
+- `docs`: API, configuration, deployment, architecture, observability, and comparison docs.
 
 ## License
 

@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,13 +25,16 @@ import (
 type Strategy string
 
 const (
-	StrategyDirect     Strategy = "direct"      // Use the specified provider.
-	StrategyFallback   Strategy = "fallback"    // Try primary, then fallback providers.
-	StrategyRoundRobin Strategy = "round-robin" // Distribute across providers.
+	StrategyDirect       Strategy = "direct"        // Use the specified provider.
+	StrategyFallback     Strategy = "fallback"      // Try primary, then fallback providers.
+	StrategyRoundRobin   Strategy = "round-robin"   // Distribute across providers.
+	StrategyLeastLatency Strategy = "least-latency" // Prefer the fastest recent provider.
+	StrategyCostOptimal  Strategy = "cost-optimal"  // Prefer the lowest input-token price.
 )
 
 // Route defines how to reach a provider for a given request.
 type Route struct {
+	Strategy       Strategy       `json:"strategy,omitempty" yaml:"strategy,omitempty"`
 	Provider       string         `json:"provider" yaml:"provider"`
 	Fallbacks      []string       `json:"fallbacks,omitempty" yaml:"fallbacks,omitempty"`
 	MaxRetries     int            `json:"max_retries,omitempty" yaml:"max_retries,omitempty"`
@@ -60,6 +65,47 @@ type Router struct {
 	mu         sync.Mutex
 	rrCounters map[string]int // round-robin counters per model
 	breakers   *CircuitBreaker
+	latency    *latencyTracker
+}
+
+type latencyTracker struct {
+	mu      sync.Mutex
+	samples map[string][]time.Duration
+}
+
+func newLatencyTracker() *latencyTracker {
+	return &latencyTracker{samples: map[string][]time.Duration{}}
+}
+
+func (t *latencyTracker) record(provider string, d time.Duration) {
+	if t == nil || provider == "" || d <= 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	samples := append(t.samples[provider], d)
+	const maxSamples = 32
+	if len(samples) > maxSamples {
+		samples = samples[len(samples)-maxSamples:]
+	}
+	t.samples[provider] = samples
+}
+
+func (t *latencyTracker) average(provider string) time.Duration {
+	if t == nil || provider == "" {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	samples := t.samples[provider]
+	if len(samples) == 0 {
+		return 0
+	}
+	var total time.Duration
+	for _, sample := range samples {
+		total += sample
+	}
+	return total / time.Duration(len(samples))
 }
 
 // New creates a new Router.
@@ -69,6 +115,7 @@ func New(registry *provider.Registry) *Router {
 		routes:     make(map[string]Route),
 		rrCounters: make(map[string]int),
 		breakers:   NewCircuitBreaker(5, 60*time.Second),
+		latency:    newLatencyTracker(),
 	}
 }
 
@@ -85,6 +132,25 @@ func (r *Router) SetRoute(model string, route Route) {
 	r.routes[model] = route
 }
 
+// ReplaceRoutes atomically swaps the full route table, removing routes that
+// are no longer present. Used by config hot-reload.
+func (r *Router) ReplaceRoutes(routes map[string]Route) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.routes = make(map[string]Route, len(routes))
+	for model, route := range routes {
+		r.routes[model] = route
+	}
+}
+
+// RouteFor reports whether a logical model has a configured route.
+func (r *Router) RouteFor(model string) (Route, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	route, ok := r.routes[model]
+	return route, ok
+}
+
 // CloneWithRoutes returns a request-scoped router that inherits the registry,
 // base routes, and circuit breaker, then overlays the supplied routes.
 func (r *Router) CloneWithRoutes(overrides map[string]Route) *Router {
@@ -92,6 +158,7 @@ func (r *Router) CloneWithRoutes(overrides map[string]Route) *Router {
 	defer r.mu.Unlock()
 	cloned := New(r.registry)
 	cloned.breakers = r.breakers
+	cloned.latency = r.latency
 	for model, route := range r.routes {
 		cloned.routes[model] = route
 	}
@@ -171,6 +238,7 @@ func (r *Router) Embeddings(ctx context.Context, req provider.EmbeddingRequest, 
 		cancel()
 		if err == nil {
 			r.recordSuccess(current.Name())
+			r.recordLatency(current.Name(), meta.Latency)
 			meta.Fallback = index > 0
 			if meta.Model == "" {
 				meta.Model = req.Model
@@ -181,6 +249,125 @@ func (r *Router) Embeddings(ctx context.Context, req provider.EmbeddingRequest, 
 		lastErr = err
 	}
 	return provider.EmbeddingResponse{}, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all embedding providers exhausted: %w", lastErr)
+}
+
+func (r *Router) ImageGeneration(ctx context.Context, req provider.ImageRequest, providerHint string) (provider.ImageResponse, provider.ProviderMeta, error) {
+	logicalModel := req.Model
+	route, hasRoute := r.routeFor(logicalModel)
+	providers := r.resolveProviders(logicalModel, req.Model, providerHint, route, hasRoute && providerHint == "")
+	if len(providers) == 0 {
+		return provider.ImageResponse{}, provider.ProviderMeta{}, fmt.Errorf("no provider found for model %q", req.Model)
+	}
+	var lastErr error
+	for index, current := range providers {
+		imageProvider, ok := current.(provider.ImageProvider)
+		if !ok {
+			lastErr = fmt.Errorf("provider %q does not support image generation", current.Name())
+			continue
+		}
+		if !r.allowProvider(current.Name()) {
+			lastErr = fmt.Errorf("provider %q circuit is open", current.Name())
+			continue
+		}
+		callCtx, cancel := withRouteTimeout(ctx, route.Timeout)
+		response, meta, err := imageProvider.ImageGeneration(callCtx, req)
+		cancel()
+		if err == nil {
+			r.recordSuccess(current.Name())
+			r.recordLatency(current.Name(), meta.Latency)
+			meta.Fallback = index > 0
+			if meta.Model == "" {
+				meta.Model = req.Model
+			}
+			return response, meta, nil
+		}
+		r.recordFailure(current.Name())
+		lastErr = err
+	}
+	return provider.ImageResponse{}, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all image providers exhausted: %w", lastErr)
+}
+
+func (r *Router) Transcription(ctx context.Context, req provider.TranscriptionRequest, providerHint string) (provider.TranscriptionResponse, provider.ProviderMeta, error) {
+	logicalModel := req.Model
+	route, hasRoute := r.routeFor(logicalModel)
+	providers := r.resolveProviders(logicalModel, req.Model, providerHint, route, hasRoute && providerHint == "")
+	if len(providers) == 0 {
+		return provider.TranscriptionResponse{}, provider.ProviderMeta{}, fmt.Errorf("no provider found for model %q", req.Model)
+	}
+	var lastErr error
+	for index, current := range providers {
+		audioProvider, ok := current.(provider.AudioProvider)
+		if !ok {
+			lastErr = fmt.Errorf("provider %q does not support audio transcription", current.Name())
+			continue
+		}
+		if !r.allowProvider(current.Name()) {
+			lastErr = fmt.Errorf("provider %q circuit is open", current.Name())
+			continue
+		}
+		callCtx, cancel := withRouteTimeout(ctx, route.Timeout)
+		response, meta, err := audioProvider.Transcription(callCtx, req)
+		cancel()
+		if err == nil {
+			r.recordSuccess(current.Name())
+			r.recordLatency(current.Name(), meta.Latency)
+			meta.Fallback = index > 0
+			if meta.Model == "" {
+				meta.Model = req.Model
+			}
+			return response, meta, nil
+		}
+		r.recordFailure(current.Name())
+		lastErr = err
+	}
+	return provider.TranscriptionResponse{}, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all transcription providers exhausted: %w", lastErr)
+}
+
+func (r *Router) Speech(ctx context.Context, req provider.SpeechRequest, providerHint string) (io.ReadCloser, string, provider.ProviderMeta, error) {
+	logicalModel := req.Model
+	route, hasRoute := r.routeFor(logicalModel)
+	providers := r.resolveProviders(logicalModel, req.Model, providerHint, route, hasRoute && providerHint == "")
+	if len(providers) == 0 {
+		return nil, "", provider.ProviderMeta{}, fmt.Errorf("no provider found for model %q", req.Model)
+	}
+	var lastErr error
+	for index, current := range providers {
+		audioProvider, ok := current.(provider.AudioProvider)
+		if !ok {
+			lastErr = fmt.Errorf("provider %q does not support audio speech", current.Name())
+			continue
+		}
+		if !r.allowProvider(current.Name()) {
+			lastErr = fmt.Errorf("provider %q circuit is open", current.Name())
+			continue
+		}
+		callCtx, cancel := withRouteTimeout(ctx, route.Timeout)
+		body, contentType, meta, err := audioProvider.Speech(callCtx, req)
+		if err == nil {
+			r.recordSuccess(current.Name())
+			r.recordLatency(current.Name(), meta.Latency)
+			meta.Fallback = index > 0
+			if meta.Model == "" {
+				meta.Model = req.Model
+			}
+			return &cancelReadCloser{ReadCloser: body, cancel: cancel}, contentType, meta, nil
+		}
+		cancel()
+		r.recordFailure(current.Name())
+		lastErr = err
+	}
+	return nil, "", provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all speech providers exhausted: %w", lastErr)
+}
+
+type cancelReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelReadCloser) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }
 
 // Rerank routes common RAG reranking requests through providers that implement
@@ -219,6 +406,7 @@ func (r *Router) Rerank(ctx context.Context, req provider.RerankRequest, provide
 		cancel()
 		if err == nil {
 			r.recordSuccess(current.Name())
+			r.recordLatency(current.Name(), meta.Latency)
 			meta.Fallback = index > 0
 			if meta.Model == "" {
 				meta.Model = req.Model
@@ -270,6 +458,7 @@ func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, provider
 			cancel()
 			if err == nil {
 				r.recordSuccess(prov.Name())
+				r.recordLatency(prov.Name(), meta.Latency)
 				meta.Retries = attempt
 				meta.Fallback = i > 0
 				if meta.Model == "" {
@@ -342,6 +531,7 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 				chunks, meta, err := streamer.ChatCompletionStream(callCtx, req)
 				if err == nil {
 					r.recordSuccess(prov.Name())
+					r.recordLatency(prov.Name(), meta.Latency)
 					meta.Retries = attempt
 					meta.Fallback = i > 0
 					if meta.Model == "" {
@@ -372,6 +562,7 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 		cancel()
 		if err == nil {
 			r.recordSuccess(prov.Name())
+			r.recordLatency(prov.Name(), meta.Latency)
 			meta.Fallback = i > 0
 			if meta.Model == "" {
 				meta.Model = req.Model
@@ -506,6 +697,15 @@ func (r *Router) recordFailure(providerName string) {
 	}
 }
 
+func (r *Router) recordLatency(providerName string, latency time.Duration) {
+	r.mu.Lock()
+	tracker := r.latency
+	r.mu.Unlock()
+	if tracker != nil {
+		tracker.record(providerName, latency)
+	}
+}
+
 func errorString(err error) string {
 	if err == nil {
 		return ""
@@ -529,7 +729,7 @@ func (r *Router) resolveProviders(logicalModel, model, hint string, route Route,
 			provs = append(provs, p)
 		}
 	}
-	if useRouteFallbacks {
+	if useRouteFallbacks && route.Strategy != StrategyDirect {
 		for _, fb := range route.Fallbacks {
 			if p, err := r.registry.Get(fb); err == nil {
 				provs = appendUniqueProvider(provs, p)
@@ -552,7 +752,61 @@ func (r *Router) resolveProviders(logicalModel, model, hint string, route Route,
 		}
 	}
 
+	if hint == "" {
+		provs = r.applyStrategy(logicalModel, model, route.Strategy, provs)
+	}
 	return provs
+}
+
+func (r *Router) applyStrategy(logicalModel, model string, strategy Strategy, providers []provider.Provider) []provider.Provider {
+	if len(providers) <= 1 {
+		return providers
+	}
+	ordered := append([]provider.Provider(nil), providers...)
+	switch strategy {
+	case StrategyRoundRobin:
+		r.mu.Lock()
+		index := r.rrCounters[logicalModel]
+		r.rrCounters[logicalModel] = index + 1
+		r.mu.Unlock()
+		offset := index % len(ordered)
+		return append(ordered[offset:], ordered[:offset]...)
+	case StrategyLeastLatency:
+		sort.SliceStable(ordered, func(i, j int) bool {
+			left := r.latency.average(ordered[i].Name())
+			right := r.latency.average(ordered[j].Name())
+			if left == 0 && right == 0 {
+				return i < j
+			}
+			if left == 0 {
+				return false
+			}
+			if right == 0 {
+				return true
+			}
+			return left < right
+		})
+	case StrategyCostOptimal:
+		sort.SliceStable(ordered, func(i, j int) bool {
+			left := provider.InputPricePerMillion(priceProviderName(ordered[i].Name(), model), model)
+			right := provider.InputPricePerMillion(priceProviderName(ordered[j].Name(), model), model)
+			if left == 0 {
+				left = 1_000_000
+			}
+			if right == 0 {
+				right = 1_000_000
+			}
+			return left < right
+		})
+	}
+	return ordered
+}
+
+func priceProviderName(providerName, model string) string {
+	if strings.HasPrefix(providerName, "@") {
+		return guessProvider(model)
+	}
+	return providerName
 }
 
 func (r *Router) routeFor(model string) (Route, bool) {

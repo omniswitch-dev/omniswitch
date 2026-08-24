@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -30,7 +31,7 @@ type Handler struct {
 	registry              *provider.Registry
 	router                *router.Router
 	store                 *store.Store
-	guardrails            *guardrail.Engine
+	guardrails            atomic.Pointer[guardrail.Engine]
 	cacheThreshold        float64
 	cacheTTL              time.Duration
 	cacheScope            string
@@ -39,6 +40,8 @@ type Handler struct {
 	maxRequestBytes       int64
 	shadowProvider        string
 	configRouters         sync.Map
+	alerts                *AlertManager
+	logBroadcaster        func(store.RequestLog)
 }
 
 type cachedConfigRouter struct {
@@ -48,11 +51,10 @@ type cachedConfigRouter struct {
 
 // New creates a new gateway handler.
 func New(registry *provider.Registry, rtr *router.Router, st *store.Store, gr *guardrail.Engine) *Handler {
-	return &Handler{
+	h := &Handler{
 		registry:       registry,
 		router:         rtr,
 		store:          st,
-		guardrails:     gr,
 		cacheThreshold: 0.95,
 		cacheTTL:       24 * time.Hour,
 		cacheScope:     "api_key",
@@ -62,6 +64,20 @@ func New(registry *provider.Registry, rtr *router.Router, st *store.Store, gr *g
 		streamGuardrailBuffer: true,
 		maxRequestBytes:       10 << 20,
 	}
+	if gr != nil {
+		h.guardrails.Store(gr)
+	}
+	return h
+}
+
+// SetGuardrails atomically swaps the guardrail engine; in-flight requests keep
+// using their loaded engine until completion. Used by config hot-reload.
+func (h *Handler) SetGuardrails(engine *guardrail.Engine) {
+	if engine == nil {
+		h.guardrails.Store(&guardrail.Engine{})
+		return
+	}
+	h.guardrails.Store(engine)
 }
 
 func (h *Handler) SetSemanticCache(threshold float64) {
@@ -100,6 +116,18 @@ func (h *Handler) SetMaxRequestBytes(limit int64) {
 
 func (h *Handler) SetShadowProvider(providerName string) {
 	h.shadowProvider = providerName
+}
+
+func (h *Handler) SetAlerts(config AlertConfig) {
+	if len(config.Thresholds) == 0 && config.WebhookURL == "" && config.SlackURL == "" {
+		h.alerts = nil
+		return
+	}
+	h.alerts = NewAlertManager(config)
+}
+
+func (h *Handler) SetLogBroadcaster(broadcast func(store.RequestLog)) {
+	h.logBroadcaster = broadcast
 }
 
 // ChatCompletions handles POST /v1/chat/completions.
@@ -155,22 +183,31 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	reqID := newRequestID()
 	traceID := requestHeaderOrNew(r, "x-omniswitch-trace-id", "trace")
 	sessionID := r.Header.Get("x-omniswitch-session-id")
+	userID := r.Header.Get("x-omniswitch-user-id")
 	providerHint := r.Header.Get("x-omniswitch-provider")
 	shadowHint := firstNonEmpty(r.Header.Get("x-omniswitch-shadow-provider"), activeRouter.ShadowProviderForModel(req.Model), h.shadowProvider)
 	apiKeyID := r.Header.Get("x-omniswitch-key-id")
 	tenantCacheScope := h.tenantCacheScope(r)
+	traceRecorder := newTraceRecorder()
 	ctx = WithRequestID(r.Context(), reqID)
 	ctx = WithTraceID(ctx, traceID)
 	ctx = WithSessionID(ctx, sessionID)
+	ctx = WithUserID(ctx, userID)
+	ctx = WithMetadataJSON(ctx, r.Header.Get("x-omniswitch-metadata"))
+	ctx = WithTags(ctx, tagsHeader(r.Header.Get("x-omniswitch-tags")))
+	ctx = WithTraceRecorder(ctx, traceRecorder)
 	span.SetAttributes(
 		attribute.String("sentinel.request_id", reqID),
 		attribute.String("sentinel.trace_id", traceID),
 		attribute.String("sentinel.session_id", sessionID),
+		attribute.String("sentinel.user_id", userID),
 		attribute.String("llm.request.model", req.Model),
 		attribute.Bool("llm.request.stream", req.Stream),
 	)
 
+	stageStart := time.Now()
 	if denied, reason := h.budgetExceeded(ctx, apiKeyID); denied {
+		recordTraceSpan(ctx, "budget", "", "denied", stageStart, map[string]any{"reason": reason})
 		span.SetAttributes(
 			attribute.String("sentinel.decision", "DENY"),
 			attribute.String("sentinel.decision_reason", reason),
@@ -186,13 +223,16 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	recordTraceSpan(ctx, "budget", "", "ok", stageStart, nil)
 
 	// Input guardrails.
-	if h.guardrails != nil {
-		results := h.guardrails.EvaluateInputContext(ctx, req.Messages)
+	if gr := h.guardrails.Load(); gr != nil {
+		stageStart = time.Now()
+		results := gr.EvaluateInputContext(ctx, req.Messages)
 		h.recordGuardrailResults(ctx, reqID, results)
 		for _, gr := range results {
 			if gr.Action == "deny" {
+				recordTraceSpan(ctx, "guardrail_input", "", "denied", stageStart, map[string]any{"type": gr.Type, "message": gr.Message})
 				span.SetAttributes(
 					attribute.String("sentinel.decision", "DENY"),
 					attribute.String("sentinel.guardrail.type", gr.Type),
@@ -210,6 +250,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		recordTraceSpan(ctx, "guardrail_input", "", "ok", stageStart, nil)
 	}
 
 	backendReq := req
@@ -218,7 +259,10 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if configRef != "" {
 		cacheProvider = "config:" + configRef + "|" + cacheProvider
 	}
-	if cachedResp, ok := h.cachedResponse(ctx, tenantCacheScope, cacheProvider, backendReq); ok {
+	stageStart = time.Now()
+	cachedResp, cacheHit := h.cachedResponse(ctx, tenantCacheScope, cacheProvider, backendReq)
+	recordTraceSpan(ctx, "cache_lookup", cacheProvider, map[bool]string{true: "hit", false: "miss"}[cacheHit], stageStart, nil)
+	if cacheHit {
 		if denied, _, reason := h.outputGuardrailDisposition(ctx, reqID, &cachedResp); denied {
 			h.logRequest(ctx, logContext{
 				ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &cachedResp,
@@ -261,8 +305,10 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Route to provider.
+	stageStart = time.Now()
 	resp, meta, err := activeRouter.Execute(ctx, backendReq, providerHint)
 	if err != nil {
+		recordTraceSpan(ctx, "provider_call", meta.Provider, "error", stageStart, map[string]any{"error": err.Error()})
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "provider error")
 		span.SetAttributes(attribute.String("llm.response.provider", meta.Provider))
@@ -275,6 +321,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "provider error: "+err.Error())
 		return
 	}
+	recordTraceSpan(ctx, "provider_call", meta.Provider, "ok", stageStart, nil)
 
 	// Output guardrails inspect every completion choice. Redacted output is what
 	// gets cached and logged, so a later cache hit cannot restore sensitive data.
@@ -403,6 +450,12 @@ func (h *Handler) logRequest(ctx context.Context, logCtx logContext) {
 		}
 	}
 
+	if spans := spansFromContext(ctx); len(spans) > 0 {
+		entry.Metadata = metadataWithSpans(MetadataJSONFromContext(ctx), spans)
+	} else if meta := MetadataJSONFromContext(ctx); meta != "{}" {
+		entry.Metadata = meta
+	}
+
 	if err := h.store.InsertLog(ctx, entry); err != nil {
 		log.Printf("failed to log request: %v", err)
 	}
@@ -465,7 +518,7 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 		writeError(w, http.StatusInternalServerError, "streaming is not supported by this server")
 		return
 	}
-	bufferOutput := h.streamGuardrailBuffer && h.guardrails != nil
+	bufferOutput := h.streamGuardrailBuffer && h.guardrails.Load() != nil
 	if !bufferOutput {
 		setStreamHeaders(w, streamCtx.TraceID, streamCtx.SessionID)
 		w.WriteHeader(http.StatusOK)
@@ -578,11 +631,12 @@ func setStreamHeaders(w http.ResponseWriter, traceID, sessionID string) {
 // outputGuardrailDisposition evaluates every generated choice. A redaction
 // replaces the affected output before it is logged, cached, or returned.
 func (h *Handler) outputGuardrailDisposition(ctx context.Context, requestID string, resp *provider.ChatResponse) (denied, redacted bool, reason string) {
-	if h.guardrails == nil {
+	gr := h.guardrails.Load()
+	if gr == nil {
 		return false, false, ""
 	}
 	for index := range resp.Choices {
-		results := h.guardrails.EvaluateOutputMessageContext(ctx, resp.Choices[index].Message)
+		results := gr.EvaluateOutputMessageContext(ctx, resp.Choices[index].Message)
 		h.recordGuardrailResults(ctx, requestID, results)
 		for _, result := range results {
 			switch result.Action {

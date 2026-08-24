@@ -33,7 +33,15 @@ import (
 	"github.com/omniswitch-dev/omniswitch/internal/vault"
 )
 
+// Injected at build time by goreleaser.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
+	log.Printf("OmniSwitch %s (commit %s, built %s)", version, commit, date)
 	settings, err := loadRuntimeSettings()
 	if err != nil {
 		log.Fatalf("failed to load gateway settings: %v", err)
@@ -111,6 +119,10 @@ func main() {
 	gw.SetStreamGuardrailBuffer(settings.guardrailStreamBuffer)
 	gw.SetMaxRequestBytes(settings.maxRequestBytes)
 	gw.SetShadowProvider(settings.shadowProvider)
+	if settings.configPath != "" {
+		startConfigReloader(settings.configPath, rtr, gw, settings)
+		log.Printf("config hot-reload enabled for %s", settings.configPath)
+	}
 	adminHandler := admin.New(st)
 	feedbackHandler := feedback.New(st)
 	promptHandler := prompt.New(st)
@@ -146,6 +158,13 @@ func main() {
 			return
 		}
 		writeJSON(w, http.StatusOK, runtimeConfigSummary(settings, registry))
+	})
+	mux.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"version": version, "commit": commit, "built": date})
 	})
 	if settings.mcpEnabled {
 		mcpEngine, err := policy.NewEngineFromFiles(settings.mcpPolicyPath)
@@ -610,6 +629,9 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 			})
 		}
 	}
+	if cfg.Guardrails.Rules != nil || cfg.Guardrails.ToolRules != nil || cfg.Guardrails.Webhooks != nil || cfg.Guardrails.LLMJudges != nil {
+		settings.guardrailConfig = guardrailConfigFromGatewayConfig(cfg, settings.guardrailConfig)
+	}
 	if cfg.RateLimit.Requests != nil {
 		settings.rateLimitRequests = *cfg.RateLimit.Requests
 	}
@@ -624,56 +646,6 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 	}
 	if cfg.RateLimit.FailOpen != nil {
 		settings.rateLimitFailOpen = *cfg.RateLimit.FailOpen
-	}
-	if cfg.Guardrails.Rules != nil {
-		settings.guardrailConfig.Rules = make([]guardrail.Rule, 0, len(cfg.Guardrails.Rules))
-		for _, rule := range cfg.Guardrails.Rules {
-			settings.guardrailConfig.Rules = append(settings.guardrailConfig.Rules, guardrail.Rule{
-				Name: rule.Name, Stage: rule.Stage, Pattern: rule.Pattern, Action: rule.Action, Message: rule.Message,
-			})
-		}
-	}
-	if cfg.Guardrails.ToolRules != nil {
-		settings.guardrailConfig.ToolRules = make([]guardrail.ToolRule, 0, len(cfg.Guardrails.ToolRules))
-		for _, rule := range cfg.Guardrails.ToolRules {
-			settings.guardrailConfig.ToolRules = append(settings.guardrailConfig.ToolRules, guardrail.ToolRule{
-				Name: rule.Name, Stage: rule.Stage, ToolName: rule.ToolName,
-				ArgumentsPattern: rule.ArgumentsPattern, Action: rule.Action, Message: rule.Message,
-			})
-		}
-	}
-	if cfg.Guardrails.Webhooks != nil {
-		settings.guardrailConfig.Webhooks = make([]guardrail.Webhook, 0, len(cfg.Guardrails.Webhooks))
-		for _, webhook := range cfg.Guardrails.Webhooks {
-			configured := guardrail.Webhook{
-				Name: webhook.Name, URL: webhook.URL, Stage: webhook.Stage, Action: webhook.Action,
-				Headers: expandHeaderValues(webhook.Headers),
-			}
-			if webhook.Timeout != nil {
-				configured.Timeout = webhook.Timeout.Duration
-			}
-			if webhook.FailOpen != nil {
-				configured.FailOpen = *webhook.FailOpen
-			}
-			settings.guardrailConfig.Webhooks = append(settings.guardrailConfig.Webhooks, configured)
-		}
-	}
-	if cfg.Guardrails.LLMJudges != nil {
-		settings.guardrailConfig.LLMJudges = make([]guardrail.LLMJudge, 0, len(cfg.Guardrails.LLMJudges))
-		for _, judge := range cfg.Guardrails.LLMJudges {
-			configured := guardrail.LLMJudge{
-				Name: judge.Name, URL: judge.URL, Model: judge.Model, Stage: judge.Stage, Action: judge.Action,
-				SystemPrompt: judge.SystemPrompt, APIKey: os.Getenv(strings.TrimSpace(judge.APIKeyEnv)),
-				Headers: expandHeaderValues(judge.Headers),
-			}
-			if judge.Timeout != nil {
-				configured.Timeout = judge.Timeout.Duration
-			}
-			if judge.FailOpen != nil {
-				configured.FailOpen = *judge.FailOpen
-			}
-			settings.guardrailConfig.LLMJudges = append(settings.guardrailConfig.LLMJudges, configured)
-		}
 	}
 	if cfg.Guardrails.StreamBuffer != nil {
 		settings.guardrailStreamBuffer = *cfg.Guardrails.StreamBuffer
@@ -1039,6 +1011,177 @@ func mergeRoute(base, override router.Route) router.Route {
 		base.Variants = override.Variants
 	}
 	return base
+}
+
+// guardrailConfigFromGatewayConfig converts the file schema into engine
+// config. Base supplies defaults for sections the file omits.
+func guardrailConfigFromGatewayConfig(cfg gatewayconfig.Config, base guardrail.Config) guardrail.Config {
+	out := base
+	if cfg.Guardrails.Actions != nil {
+		out.Actions = cfg.Guardrails.Actions
+	}
+	if cfg.Guardrails.Rules != nil {
+		out.Rules = make([]guardrail.Rule, 0, len(cfg.Guardrails.Rules))
+		for _, rule := range cfg.Guardrails.Rules {
+			out.Rules = append(out.Rules, guardrail.Rule{
+				Name: rule.Name, Stage: rule.Stage, Pattern: rule.Pattern, Action: rule.Action, Message: rule.Message,
+			})
+		}
+	}
+	if cfg.Guardrails.ToolRules != nil {
+		out.ToolRules = make([]guardrail.ToolRule, 0, len(cfg.Guardrails.ToolRules))
+		for _, rule := range cfg.Guardrails.ToolRules {
+			out.ToolRules = append(out.ToolRules, guardrail.ToolRule{
+				Name: rule.Name, Stage: rule.Stage, ToolName: rule.ToolName,
+				ArgumentsPattern: rule.ArgumentsPattern, Action: rule.Action, Message: rule.Message,
+			})
+		}
+	}
+	if cfg.Guardrails.Webhooks != nil {
+		out.Webhooks = make([]guardrail.Webhook, 0, len(cfg.Guardrails.Webhooks))
+		for _, webhook := range cfg.Guardrails.Webhooks {
+			configured := guardrail.Webhook{
+				Name: webhook.Name, URL: webhook.URL, Stage: webhook.Stage, Action: webhook.Action,
+				Headers: expandHeaderValues(webhook.Headers),
+			}
+			if webhook.Timeout != nil {
+				configured.Timeout = webhook.Timeout.Duration
+			}
+			if webhook.FailOpen != nil {
+				configured.FailOpen = *webhook.FailOpen
+			}
+			out.Webhooks = append(out.Webhooks, configured)
+		}
+	}
+	if cfg.Guardrails.LLMJudges != nil {
+		out.LLMJudges = make([]guardrail.LLMJudge, 0, len(cfg.Guardrails.LLMJudges))
+		for _, judge := range cfg.Guardrails.LLMJudges {
+			configured := guardrail.LLMJudge{
+				Name: judge.Name, URL: judge.URL, Model: judge.Model, Stage: judge.Stage, Action: judge.Action,
+				SystemPrompt: judge.SystemPrompt, APIKey: os.Getenv(strings.TrimSpace(judge.APIKeyEnv)),
+				Headers: expandHeaderValues(judge.Headers),
+			}
+			if judge.Timeout != nil {
+				configured.Timeout = judge.Timeout.Duration
+			}
+			if judge.FailOpen != nil {
+				configured.FailOpen = *judge.FailOpen
+			}
+			out.LLMJudges = append(out.LLMJudges, configured)
+		}
+	}
+	return out
+}
+
+// startConfigReloader watches the gateway config file and applies safe runtime
+// changes without a restart: routes, guardrails, cache posture, request
+// shaping limits, circuit breaker settings, and the shadow provider. Identity,
+// providers, rate limiting backends, and MCP targets still require a restart.
+func startConfigReloader(path string, rtr *router.Router, gw *gateway.Handler, base runtimeSettings) {
+	go func() {
+		var lastMod time.Time
+		if info, err := os.Stat(path); err == nil {
+			lastMod = info.ModTime()
+		}
+		// Routes currently defined by the config file were already merged into
+		// base.routes during startup; track them so reloads can replace them.
+		var prevFileRoutes map[string]router.Route
+		if cfg, err := gatewayconfig.LoadFile(path); err == nil && cfg.Routes != nil {
+			prevFileRoutes = make(map[string]router.Route, len(cfg.Routes))
+			for model, route := range cfg.Routes {
+				prevFileRoutes[model] = route
+			}
+		}
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			info, err := os.Stat(path)
+			if err != nil || !info.ModTime().After(lastMod) {
+				continue
+			}
+			lastMod = info.ModTime()
+			cfg, err := gatewayconfig.LoadFile(path)
+			if err != nil {
+				log.Printf("hot-reload skipped (config invalid, keeping previous configuration): %v", err)
+				continue
+			}
+			prevFileRoutes, _ = applyHotConfig(cfg, rtr, gw, base, prevFileRoutes)
+			log.Printf("configuration hot-reloaded from %s", path)
+		}
+	}()
+}
+
+// applyHotConfig swaps everything that is safe to change while serving.
+// It operates on copies so concurrent /api/config readers never race. Routes
+// defined by a previous version of the file are replaced wholesale; routes
+// from environment or A/B configuration survive across reloads. The returned
+// map is the new set of file-owned routes.
+func applyHotConfig(cfg gatewayconfig.Config, rtr *router.Router, gw *gateway.Handler, base runtimeSettings, prevFileRoutes map[string]router.Route) (map[string]router.Route, *guardrail.Engine) {
+	effective := make(map[string]router.Route, len(base.routes)+len(cfg.Routes))
+	for model, route := range base.routes {
+		effective[model] = route
+	}
+	for model := range prevFileRoutes {
+		delete(effective, model)
+	}
+	fileRoutes := make(map[string]router.Route, len(cfg.Routes))
+	for model, route := range cfg.Routes {
+		fileRoutes[model] = route
+		if existing, ok := effective[model]; ok && !prevRouteOwnedByFile(prevFileRoutes, model) {
+			fileRoutes[model] = mergeRoute(existing, route)
+			continue
+		}
+		effective[model] = route
+	}
+	for model, route := range fileRoutes {
+		effective[model] = route
+	}
+	rtr.ReplaceRoutes(effective)
+	gr := guardrail.NewEngine()
+	if len(base.guardrailConfig.Actions) > 0 || len(cfg.Guardrails.Rules) > 0 || len(cfg.Guardrails.ToolRules) > 0 || len(cfg.Guardrails.Webhooks) > 0 || len(cfg.Guardrails.LLMJudges) > 0 {
+		gr = guardrail.NewEngineWithConfig(guardrailConfigFromGatewayConfig(cfg, base.guardrailConfig))
+	}
+	gw.SetGuardrails(gr)
+
+	if cfg.Gateway.CacheThreshold != nil {
+		gw.SetSemanticCache(*cfg.Gateway.CacheThreshold)
+	}
+	if cfg.Gateway.CacheTTL != nil {
+		gw.SetCacheTTL(cfg.Gateway.CacheTTL.Duration)
+	}
+	if cfg.Gateway.CacheScope != "" {
+		gw.SetCacheScope(cfg.Gateway.CacheScope)
+	}
+	if cfg.Gateway.LogPayloads != nil {
+		gw.SetLogPayloads(*cfg.Gateway.LogPayloads)
+	}
+	if cfg.Guardrails.StreamBuffer != nil {
+		gw.SetStreamGuardrailBuffer(*cfg.Guardrails.StreamBuffer)
+	}
+	if cfg.Gateway.MaxRequestBytes > 0 {
+		gw.SetMaxRequestBytes(cfg.Gateway.MaxRequestBytes)
+	}
+	if cfg.Gateway.ShadowProvider != "" {
+		gw.SetShadowProvider(cfg.Gateway.ShadowProvider)
+	} else {
+		gw.SetShadowProvider(base.shadowProvider)
+	}
+	failures, cooldown := base.circuitBreakerFailures, base.circuitBreakerCooldown
+	if cfg.Gateway.CircuitBreakerFailures != nil {
+		failures = *cfg.Gateway.CircuitBreakerFailures
+	}
+	if cfg.Gateway.CircuitBreakerCooldown != nil {
+		cooldown = cfg.Gateway.CircuitBreakerCooldown.Duration
+	}
+	if failures > 0 && cooldown > 0 {
+		rtr.SetCircuitBreaker(router.NewCircuitBreaker(failures, cooldown))
+	}
+	return fileRoutes, gr
+}
+
+func prevRouteOwnedByFile(prev map[string]router.Route, model string) bool {
+	_, ok := prev[model]
+	return ok
 }
 
 func env(key, fallback string) string {

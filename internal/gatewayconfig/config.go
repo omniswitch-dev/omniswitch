@@ -55,7 +55,8 @@ type OIDC struct {
 // If one or more allow rules are present, every request must match an allow
 // rule and must not match a deny rule.
 type Authorization struct {
-	Rules []AuthorizationRule `json:"rules,omitempty" yaml:"rules,omitempty"`
+	Rules    []AuthorizationRule `json:"rules,omitempty" yaml:"rules,omitempty"`
+	External ExternalAuthZ       `json:"external,omitempty" yaml:"external,omitempty"`
 }
 
 type AuthorizationRule struct {
@@ -63,6 +64,11 @@ type AuthorizationRule struct {
 	When    string `json:"when" yaml:"when"`
 	Effect  string `json:"effect" yaml:"effect"`
 	Message string `json:"message,omitempty" yaml:"message,omitempty"`
+}
+
+type ExternalAuthZ struct {
+	URL     string    `json:"url,omitempty" yaml:"url,omitempty"`
+	Timeout *Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 }
 
 // RateLimit configures a request quota. When RedisURL is omitted, OmniSwitch
@@ -78,6 +84,8 @@ type RateLimit struct {
 type Gateway struct {
 	Listen         string    `json:"listen,omitempty" yaml:"listen,omitempty"`
 	DataDir        string    `json:"data_dir,omitempty" yaml:"data_dir,omitempty"`
+	Storage        string    `json:"storage,omitempty" yaml:"storage,omitempty"`
+	StorageURL     string    `json:"storage_url,omitempty" yaml:"storage_url,omitempty"`
 	Auth           *bool     `json:"auth,omitempty" yaml:"auth,omitempty"`
 	CacheThreshold *float64  `json:"cache_threshold,omitempty" yaml:"cache_threshold,omitempty"`
 	CacheTTL       *Duration `json:"cache_ttl,omitempty" yaml:"cache_ttl,omitempty"`
@@ -86,16 +94,23 @@ type Gateway struct {
 	CacheScope string `json:"cache_scope,omitempty" yaml:"cache_scope,omitempty"`
 	// LogPayloads controls storage of raw prompts and completions. It defaults to
 	// false at runtime so production deployments do not persist sensitive content.
-	LogPayloads            *bool     `json:"log_payloads,omitempty" yaml:"log_payloads,omitempty"`
-	CORSOrigins            []string  `json:"cors_origins,omitempty" yaml:"cors_origins,omitempty"`
-	CircuitBreakerFailures *int      `json:"circuit_breaker_failures,omitempty" yaml:"circuit_breaker_failures,omitempty"`
-	CircuitBreakerCooldown *Duration `json:"circuit_breaker_cooldown,omitempty" yaml:"circuit_breaker_cooldown,omitempty"`
-	MaxRequestBytes        int64     `json:"max_request_bytes,omitempty" yaml:"max_request_bytes,omitempty"`
-	ReadHeaderTimeout      *Duration `json:"read_header_timeout,omitempty" yaml:"read_header_timeout,omitempty"`
-	ReadTimeout            *Duration `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty"`
-	WriteTimeout           *Duration `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty"`
-	IdleTimeout            *Duration `json:"idle_timeout,omitempty" yaml:"idle_timeout,omitempty"`
-	ShadowProvider         string    `json:"shadow_provider,omitempty" yaml:"shadow_provider,omitempty"`
+	LogPayloads            *bool        `json:"log_payloads,omitempty" yaml:"log_payloads,omitempty"`
+	CORSOrigins            []string     `json:"cors_origins,omitempty" yaml:"cors_origins,omitempty"`
+	CircuitBreakerFailures *int         `json:"circuit_breaker_failures,omitempty" yaml:"circuit_breaker_failures,omitempty"`
+	CircuitBreakerCooldown *Duration    `json:"circuit_breaker_cooldown,omitempty" yaml:"circuit_breaker_cooldown,omitempty"`
+	MaxRequestBytes        int64        `json:"max_request_bytes,omitempty" yaml:"max_request_bytes,omitempty"`
+	ReadHeaderTimeout      *Duration    `json:"read_header_timeout,omitempty" yaml:"read_header_timeout,omitempty"`
+	ReadTimeout            *Duration    `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty"`
+	WriteTimeout           *Duration    `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty"`
+	IdleTimeout            *Duration    `json:"idle_timeout,omitempty" yaml:"idle_timeout,omitempty"`
+	ShadowProvider         string       `json:"shadow_provider,omitempty" yaml:"shadow_provider,omitempty"`
+	Alerts                 *AlertConfig `json:"alerts,omitempty" yaml:"alerts,omitempty"`
+}
+
+type AlertConfig struct {
+	WebhookURL string    `json:"webhook_url,omitempty" yaml:"webhook_url,omitempty"`
+	SlackURL   string    `json:"slack_url,omitempty" yaml:"slack_url,omitempty"`
+	Thresholds []float64 `json:"thresholds,omitempty" yaml:"thresholds,omitempty"`
 }
 
 type MCP struct {
@@ -185,20 +200,29 @@ type Observability struct {
 }
 
 type ProviderAccount struct {
-	Name               string            `json:"name" yaml:"name"`
-	Type               string            `json:"type" yaml:"type"`
-	APIKeyEnv          string            `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
-	BaseURL            string            `json:"base_url,omitempty" yaml:"base_url,omitempty"`
-	Endpoint           string            `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
-	APIVersion         string            `json:"api_version,omitempty" yaml:"api_version,omitempty"`
-	Region             string            `json:"region,omitempty" yaml:"region,omitempty"`
-	AWSAccessKeyEnv    string            `json:"aws_access_key_env,omitempty" yaml:"aws_access_key_env,omitempty"`
-	AWSSecretKeyEnv    string            `json:"aws_secret_key_env,omitempty" yaml:"aws_secret_key_env,omitempty"`
-	AWSSessionTokenEnv string            `json:"aws_session_token_env,omitempty" yaml:"aws_session_token_env,omitempty"`
-	GuardrailID        string            `json:"guardrail_id,omitempty" yaml:"guardrail_id,omitempty"`
-	GuardrailVersion   string            `json:"guardrail_version,omitempty" yaml:"guardrail_version,omitempty"`
-	Models             []string          `json:"models,omitempty" yaml:"models,omitempty"`
-	ExtraHeaders       map[string]string `json:"extra_headers,omitempty" yaml:"extra_headers,omitempty"`
+	Name               string             `json:"name" yaml:"name"`
+	Type               string             `json:"type" yaml:"type"`
+	APIKeyEnv          string             `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+	BaseURL            string             `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	Endpoint           string             `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
+	APIVersion         string             `json:"api_version,omitempty" yaml:"api_version,omitempty"`
+	Region             string             `json:"region,omitempty" yaml:"region,omitempty"`
+	AWSAccessKeyEnv    string             `json:"aws_access_key_env,omitempty" yaml:"aws_access_key_env,omitempty"`
+	AWSSecretKeyEnv    string             `json:"aws_secret_key_env,omitempty" yaml:"aws_secret_key_env,omitempty"`
+	AWSSessionTokenEnv string             `json:"aws_session_token_env,omitempty" yaml:"aws_session_token_env,omitempty"`
+	GuardrailID        string             `json:"guardrail_id,omitempty" yaml:"guardrail_id,omitempty"`
+	GuardrailVersion   string             `json:"guardrail_version,omitempty" yaml:"guardrail_version,omitempty"`
+	Models             []string           `json:"models,omitempty" yaml:"models,omitempty"`
+	ExtraHeaders       map[string]string  `json:"extra_headers,omitempty" yaml:"extra_headers,omitempty"`
+	Replicas           []InferenceReplica `json:"replicas,omitempty" yaml:"replicas,omitempty"`
+	HealthInterval     *Duration          `json:"health_interval,omitempty" yaml:"health_interval,omitempty"`
+}
+
+type InferenceReplica struct {
+	URL      string   `json:"url" yaml:"url"`
+	Runtime  string   `json:"runtime,omitempty" yaml:"runtime,omitempty"`
+	Models   []string `json:"models,omitempty" yaml:"models,omitempty"`
+	Priority int      `json:"priority,omitempty" yaml:"priority,omitempty"`
 }
 
 type Duration struct {
@@ -262,6 +286,29 @@ func Validate(cfg Config) error {
 	if cfg.Gateway.MaxRequestBytes < 0 {
 		return fmt.Errorf("gateway.max_request_bytes must be non-negative")
 	}
+	if storage := strings.ToLower(strings.TrimSpace(cfg.Gateway.Storage)); storage != "" {
+		switch storage {
+		case "sqlite", "postgres":
+		default:
+			return fmt.Errorf("gateway.storage must be sqlite or postgres")
+		}
+	}
+	if cfg.Gateway.Alerts != nil {
+		for i, threshold := range cfg.Gateway.Alerts.Thresholds {
+			if threshold <= 0 || threshold > 1 {
+				return fmt.Errorf("gateway.alerts.thresholds[%d] must be between 0 and 1", i)
+			}
+		}
+		for name, value := range map[string]string{"webhook_url": cfg.Gateway.Alerts.WebhookURL, "slack_url": cfg.Gateway.Alerts.SlackURL} {
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			parsed, err := url.Parse(value)
+			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+				return fmt.Errorf("gateway.alerts.%s must be an absolute HTTP(S) URL", name)
+			}
+		}
+	}
 	for name, value := range map[string]*Duration{
 		"read_header_timeout": cfg.Gateway.ReadHeaderTimeout,
 		"read_timeout":        cfg.Gateway.ReadTimeout,
@@ -301,6 +348,15 @@ func Validate(cfg Config) error {
 			return fmt.Errorf("authorization.rules[%d].effect must be allow or deny", index)
 		}
 	}
+	if cfg.Authorization.External.URL != "" {
+		parsed, err := url.Parse(cfg.Authorization.External.URL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("authorization.external.url must be an absolute HTTP(S) URL")
+		}
+	}
+	if cfg.Authorization.External.Timeout != nil && cfg.Authorization.External.Timeout.Duration <= 0 {
+		return fmt.Errorf("authorization.external.timeout must be positive")
+	}
 	if cfg.RateLimit.Requests != nil && *cfg.RateLimit.Requests < 1 {
 		return fmt.Errorf("rate_limit.requests must be positive")
 	}
@@ -315,6 +371,22 @@ func Validate(cfg Config) error {
 			return fmt.Errorf("providers[%d].type is required", i)
 		}
 		switch strings.ToLower(strings.TrimSpace(account.Type)) {
+		case "inference":
+			if len(account.Replicas) == 0 {
+				return fmt.Errorf("providers[%d].replicas is required for inference providers", i)
+			}
+			for j, replica := range account.Replicas {
+				if strings.TrimSpace(replica.URL) == "" {
+					return fmt.Errorf("providers[%d].replicas[%d].url is required", i, j)
+				}
+				parsed, err := url.Parse(replica.URL)
+				if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+					return fmt.Errorf("providers[%d].replicas[%d].url must be an absolute HTTP(S) URL", i, j)
+				}
+			}
+			if account.HealthInterval != nil && account.HealthInterval.Duration <= 0 {
+				return fmt.Errorf("providers[%d].health_interval must be positive", i)
+			}
 		case "azure", "azure-openai":
 			endpoint := strings.TrimSpace(firstNonEmpty(account.Endpoint, account.BaseURL))
 			if endpoint == "" {
@@ -458,6 +530,11 @@ func Validate(cfg Config) error {
 		}
 		if strings.TrimSpace(route.Provider) == "" && len(route.Variants) == 0 {
 			return fmt.Errorf("route %q must set provider or variants", model)
+		}
+		switch route.Strategy {
+		case "", router.StrategyDirect, router.StrategyFallback, router.StrategyRoundRobin, router.StrategyLeastLatency, router.StrategyCostOptimal:
+		default:
+			return fmt.Errorf("route %q strategy must be direct, fallback, round-robin, least-latency, or cost-optimal", model)
 		}
 		for i, variant := range route.Variants {
 			if strings.TrimSpace(variant.Provider) == "" {

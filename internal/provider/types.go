@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"time"
 )
@@ -220,6 +221,59 @@ type EmbeddingResponse struct {
 
 type EmbeddingProvider interface {
 	Embeddings(ctx context.Context, req EmbeddingRequest) (EmbeddingResponse, ProviderMeta, error)
+}
+
+type ImageRequest struct {
+	Model          string `json:"model"`
+	Prompt         string `json:"prompt"`
+	N              int    `json:"n,omitempty"`
+	Size           string `json:"size,omitempty"`
+	Quality        string `json:"quality,omitempty"`
+	ResponseFormat string `json:"response_format,omitempty"`
+	User           string `json:"user,omitempty"`
+}
+
+type ImageResponse struct {
+	Created int64       `json:"created"`
+	Data    []ImageData `json:"data"`
+}
+
+type ImageData struct {
+	URL           string `json:"url,omitempty"`
+	B64JSON       string `json:"b64_json,omitempty"`
+	RevisedPrompt string `json:"revised_prompt,omitempty"`
+}
+
+type ImageProvider interface {
+	ImageGeneration(ctx context.Context, req ImageRequest) (ImageResponse, ProviderMeta, error)
+}
+
+type TranscriptionRequest struct {
+	File           io.Reader `json:"-"`
+	Model          string    `json:"model"`
+	Language       string    `json:"language,omitempty"`
+	Prompt         string    `json:"prompt,omitempty"`
+	ResponseFormat string    `json:"response_format,omitempty"`
+	Temperature    *float64  `json:"temperature,omitempty"`
+	Filename       string    `json:"-"`
+	ContentType    string    `json:"-"`
+}
+
+type TranscriptionResponse struct {
+	Text string `json:"text"`
+}
+
+type SpeechRequest struct {
+	Model          string  `json:"model"`
+	Input          string  `json:"input"`
+	Voice          string  `json:"voice"`
+	ResponseFormat string  `json:"response_format,omitempty"`
+	Speed          float64 `json:"speed,omitempty"`
+}
+
+type AudioProvider interface {
+	Transcription(ctx context.Context, req TranscriptionRequest) (TranscriptionResponse, ProviderMeta, error)
+	Speech(ctx context.Context, req SpeechRequest) (io.ReadCloser, string, ProviderMeta, error)
 }
 
 // RerankRequest and RerankResponse mirror the common Cohere/Jina-style rerank

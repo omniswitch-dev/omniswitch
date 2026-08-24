@@ -1,0 +1,19 @@
+[package]
+name = "omniswitch-accel"
+version = "0.1.0"
+edition = "2021"
+description = "Rust-accelerated guardrail pattern scanner compiled to WebAssembly for OmniSwitch"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

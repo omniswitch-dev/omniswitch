@@ -41,8 +41,8 @@ func (h *Handler) Moderations(w http.ResponseWriter, r *http.Request) {
 	results := make([]map[string]any, 0, len(texts))
 	for _, text := range texts {
 		checks := []guardrail.Result(nil)
-		if h.guardrails != nil {
-			checks = h.guardrails.EvaluateInputContext(r.Context(), []provider.Message{{Role: "user", Content: text}})
+		if gr := h.guardrails.Load(); gr != nil {
+			checks = gr.EvaluateInputContext(r.Context(), []provider.Message{{Role: "user", Content: text}})
 			h.recordGuardrailResults(r.Context(), requestID, checks)
 		}
 		categories := map[string]bool{}

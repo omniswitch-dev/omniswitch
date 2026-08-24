@@ -37,8 +37,8 @@ func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
 	}
 	input, _ := json.Marshal(request.Input)
 	logRequest := provider.ChatRequest{Model: request.Model, Messages: []provider.Message{{Role: "user", Content: string(input)}}}
-	if h.guardrails != nil {
-		results := h.guardrails.EvaluateInputContext(r.Context(), logRequest.Messages)
+	if gr := h.guardrails.Load(); gr != nil {
+		results := gr.EvaluateInputContext(r.Context(), logRequest.Messages)
 		h.recordGuardrailResults(r.Context(), requestID, results)
 		for _, result := range results {
 			if result.Action == "deny" {
