@@ -308,7 +308,28 @@ endpoint. Set `forward_bearer_token: true` only for targets that require
 OAuth/OIDC delegation: it forwards the authenticated OIDC bearer token and
 never forwards a local OmniSwitch API key. Stdio targets use a persistent
 newline-delimited JSON-RPC child process and serialize calls per target.
-OpenAPI conversion is not implemented. A2A is not an MCP target type; it is
+
+### OpenAPI-to-MCP conversion
+
+Set `openapi_spec` on a target to expose an OpenAPI 3.x document's operations
+as synthetic MCP tools (local path or URL). Operation IDs become tool names;
+path parameters are substituted, remaining arguments become the JSON body
+(GET/DELETE: query string), and every call passes through the target policy,
+audit trail, and headers before plain HTTP execution.
+
+```yaml
+mcp:
+  targets:
+    - name: pets-api
+      upstream: https://petstore.example.com   # REST base URL
+      openapi_spec: ./specs/petstore.yaml      # or https://...
+      headers:
+        authorization: "Bearer ${PETSTORE_TOKEN}"
+```
+
+Distributed trace context propagates into `params._meta.traceparent`
+(SEP-414) on forwarded and OpenAPI-executed calls, so downstream MCP servers
+can continue the gateway's OTel trace. A2A is not an MCP target type; it is
 served separately through public Agent Card discovery and `/a2a` JSON-RPC.
 
 ## Provider Vault

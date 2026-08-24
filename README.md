@@ -22,14 +22,14 @@ across multiple gateway replicas.
 ## Key Capabilities
 
 - **OpenAI-compatible gateway:** `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/embeddings`, `/v1/rerank`, `/v1/moderations`, and `/v1/models`.
-- **Provider routing:** Native OpenAI, Anthropic, Google, Groq adapters plus any OpenAI-compatible custom endpoint.
+- **Provider routing:** Native OpenAI, Anthropic, Google, Groq, Azure, Bedrock, and Cohere adapters; one-env-var presets for Mistral, xAI, DeepSeek, Together, Fireworks, Perplexity, Cerebras, and OpenRouter; any OpenAI-compatible custom endpoint.
 - **Reliability controls:** Fallback chains, weighted variants, CEL route conditions, retries, retryable status codes, timeouts, circuit breakers, and shadow routing.
 - **Config hot-reload:** Routes, guardrails, cache posture, and circuit breaker settings reload from the config file without restarting; invalid files keep the previous configuration.
 - **Rust-accelerated guardrails:** Custom rule scanning runs in a single pass inside an embedded WebAssembly module compiled from Rust, with an identical pure-Go fallback ([benchmarks](BENCHMARKS.md)).
 - **Tenant-safe cache and quotas:** Exact and semantic cache with API key, workspace, organization, or global scope; per-key budgets; local or Redis-backed request limits.
 - **Identity and authorization:** Hashed API keys, bootstrap owner key, role gates, OIDC/JWKS workload identity, and CEL allow/deny authorization policies.
 - **Guardrails:** Built-in PII, injection, SQL, toxic, and secret checks; regex rules; webhook guardrail connectors; local OpenAI-compatible moderation; output redaction and buffered SSE protection.
-- **MCP gateway:** HTTP and streamable HTTP/SSE pass-through, persistent stdio targets, federated `tools/list`, policy-gated `tools/call`, target headers, and explicit OIDC bearer delegation.
+- **MCP gateway:** HTTP and streamable HTTP/SSE pass-through, persistent stdio targets, federated `tools/list`, policy-gated `tools/call`, target headers, explicit OIDC bearer delegation, **OpenAPI-to-MCP conversion**, and SEP-414 trace context propagation.
 - **A2A gateway:** Public Agent Card discovery plus authenticated JSON-RPC `SendMessage` through the governed chat pipeline.
 - **Observability and operations:** SQLite logs, per-request trace waterfalls, traces/sessions, feedback, provider metrics, OTLP export (Langfuse/Jaeger/Tempo), Prometheus `/metrics`, Docker, and Kubernetes Kustomize manifests.
 

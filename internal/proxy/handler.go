@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -30,6 +31,10 @@ type TargetConfig struct {
 	Headers            map[string]string
 	ForwardBearerToken bool
 	Engine             policy.Engine
+	// OpenAPISpec optionally points at an OpenAPI 3.x document (local path or
+	// URL). Its operations are exposed as synthetic MCP tools on this target,
+	// executed as plain HTTP calls with policy and audit enforcement.
+	OpenAPISpec string
 }
 
 type target struct {
@@ -39,6 +44,7 @@ type target struct {
 	stdio              *stdioClient
 	headers            map[string]string
 	forwardBearerToken bool
+	openAPITools       []openAPITool
 }
 
 type Handler struct {
@@ -110,6 +116,14 @@ func NewMultiHandler(engine policy.Engine, auditor audit.Logger, configs []Targe
 			engineForTarget = engine
 		}
 		configuredTarget.engine = engineForTarget
+		if strings.TrimSpace(config.OpenAPISpec) != "" {
+			tools, err := loadOpenAPISpec(strings.TrimSpace(config.OpenAPISpec))
+			if err != nil {
+				return nil, fmt.Errorf("load OpenAPI spec for MCP target %q: %w", name, err)
+			}
+			configuredTarget.openAPITools = tools
+			log.Printf("MCP target %q exposes %d OpenAPI-derived tools", name, len(tools))
+		}
 		handler.targets[key] = configuredTarget
 		handler.targetOrder = append(handler.targetOrder, key)
 		if index == 0 {
@@ -163,6 +177,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleToolCall(w http.ResponseWriter, r *http.Request, rpcReq mcp.Request, body []byte) {
 	target, toolName := h.targetForTool(rpcReq.Params.Name)
 	rpcReq.Params.Name = toolName
+
+	// Synthetic OpenAPI-derived tool: execute as plain HTTP with policy+audit.
+	if len(target.openAPITools) > 0 {
+		if tool := findOpenAPITool(target.openAPITools, toolName); tool != nil {
+			h.handleOpenAPICall(w, r, target, tool, body, rpcReq.ID)
+			return
+		}
+	}
 	toolReq, err := rpcReq.ToToolRequestWithIdentity(requestIdentity(r), r.Header.Get("Mcp-Session-Id"))
 	if err != nil {
 		writeJSON(w, http.StatusOK, mcp.ErrorResponse(rpcReq.ID, -32602, "Invalid params", err))
@@ -192,6 +214,30 @@ func (h *Handler) handleToolList(w http.ResponseWriter, r *http.Request, rpcReq 
 	tools := make([]map[string]any, 0)
 	for _, key := range h.targetOrder {
 		target := h.targets[key]
+		// Synthetic OpenAPI tools need no upstream tools/list round-trip.
+		for _, synthetic := range target.openAPITools {
+			listRequest := model.ToolRequest{
+				Agent:    requestIdentity(r),
+				Tool:     model.Tool{Name: synthetic.Name},
+				Action:   model.Action{Name: "list"},
+				Session:  model.Session{ID: r.Header.Get("Mcp-Session-Id")},
+				Metadata: map[string]string{"mcp.target": target.name},
+			}
+			decision, err := target.engine.Evaluate(r.Context(), listRequest)
+			if err != nil || !decision.Allowed {
+				continue
+			}
+			encoded, err := json.Marshal(synthetic)
+			if err != nil {
+				continue
+			}
+			var entry map[string]any
+			if err := json.Unmarshal(encoded, &entry); err != nil {
+				continue
+			}
+			entry["name"] = key + "__" + synthetic.Name
+			tools = append(tools, entry)
+		}
 		listRequest := model.ToolRequest{
 			Agent:    requestIdentity(r),
 			Tool:     model.Tool{Name: target.name},

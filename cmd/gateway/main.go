@@ -755,6 +755,7 @@ func buildMCPTargets(defaultEngine policy.Engine, settings runtimeSettings) ([]m
 			Command: os.ExpandEnv(configured.Command), Args: expandStrings(configured.Args),
 			Environment: expandHeaderValues(configured.Environment), Headers: expandHeaderValues(configured.Headers), Engine: engine,
 			ForwardBearerToken: configured.ForwardBearerToken != nil && *configured.ForwardBearerToken,
+			OpenAPISpec:        os.ExpandEnv(configured.OpenAPISpec),
 		})
 	}
 	if len(targets) == 0 {

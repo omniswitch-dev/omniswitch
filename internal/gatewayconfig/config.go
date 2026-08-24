@@ -186,6 +186,7 @@ type MCPTarget struct {
 	Policy             string            `json:"policy,omitempty" yaml:"policy,omitempty"`
 	Headers            map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
 	ForwardBearerToken *bool             `json:"forward_bearer_token,omitempty" yaml:"forward_bearer_token,omitempty"`
+	OpenAPISpec        string            `json:"openapi_spec,omitempty" yaml:"openapi_spec,omitempty"`
 	Enabled            *bool             `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 }
 
