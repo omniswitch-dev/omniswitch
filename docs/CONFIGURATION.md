@@ -276,7 +276,6 @@ CEL `condition` on a variant (`model` and `prompt` variables), retry count and
 backoff, retryable HTTP status codes, per-attempt timeouts, a shadow provider,
 and request shaping. `default_params` fills absent values,
 `override_params` always wins, and `drop_params` is applied last. The current
-request shaper supports `model`, `temperature`, `max_tokens`, `top_p`, `stream`,
 and `stop`.
 
 ## Guardrails
@@ -284,9 +283,11 @@ and `stop`.
 Built-in input/output checks cover PII, prompt injection, SQL patterns, toxic
 content, and code leakage. `guardrails.actions` can set their action; regex
 rules can run at `input`, `output`, or `both` stages. Supported actions are
-`deny`, `redact`, `warn`, and `log`. Every trigger produces a structured
+`deny`, `redact`, `warn`, `log`, `retry`, `reroute`, and `fallback`. Every trigger produces a structured
 guardrail audit event; `deny` and `redact` are enforced in the local request
-path. `stream_buffer: true` (default) buffers an SSE response before emitting
+path. `retry` evaluates up to `max_retries` (default 1) times. `reroute` overrides
+the provider selection to a specified `reroute_provider`, and `fallback` overrides
+the requested model to a specified `fallback` model (e.g. `anthropic/claude-3`). `stream_buffer: true` (default) buffers an SSE response before emitting
 it, allowing output enforcement; turning it off reduces latency but makes
 stream output a trusted-provider trade-off.
 

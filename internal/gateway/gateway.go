@@ -333,7 +333,6 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	var resp provider.ChatResponse
 	var meta provider.ProviderMeta
-	var err error
 
 	maxAttempts := 1
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -570,44 +569,52 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 	if activeRouter == nil {
 		activeRouter = h.router
 	}
-	chunks, meta, err := activeRouter.ExecuteStream(ctx, streamCtx.BackendRequest, streamCtx.ProviderHint)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "provider stream error")
-		span.SetAttributes(attribute.String("llm.response.provider", meta.Provider))
-		h.logRequest(ctx, logContext{
-			ID: streamCtx.ID, TraceID: streamCtx.TraceID, SessionID: streamCtx.SessionID, Request: streamCtx.Request, Meta: &meta,
-			APIKeyID: streamCtx.APIKeyID, Status: "error", ErrorMessage: err.Error(),
-		})
-		w.Header().Set("x-omniswitch-trace-id", streamCtx.TraceID)
-		w.Header().Set("x-omniswitch-session-id", streamCtx.SessionID)
-		writeError(w, http.StatusBadGateway, "provider stream error: "+err.Error())
-		return
-	}
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming is not supported by this server")
 		return
 	}
 	bufferOutput := h.streamGuardrailBuffer && h.guardrails.Load() != nil
-	if !bufferOutput {
-		setStreamHeaders(w, streamCtx.TraceID, streamCtx.SessionID)
-		w.WriteHeader(http.StatusOK)
-	}
 
-	aggregated := provider.ChatResponse{
-		ID:      newID("chat"),
-		Object:  "chat.completion",
-		Created: time.Now().Unix(),
-		Model:   firstNonEmpty(meta.Model, streamCtx.BackendRequest.Model),
-		Choices: []provider.Choice{{
-			Index:        0,
-			Message:      provider.Message{Role: "assistant"},
-			FinishReason: "stop",
-		}},
-	}
-	var buffered []provider.ChatResponseChunk
+	maxAttempts := 1
+	var aggregated provider.ChatResponse
+	var meta provider.ProviderMeta
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		var err error
+		var chunks <-chan provider.ChatResponseChunk
+		chunks, meta, err = activeRouter.ExecuteStream(ctx, streamCtx.BackendRequest, streamCtx.ProviderHint)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "provider stream error")
+			span.SetAttributes(attribute.String("llm.response.provider", meta.Provider))
+			h.logRequest(ctx, logContext{
+				ID: streamCtx.ID, TraceID: streamCtx.TraceID, SessionID: streamCtx.SessionID, Request: streamCtx.Request, Meta: &meta,
+				APIKeyID: streamCtx.APIKeyID, Status: "error", ErrorMessage: err.Error(),
+			})
+			w.Header().Set("x-omniswitch-trace-id", streamCtx.TraceID)
+			w.Header().Set("x-omniswitch-session-id", streamCtx.SessionID)
+			writeError(w, http.StatusBadGateway, "provider stream error: "+err.Error())
+			return
+		}
+
+		if !bufferOutput {
+			setStreamHeaders(w, streamCtx.TraceID, streamCtx.SessionID)
+			w.WriteHeader(http.StatusOK)
+		}
+
+		aggregated = provider.ChatResponse{
+			ID:      newID("chat"),
+			Object:  "chat.completion",
+			Created: time.Now().Unix(),
+			Model:   firstNonEmpty(meta.Model, streamCtx.BackendRequest.Model),
+			Choices: []provider.Choice{{
+				Index:        0,
+				Message:      provider.Message{Role: "assistant"},
+				FinishReason: "stop",
+			}},
+		}
+		var buffered []provider.ChatResponseChunk
 	for chunk := range chunks {
 		if chunk.ID != "" {
 			aggregated.ID = chunk.ID
@@ -641,36 +648,65 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 		}
 	}
 
-	if bufferOutput {
-		disp := h.outputGuardrailDisposition(ctx, streamCtx.ID, &aggregated)
-		if disp.Denied {
-			span.SetStatus(codes.Error, "stream output guardrail denied")
-			h.logRequest(ctx, logContext{
-				ID: streamCtx.ID, TraceID: streamCtx.TraceID, SessionID: streamCtx.SessionID, Request: streamCtx.Request, Response: &aggregated, Meta: &meta,
-				APIKeyID: streamCtx.APIKeyID, Status: "denied", ErrorMessage: disp.Reason,
-			})
-			w.Header().Set("x-omniswitch-trace-id", streamCtx.TraceID)
-			w.Header().Set("x-omniswitch-session-id", streamCtx.SessionID)
-			writeJSON(w, http.StatusForbidden, map[string]any{
-				"error": map[string]string{"message": disp.Reason, "type": "guardrail", "code": "guardrail_triggered"},
-			})
-			return
-		}
-		setStreamHeaders(w, streamCtx.TraceID, streamCtx.SessionID)
-		if disp.Redacted {
-			writeStream(w, aggregated)
-		} else {
-			w.WriteHeader(http.StatusOK)
-			for _, chunk := range buffered {
-				writeSSE(w, chunk)
+		if bufferOutput {
+			disp := h.outputGuardrailDisposition(ctx, streamCtx.ID, &aggregated)
+			if disp.Denied {
+				span.SetStatus(codes.Error, "stream output guardrail denied")
+				h.logRequest(ctx, logContext{
+					ID: streamCtx.ID, TraceID: streamCtx.TraceID, SessionID: streamCtx.SessionID, Request: streamCtx.Request, Response: &aggregated, Meta: &meta,
+					APIKeyID: streamCtx.APIKeyID, Status: "denied", ErrorMessage: disp.Reason,
+				})
+				w.Header().Set("x-omniswitch-trace-id", streamCtx.TraceID)
+				w.Header().Set("x-omniswitch-session-id", streamCtx.SessionID)
+				writeJSON(w, http.StatusForbidden, map[string]any{
+					"error": map[string]string{"message": disp.Reason, "type": "guardrail", "code": "guardrail_triggered"},
+				})
+				return
+			}
+
+			if disp.Retry || disp.RerouteProvider != "" || disp.Fallback != "" {
+				if disp.MaxRetries > 0 && maxAttempts == 1 {
+					maxAttempts = 1 + disp.MaxRetries
+				} else if maxAttempts == 1 {
+					maxAttempts = 2 // default 1 retry
+				}
+
+				if attempt+1 < maxAttempts {
+					if disp.RerouteProvider != "" {
+						streamCtx.ProviderHint = disp.RerouteProvider
+					}
+					if disp.Fallback != "" {
+						if pn, mod := parseFallbackTarget(disp.Fallback); pn != "" || mod != "" {
+							if pn != "" {
+								streamCtx.ProviderHint = pn
+							}
+							if mod != "" {
+								streamCtx.BackendRequest.Model = mod
+							}
+						}
+					}
+					continue
+				}
+			}
+
+			setStreamHeaders(w, streamCtx.TraceID, streamCtx.SessionID)
+			if disp.Redacted {
+				writeStream(w, aggregated)
+			} else {
+				w.WriteHeader(http.StatusOK)
+				for _, chunk := range buffered {
+					writeSSE(w, chunk)
+					flusher.Flush()
+				}
+				fmt.Fprint(w, "data: [DONE]\n\n")
 				flusher.Flush()
 			}
+		} else {
 			fmt.Fprint(w, "data: [DONE]\n\n")
 			flusher.Flush()
 		}
-	} else {
-		fmt.Fprint(w, "data: [DONE]\n\n")
-		flusher.Flush()
+
+		break
 	}
 
 	h.storeCache(ctx, streamCtx.CacheScope, streamCtx.CacheProvider, streamCtx.BackendRequest, aggregated)
