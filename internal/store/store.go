@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/omniswitch-dev/omniswitch/internal/cache"
+	"github.com/omniswitch-dev/omniswitch/internal/model"
 	"github.com/omniswitch-dev/omniswitch/internal/provider"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -1839,4 +1841,360 @@ func nullableString(value sql.NullString) string {
 		return ""
 	}
 	return value.String
+}
+
+// ErrNotFound is returned when a resource is not found.
+var ErrNotFound = errors.New("not found")
+
+// Dataset represents an evaluation dataset stored in the database.
+type Dataset struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Version     int               `json:"version"`
+	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
+	Metadata    map[string]string `json:"metadata"`
+	Examples    []DatasetExample  `json:"examples"`
+}
+
+// DatasetExample represents a single example in a dataset.
+type DatasetExample struct {
+	ID        string                 `json:"id"`
+	Input     model.ToolRequest      `json:"input"`
+	Expected  *provider.ChatResponse    `json:"expected,omitempty"`
+	Metadata  map[string]string      `json:"metadata,omitempty"`
+	Labels    []string               `json:"labels,omitempty"`
+	CreatedAt time.Time              `json:"created_at"`
+}
+
+// Experiment represents an evaluation experiment.
+type Experiment struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	DatasetID   string            `json:"dataset_id"`
+	Config      ExperimentConfig  `json:"config"`
+	Status      string            `json:"status"`
+	Results     *ExperimentResult `json:"results,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
+	CreatedBy   string            `json:"created_by"`
+}
+
+// ExperimentConfig defines the configuration for an experiment.
+type ExperimentConfig struct {
+	Models          []string          `json:"models"`
+	Prompts         []string          `json:"prompts"`
+	Metrics         []string          `json:"metrics"`
+	SampleSize      int               `json:"sample_size"`
+	Temperature     float64           `json:"temperature"`
+	MaxTokens       int               `json:"max_tokens"`
+	EvaluatorModel  string            `json:"evaluator_model"`
+	CustomEvaluator string            `json:"custom_evaluator"`
+	Config          map[string]string `json:"config"`
+}
+
+// ExperimentResult contains the results of an experiment.
+type ExperimentResult struct {
+	ModelResults   map[string]ModelResult   `json:"model_results"`
+	Comparison     *ComparisonResult       `json:"comparison,omitempty"`
+	CompletedAt    time.Time               `json:"completed_at"`
+	TotalEvaluated int                     `json:"total_evaluated"`
+	Errors         int                     `json:"errors"`
+}
+
+// ModelResult contains results for a single model.
+type ModelResult struct {
+	Model           string             `json:"model"`
+	Metrics         map[string]float64 `json:"metrics"`
+	LatencyP50      float64            `json:"latency_p50_ms"`
+	LatencyP95      float64            `json:"latency_p95_ms"`
+	LatencyP99      float64            `json:"latency_p99_ms"`
+	ErrorRate       float64            `json:"error_rate"`
+	CostPerRequest  float64            `json:"cost_per_request"`
+	TotalRequests   int                `json:"total_requests"`
+	Successful      int                `json:"successful"`
+	Failed          int                `json:"failed"`
+	PerExample      []ExampleResult    `json:"per_example,omitempty"`
+}
+
+// ExampleResult is the result for a single example.
+type ExampleResult struct {
+	ExampleID   string             `json:"example_id"`
+	Input       model.ToolRequest  `json:"input"`
+	Output      provider.ChatResponse `json:"output"`
+	Expected    *provider.ChatResponse `json:"expected,omitempty"`
+	Score       float64            `json:"score"`
+	LatencyMs   float64            `json:"latency_ms"`
+	Error       string             `json:"error,omitempty"`
+	Cost        float64            `json:"cost"`
+	TokensIn    int                `json:"tokens_in"`
+	TokensOut   int                `json:"tokens_out"`
+}
+
+// ComparisonResult compares multiple models.
+type ComparisonResult struct {
+	BestModel       string             `json:"best_model"`
+	MetricWinners   map[string]string  `json:"metric_winners"`
+	Significance    map[string]float64 `json:"significance"`
+	PairwiseComparison map[string]PairwiseResult `json:"pairwise_comparison"`
+}
+
+// PairwiseResult represents a pairwise comparison.
+type PairwiseResult struct {
+	ModelA      string  `json:"model_a"`
+	ModelB      string  `json:"model_b"`
+	Metric      string  `json:"metric"`
+	Winner      string  `json:"winner"`
+	Diff        float64 `json:"diff"`
+	PValue      float64 `json:"p_value"`
+	Significant bool    `json:"significant"`
+}
+
+// CreateDataset creates a new dataset.
+func (s *Store) CreateDataset(ctx context.Context, dataset *Dataset) error {
+	examplesJSON, err := json.Marshal(dataset.Examples)
+	if err != nil {
+		return err
+	}
+	metadataJSON, err := json.Marshal(dataset.Metadata)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO datasets (id, name, description, version, created_at, updated_at, metadata, examples)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		dataset.ID, dataset.Name, dataset.Description, dataset.Version,
+		dataset.CreatedAt.Format(time.RFC3339Nano), dataset.UpdatedAt.Format(time.RFC3339Nano),
+		string(metadataJSON), string(examplesJSON))
+	return err
+}
+
+// GetDataset retrieves a dataset by ID.
+func (s *Store) GetDataset(ctx context.Context, id string) (*Dataset, error) {
+	var dataset Dataset
+	var metadataJSON, examplesJSON string
+
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, name, description, version, created_at, updated_at, metadata, examples
+		FROM datasets WHERE id = ?`, id).Scan(
+		&dataset.ID, &dataset.Name, &dataset.Description, &dataset.Version,
+		&dataset.CreatedAt, &dataset.UpdatedAt, &metadataJSON, &examplesJSON)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	if err := json.Unmarshal([]byte(metadataJSON), &dataset.Metadata); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(examplesJSON), &dataset.Examples); err != nil {
+		return nil, err
+	}
+
+	return &dataset, nil
+}
+
+// ListDatasets lists datasets with pagination.
+func (s *Store) ListDatasets(ctx context.Context, limit, offset int) ([]*Dataset, int, error) {
+	var total int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM datasets`).Scan(&total)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, description, version, created_at, updated_at, metadata, examples
+		FROM datasets ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var datasets []*Dataset
+	for rows.Next() {
+		var dataset Dataset
+		var metadataJSON, examplesJSON string
+		if err := rows.Scan(&dataset.ID, &dataset.Name, &dataset.Description, &dataset.Version,
+			&dataset.CreatedAt, &dataset.UpdatedAt, &metadataJSON, &examplesJSON); err != nil {
+			return nil, 0, err
+		}
+		_ = json.Unmarshal([]byte(metadataJSON), &dataset.Metadata)
+		_ = json.Unmarshal([]byte(examplesJSON), &dataset.Examples)
+		datasets = append(datasets, &dataset)
+	}
+
+	return datasets, total, rows.Err()
+}
+
+// UpdateDataset updates a dataset.
+func (s *Store) UpdateDataset(ctx context.Context, dataset *Dataset) error {
+	metadataJSON, err := json.Marshal(dataset.Metadata)
+	if err != nil {
+		return err
+	}
+	examplesJSON, err := json.Marshal(dataset.Examples)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE datasets SET name = ?, description = ?, version = ?, updated_at = ?, metadata = ?, examples = ?
+		WHERE id = ?`,
+		dataset.Name, dataset.Description, dataset.Version, dataset.UpdatedAt.Format(time.RFC3339Nano),
+		string(metadataJSON), string(examplesJSON), dataset.ID)
+	return err
+}
+
+// DeleteDataset deletes a dataset.
+func (s *Store) DeleteDataset(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM datasets WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// AddExamples adds examples to a dataset.
+func (s *Store) AddExamples(ctx context.Context, datasetID string, examples []DatasetExample) error {
+	dataset, err := s.GetDataset(ctx, datasetID)
+	if err != nil {
+		return err
+	}
+
+	dataset.Examples = append(dataset.Examples, examples...)
+	dataset.Version++
+	dataset.UpdatedAt = time.Now().UTC()
+
+	examplesJSON, err := json.Marshal(dataset.Examples)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE datasets SET examples = ?, version = ?, updated_at = ? WHERE id = ?`,
+		string(examplesJSON), dataset.Version, dataset.UpdatedAt.Format(time.RFC3339Nano), datasetID)
+	return err
+}
+
+// Experiment methods
+
+// CreateExperiment creates a new experiment.
+func (s *Store) CreateExperiment(ctx context.Context, exp *Experiment) error {
+	configJSON, err := json.Marshal(exp.Config)
+	if err != nil {
+		return err
+	}
+	resultsJSON := "{}"
+	if exp.Results != nil {
+		bytes, _ := json.Marshal(exp.Results)
+		resultsJSON = string(bytes)
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO experiments (id, name, description, dataset_id, config, status, results, created_at, updated_at, created_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		exp.ID, exp.Name, exp.Description, exp.DatasetID, string(configJSON),
+		exp.Status, resultsJSON, exp.CreatedAt.Format(time.RFC3339Nano),
+		exp.UpdatedAt.Format(time.RFC3339Nano), exp.CreatedBy)
+	return err
+}
+
+// GetExperiment retrieves an experiment by ID.
+func (s *Store) GetExperiment(ctx context.Context, id string) (*Experiment, error) {
+	var exp Experiment
+	var configJSON, resultsJSON string
+
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, name, description, dataset_id, config, status, results, created_at, updated_at, created_by
+		FROM experiments WHERE id = ?`, id).Scan(
+		&exp.ID, &exp.Name, &exp.Description, &exp.DatasetID, &configJSON,
+		&exp.Status, &exp.Results, &exp.CreatedAt, &exp.UpdatedAt, &exp.CreatedBy)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	_ = json.Unmarshal([]byte(configJSON), &exp.Config)
+	_ = json.Unmarshal([]byte(resultsJSON), &exp.Results)
+
+	return &exp, nil
+}
+
+// ListExperiments lists experiments with pagination.
+func (s *Store) ListExperiments(ctx context.Context, limit, offset int, status string) ([]*Experiment, int, error) {
+	query := `SELECT COUNT(*) FROM experiments`
+	args := []any{}
+	if status != "" {
+		query += ` WHERE status = ?`
+		args = append(args, status)
+	}
+
+	var total int
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&total)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	query = `SELECT id, name, description, dataset_id, config, status, results, created_at, updated_at, created_by
+		FROM experiments`
+	if status != "" {
+		query += ` WHERE status = ?`
+	}
+	query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var experiments []*Experiment
+	for rows.Next() {
+		var exp Experiment
+		var configJSON, resultsJSON string
+		var createdAt, updatedAt string
+		if err := rows.Scan(&exp.ID, &exp.Name, &exp.Description, &exp.DatasetID, &configJSON,
+			&exp.Status, &exp.Results, &createdAt, &updatedAt, &exp.CreatedBy); err != nil {
+			return nil, 0, err
+		}
+		_ = json.Unmarshal([]byte(configJSON), &exp.Config)
+		_ = json.Unmarshal([]byte(resultsJSON), &exp.Results)
+		exp.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		exp.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+		experiments = append(experiments, &exp)
+	}
+
+	return experiments, total, rows.Err()
+}
+
+// UpdateExperiment updates an experiment.
+func (s *Store) UpdateExperiment(ctx context.Context, exp *Experiment) error {
+	configJSON, err := json.Marshal(exp.Config)
+	if err != nil {
+		return err
+	}
+	resultsJSON := "{}"
+	if exp.Results != nil {
+		bytes, _ := json.Marshal(exp.Results)
+		resultsJSON = string(bytes)
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE experiments SET name = ?, description = ?, dataset_id = ?, config = ?, status = ?, results = ?, updated_at = ?
+		WHERE id = ?`,
+		exp.Name, exp.Description, exp.DatasetID, string(configJSON), exp.Status, resultsJSON,
+		exp.UpdatedAt.Format(time.RFC3339Nano), exp.ID)
+	return err
 }

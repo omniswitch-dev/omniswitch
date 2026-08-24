@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
 func TestReplayPolicies(t *testing.T) {
@@ -19,7 +21,13 @@ resource.environment == "production" && action.name == "delete"
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	handler := New()
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer st.Close()
+
+	handler := NewHandler(st)
 	rec := httptest.NewRecorder()
 	handler.ReplayPolicies(rec, httptest.NewRequest(http.MethodPost, "/api/evals/policy", strings.NewReader(`{
 		"policy_paths":["`+strings.ReplaceAll(policyPath, `\`, `\\`)+`"],
@@ -48,7 +56,13 @@ resource.environment == "production" && action.name == "delete"
 }
 
 func TestReplayPoliciesValidation(t *testing.T) {
-	handler := New()
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer st.Close()
+
+	handler := NewHandler(st)
 	rec := httptest.NewRecorder()
 	handler.ReplayPolicies(rec, httptest.NewRequest(http.MethodPost, "/api/evals/policy", strings.NewReader(`{"requests":[]}`)))
 	if rec.Code != http.StatusBadRequest {

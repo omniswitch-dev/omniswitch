@@ -140,7 +140,7 @@ func main() {
 	feedbackHandler := feedback.New(st)
 	promptHandler := prompt.New(st)
 	orgHandler := org.New(st)
-	evalHandler := eval.New()
+	evalHandler := eval.NewHandler(st)
 	vaultHandler := vault.NewHandler(vaultManager)
 	dash := dashboard.New(st)
 	dash.SetConfigPath(settings.configPath)
