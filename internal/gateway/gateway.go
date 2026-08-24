@@ -450,8 +450,6 @@ func (h *Handler) ListModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": models})
 }
 
-
-
 // parseFallbackTarget splits a "provider/model" reroute target. Either half
 // may be empty; the caller applies only the halves present.
 func parseFallbackTarget(target string) (providerName, modelID string) {
@@ -615,38 +613,38 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 			}},
 		}
 		var buffered []provider.ChatResponseChunk
-	for chunk := range chunks {
-		if chunk.ID != "" {
-			aggregated.ID = chunk.ID
-		}
-		if chunk.Model != "" {
-			aggregated.Model = chunk.Model
-		}
-		for _, choice := range chunk.Choices {
-			if choice.Index == 0 {
-				if choice.Delta.Role != "" {
-					aggregated.Choices[0].Message.Role = choice.Delta.Role
-				}
-				aggregated.Choices[0].Message.Content += choice.Delta.Content
-				if len(choice.Delta.ToolCalls) > 0 {
-					mergeToolCallDeltas(&aggregated.Choices[0].Message.ToolCalls, choice.Delta.ToolCalls)
-				}
-				if choice.FinishReason != "" {
-					aggregated.Choices[0].FinishReason = choice.FinishReason
+		for chunk := range chunks {
+			if chunk.ID != "" {
+				aggregated.ID = chunk.ID
+			}
+			if chunk.Model != "" {
+				aggregated.Model = chunk.Model
+			}
+			for _, choice := range chunk.Choices {
+				if choice.Index == 0 {
+					if choice.Delta.Role != "" {
+						aggregated.Choices[0].Message.Role = choice.Delta.Role
+					}
+					aggregated.Choices[0].Message.Content += choice.Delta.Content
+					if len(choice.Delta.ToolCalls) > 0 {
+						mergeToolCallDeltas(&aggregated.Choices[0].Message.ToolCalls, choice.Delta.ToolCalls)
+					}
+					if choice.FinishReason != "" {
+						aggregated.Choices[0].FinishReason = choice.FinishReason
+					}
 				}
 			}
+			if chunk.Usage != nil {
+				aggregated.Usage = *chunk.Usage
+				meta.Cost = provider.EstimateCost(firstNonEmpty(meta.ProviderType, meta.Provider), aggregated.Model, aggregated.Usage)
+			}
+			if bufferOutput {
+				buffered = append(buffered, chunk)
+			} else {
+				writeSSE(w, chunk)
+				flusher.Flush()
+			}
 		}
-		if chunk.Usage != nil {
-			aggregated.Usage = *chunk.Usage
-			meta.Cost = provider.EstimateCost(firstNonEmpty(meta.ProviderType, meta.Provider), aggregated.Model, aggregated.Usage)
-		}
-		if bufferOutput {
-			buffered = append(buffered, chunk)
-		} else {
-			writeSSE(w, chunk)
-			flusher.Flush()
-		}
-	}
 
 		if bufferOutput {
 			disp := h.outputGuardrailDisposition(ctx, streamCtx.ID, &aggregated)
