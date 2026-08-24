@@ -1862,7 +1862,7 @@ type Dataset struct {
 type DatasetExample struct {
 	ID        string                 `json:"id"`
 	Input     model.ToolRequest      `json:"input"`
-	Expected  *provider.ChatResponse    `json:"expected,omitempty"`
+	Expected  *provider.ChatResponse `json:"expected,omitempty"`
 	Metadata  map[string]string      `json:"metadata,omitempty"`
 	Labels    []string               `json:"labels,omitempty"`
 	CreatedAt time.Time              `json:"created_at"`
@@ -1897,47 +1897,47 @@ type ExperimentConfig struct {
 
 // ExperimentResult contains the results of an experiment.
 type ExperimentResult struct {
-	ModelResults   map[string]ModelResult   `json:"model_results"`
-	Comparison     *ComparisonResult       `json:"comparison,omitempty"`
-	CompletedAt    time.Time               `json:"completed_at"`
-	TotalEvaluated int                     `json:"total_evaluated"`
-	Errors         int                     `json:"errors"`
+	ModelResults   map[string]ModelResult `json:"model_results"`
+	Comparison     *ComparisonResult      `json:"comparison,omitempty"`
+	CompletedAt    time.Time              `json:"completed_at"`
+	TotalEvaluated int                    `json:"total_evaluated"`
+	Errors         int                    `json:"errors"`
 }
 
 // ModelResult contains results for a single model.
 type ModelResult struct {
-	Model           string             `json:"model"`
-	Metrics         map[string]float64 `json:"metrics"`
-	LatencyP50      float64            `json:"latency_p50_ms"`
-	LatencyP95      float64            `json:"latency_p95_ms"`
-	LatencyP99      float64            `json:"latency_p99_ms"`
-	ErrorRate       float64            `json:"error_rate"`
-	CostPerRequest  float64            `json:"cost_per_request"`
-	TotalRequests   int                `json:"total_requests"`
-	Successful      int                `json:"successful"`
-	Failed          int                `json:"failed"`
-	PerExample      []ExampleResult    `json:"per_example,omitempty"`
+	Model          string             `json:"model"`
+	Metrics        map[string]float64 `json:"metrics"`
+	LatencyP50     float64            `json:"latency_p50_ms"`
+	LatencyP95     float64            `json:"latency_p95_ms"`
+	LatencyP99     float64            `json:"latency_p99_ms"`
+	ErrorRate      float64            `json:"error_rate"`
+	CostPerRequest float64            `json:"cost_per_request"`
+	TotalRequests  int                `json:"total_requests"`
+	Successful     int                `json:"successful"`
+	Failed         int                `json:"failed"`
+	PerExample     []ExampleResult    `json:"per_example,omitempty"`
 }
 
 // ExampleResult is the result for a single example.
 type ExampleResult struct {
-	ExampleID   string             `json:"example_id"`
-	Input       model.ToolRequest  `json:"input"`
-	Output      provider.ChatResponse `json:"output"`
-	Expected    *provider.ChatResponse `json:"expected,omitempty"`
-	Score       float64            `json:"score"`
-	LatencyMs   float64            `json:"latency_ms"`
-	Error       string             `json:"error,omitempty"`
-	Cost        float64            `json:"cost"`
-	TokensIn    int                `json:"tokens_in"`
-	TokensOut   int                `json:"tokens_out"`
+	ExampleID string                 `json:"example_id"`
+	Input     model.ToolRequest      `json:"input"`
+	Output    provider.ChatResponse  `json:"output"`
+	Expected  *provider.ChatResponse `json:"expected,omitempty"`
+	Score     float64                `json:"score"`
+	LatencyMs float64                `json:"latency_ms"`
+	Error     string                 `json:"error,omitempty"`
+	Cost      float64                `json:"cost"`
+	TokensIn  int                    `json:"tokens_in"`
+	TokensOut int                    `json:"tokens_out"`
 }
 
 // ComparisonResult compares multiple models.
 type ComparisonResult struct {
-	BestModel       string             `json:"best_model"`
-	MetricWinners   map[string]string  `json:"metric_winners"`
-	Significance    map[string]float64 `json:"significance"`
+	BestModel          string                    `json:"best_model"`
+	MetricWinners      map[string]string         `json:"metric_winners"`
+	Significance       map[string]float64        `json:"significance"`
 	PairwiseComparison map[string]PairwiseResult `json:"pairwise_comparison"`
 }
 

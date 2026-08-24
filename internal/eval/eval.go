@@ -26,10 +26,10 @@ func NewHandler(st *store.Store) *Handler {
 // Dataset management
 
 type CreateDatasetRequest struct {
-	Name        string                    `json:"name"`
-	Description string                    `json:"description"`
-	Metadata    map[string]string         `json:"metadata"`
-	Examples    []store.DatasetExample    `json:"examples"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Metadata    map[string]string      `json:"metadata"`
+	Examples    []store.DatasetExample `json:"examples"`
 }
 
 type UpdateDatasetRequest struct {
@@ -40,7 +40,7 @@ type UpdateDatasetRequest struct {
 }
 
 type AddExamplesRequest struct {
-	DatasetID string                `json:"dataset_id"`
+	DatasetID string                 `json:"dataset_id"`
 	Examples  []store.DatasetExample `json:"examples"`
 }
 
@@ -176,9 +176,9 @@ func (h *Handler) AddExamples(w http.ResponseWriter, r *http.Request) {
 // Experiment management
 
 type CreateExperimentRequest struct {
-	Name        string               `json:"name"`
-	Description string              `json:"description"`
-	DatasetID   string              `json:"dataset_id"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	DatasetID   string                 `json:"dataset_id"`
 	Config      store.ExperimentConfig `json:"config"`
 }
 
@@ -314,8 +314,8 @@ func (h *Handler) evaluateModel(ctx context.Context, config store.ExperimentConf
 	// Implementation would call the gateway's chat completions endpoint
 	// for each example in the dataset and compute metrics
 	result := store.ModelResult{
-		Model:    model,
-		Metrics:  make(map[string]float64),
+		Model:      model,
+		Metrics:    make(map[string]float64),
 		PerExample: []store.ExampleResult{},
 	}
 
@@ -346,8 +346,8 @@ func (h *Handler) computeComparison(modelResults map[string]store.ModelResult) *
 
 // PolicyReplayRequest is the request for policy replay evaluation
 type PolicyReplayRequest struct {
-	PolicyPaths []string             `json:"policy_paths"`
-	Requests    []model.ToolRequest  `json:"requests"`
+	PolicyPaths []string            `json:"policy_paths"`
+	Requests    []model.ToolRequest `json:"requests"`
 }
 
 // PolicyReplayResult is a single result from policy replay
