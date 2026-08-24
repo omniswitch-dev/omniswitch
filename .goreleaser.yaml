@@ -71,6 +71,9 @@ dockers:
     goos: linux
     goarch: amd64
     dockerfile: Dockerfile.goreleaser
+    extra_files:
+      - policies
+      - examples
     use: buildx
     build_flag_templates:
       - --platform=linux/amd64
@@ -83,6 +86,9 @@ dockers:
     goos: linux
     goarch: arm64
     dockerfile: Dockerfile.goreleaser
+    extra_files:
+      - policies
+      - examples
     use: buildx
     build_flag_templates:
       - --platform=linux/arm64
@@ -108,3 +114,4 @@ release:
     ## OmniSwitch {{ .Tag }}
     Download the archive for your platform, extract, and run `./omniswitch`.
     Docker: `docker run -p 8080:8080 ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}`
+
