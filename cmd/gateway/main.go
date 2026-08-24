@@ -1039,6 +1039,7 @@ func guardrailConfigFromGatewayConfig(cfg gatewayconfig.Config, base guardrail.C
 		for _, rule := range cfg.Guardrails.Rules {
 			out.Rules = append(out.Rules, guardrail.Rule{
 				Name: rule.Name, Stage: rule.Stage, Pattern: rule.Pattern, Action: rule.Action, Message: rule.Message,
+				Fallback: rule.Fallback,
 			})
 		}
 	}
@@ -1063,6 +1064,9 @@ func guardrailConfigFromGatewayConfig(cfg gatewayconfig.Config, base guardrail.C
 			}
 			if webhook.FailOpen != nil {
 				configured.FailOpen = *webhook.FailOpen
+			}
+			if webhook.MaxRetries != nil && *webhook.MaxRetries > 0 {
+				configured.MaxRetries = *webhook.MaxRetries
 			}
 			out.Webhooks = append(out.Webhooks, configured)
 		}

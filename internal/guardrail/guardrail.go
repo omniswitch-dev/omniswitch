@@ -20,6 +20,14 @@ type Result struct {
 	Action    string `json:"action"`
 	Message   string `json:"message"`
 	Details   string `json:"details,omitempty"`
+	// Fallback carries an optional "provider/model" reroute target used when
+	// Action is "fallback".
+	Fallback string `json:"fallback,omitempty"`
+	// RerouteProvider names the provider to reroute to when Action is "reroute".
+	RerouteProvider string `json:"reroute_provider,omitempty"`
+	// MaxRetries limits how many times the gateway should retry after stripping
+	// the violating content. Only meaningful when Action is "retry".
+	MaxRetries int `json:"max_retries,omitempty"`
 }
 
 type Engine struct {
@@ -53,14 +61,22 @@ type GuardrailInput struct {
 }
 
 // Rule adds a declarative, deterministic check to the built-in guardrail
-// chain. Stage is input, output, or both and Action can be deny, warn, log, or
-// redact. Regex validation happens when the engine is constructed.
+// chain. Stage is input, output, or both. Action can be deny, warn, log,
+// redact, retry, reroute, or fallback. Regex validation happens when the
+// engine is constructed.
 type Rule struct {
 	Name    string `json:"name" yaml:"name"`
 	Stage   string `json:"stage,omitempty" yaml:"stage,omitempty"`
 	Pattern string `json:"pattern" yaml:"pattern"`
 	Action  string `json:"action,omitempty" yaml:"action,omitempty"`
 	Message string `json:"message,omitempty" yaml:"message,omitempty"`
+	// Fallback names a "provider/model" reroute target used when the action
+	// is "fallback". The gateway reroutes instead of rejecting.
+	Fallback string `json:"fallback,omitempty" yaml:"fallback,omitempty"`
+	// RerouteProvider specifies the provider to reroute to when action is "reroute".
+	RerouteProvider string `json:"reroute_provider,omitempty" yaml:"reroute_provider,omitempty"`
+	// MaxRetries limits retry attempts when action is "retry" (default 1).
+	MaxRetries int `json:"max_retries,omitempty" yaml:"max_retries,omitempty"`
 }
 
 type Config struct {
@@ -76,13 +92,16 @@ type Config struct {
 // {"triggered":true,"message":"...","details":"..."}. A false
 // `allowed` field is also treated as a trigger.
 type Webhook struct {
-	Name     string            `json:"name" yaml:"name"`
-	URL      string            `json:"url" yaml:"url"`
-	Stage    string            `json:"stage,omitempty" yaml:"stage,omitempty"`
-	Action   string            `json:"action,omitempty" yaml:"action,omitempty"`
-	Headers  map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
-	Timeout  time.Duration     `json:"timeout,omitempty" yaml:"timeout,omitempty"`
-	FailOpen bool              `json:"fail_open,omitempty" yaml:"fail_open,omitempty"`
+	Name            string            `json:"name" yaml:"name"`
+	URL             string            `json:"url" yaml:"url"`
+	Stage           string            `json:"stage,omitempty" yaml:"stage,omitempty"`
+	Action          string            `json:"action,omitempty" yaml:"action,omitempty"`
+	Headers         map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	Timeout         time.Duration     `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	FailOpen        bool              `json:"fail_open,omitempty" yaml:"fail_open,omitempty"`
+	MaxRetries      int               `json:"max_retries,omitempty" yaml:"max_retries,omitempty"` // for HTTP retries
+	Fallback        string            `json:"fallback,omitempty" yaml:"fallback,omitempty"`
+	RerouteProvider string            `json:"reroute_provider,omitempty" yaml:"reroute_provider,omitempty"`
 }
 
 type webhookCheck struct {
@@ -97,6 +116,9 @@ type ToolRule struct {
 	ArgumentsPattern string `json:"arguments_pattern,omitempty" yaml:"arguments_pattern,omitempty"`
 	Action           string `json:"action,omitempty" yaml:"action,omitempty"`
 	Message          string `json:"message,omitempty" yaml:"message,omitempty"`
+	Fallback         string `json:"fallback,omitempty" yaml:"fallback,omitempty"`
+	RerouteProvider  string `json:"reroute_provider,omitempty" yaml:"reroute_provider,omitempty"`
+	MaxRetries       int    `json:"max_retries,omitempty" yaml:"max_retries,omitempty"`
 }
 
 // compiledToolRule holds a ToolRule with its regexes precompiled at engine
@@ -108,16 +130,19 @@ type compiledToolRule struct {
 }
 
 type LLMJudge struct {
-	Name         string            `json:"name" yaml:"name"`
-	URL          string            `json:"url" yaml:"url"`
-	Model        string            `json:"model" yaml:"model"`
-	Stage        string            `json:"stage,omitempty" yaml:"stage,omitempty"`
-	Action       string            `json:"action,omitempty" yaml:"action,omitempty"`
-	SystemPrompt string            `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
-	APIKey       string            `json:"api_key,omitempty" yaml:"api_key,omitempty"`
-	Headers      map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
-	Timeout      time.Duration     `json:"timeout,omitempty" yaml:"timeout,omitempty"`
-	FailOpen     bool              `json:"fail_open,omitempty" yaml:"fail_open,omitempty"`
+	Name            string            `json:"name" yaml:"name"`
+	URL             string            `json:"url" yaml:"url"`
+	Model           string            `json:"model" yaml:"model"`
+	Stage           string            `json:"stage,omitempty" yaml:"stage,omitempty"`
+	Action          string            `json:"action,omitempty" yaml:"action,omitempty"`
+	SystemPrompt    string            `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
+	APIKey          string            `json:"api_key,omitempty" yaml:"api_key,omitempty"`
+	Headers         map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	Timeout         time.Duration     `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	FailOpen        bool              `json:"fail_open,omitempty" yaml:"fail_open,omitempty"`
+	Fallback        string            `json:"fallback,omitempty" yaml:"fallback,omitempty"`
+	RerouteProvider string            `json:"reroute_provider,omitempty" yaml:"reroute_provider,omitempty"`
+	MaxRetries      int               `json:"max_retries,omitempty" yaml:"max_retries,omitempty"`
 }
 
 type llmJudgeCheck struct {
@@ -301,7 +326,7 @@ func (e *Engine) evaluate(ctx context.Context, input GuardrailInput) []Result {
 					continue
 				}
 				emitted[m.RuleIndex] = true
-				triggered = append(triggered, Result{Triggered: true, Type: rule.Name, Action: rule.Action, Message: rule.Message, Details: rule.Pattern})
+				triggered = append(triggered, Result{Triggered: true, Type: rule.Name, Action: rule.Action, Message: rule.Message, Details: rule.Pattern, Fallback: rule.Fallback, RerouteProvider: rule.RerouteProvider, MaxRetries: rule.MaxRetries})
 			}
 		}
 	}
@@ -312,7 +337,7 @@ func (e *Engine) evaluate(ctx context.Context, input GuardrailInput) []Result {
 		if !cr.re.MatchString(text) {
 			continue
 		}
-		triggered = append(triggered, Result{Triggered: true, Type: cr.rule.Name, Action: cr.rule.Action, Message: cr.rule.Message, Details: cr.rule.Pattern})
+		triggered = append(triggered, Result{Triggered: true, Type: cr.rule.Name, Action: cr.rule.Action, Message: cr.rule.Message, Details: cr.rule.Pattern, Fallback: cr.rule.Fallback, RerouteProvider: cr.rule.RerouteProvider, MaxRetries: cr.rule.MaxRetries})
 	}
 	for _, ct := range e.toolRules {
 		if ct.rule.Stage != "both" && ct.rule.Stage != stage {
@@ -327,11 +352,14 @@ func (e *Engine) evaluate(ctx context.Context, input GuardrailInput) []Result {
 				message = "Tool guardrail triggered: " + ct.rule.Name
 			}
 			triggered = append(triggered, Result{
-				Triggered: true,
-				Type:      "tool:" + ct.rule.Name,
-				Action:    ct.rule.Action,
-				Message:   message,
-				Details:   call.Function.Name,
+				Triggered:       true,
+				Type:            "tool:" + ct.rule.Name,
+				Action:          ct.rule.Action,
+				Message:         message,
+				Details:         call.Function.Name,
+				Fallback:        ct.rule.Fallback,
+				RerouteProvider: ct.rule.RerouteProvider,
+				MaxRetries:      ct.rule.MaxRetries,
 			})
 		}
 	}
@@ -509,22 +537,52 @@ func (webhook webhookCheck) Evaluate(ctx context.Context, input GuardrailInput) 
 	if err != nil {
 		return Result{}, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, webhook.config.URL, strings.NewReader(string(payload)))
-	if err != nil {
-		return Result{}, err
+
+	// Transport errors and 5xx responses retry with linear backoff; a
+	// triggered decision or 4xx is final on the first attempt.
+	const backoff = 250 * time.Millisecond
+	attempts := webhook.config.MaxRetries + 1
+	if attempts < 1 {
+		attempts = 1
 	}
-	request.Header.Set("Content-Type", "application/json")
-	for key, value := range webhook.config.Headers {
-		request.Header.Set(key, value)
+	var (
+		response *http.Response
+		doErr    error
+		status   string
+	)
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return Result{}, ctx.Err()
+			case <-time.After(backoff * time.Duration(attempt)):
+			}
+		}
+		request, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, webhook.config.URL, strings.NewReader(string(payload)))
+		if reqErr != nil {
+			return Result{}, reqErr
+		}
+		request.Header.Set("Content-Type", "application/json")
+		for key, value := range webhook.config.Headers {
+			request.Header.Set(key, value)
+		}
+		response, doErr = webhook.client.Do(request)
+		if doErr == nil && response.StatusCode >= http.StatusInternalServerError {
+			status = response.Status
+			response.Body.Close()
+			response = nil
+			continue // retryable server error
+		}
+		break
 	}
-	response, err := webhook.client.Do(request)
-	if err != nil {
-		return Result{}, err
+	if doErr != nil {
+		return Result{}, doErr
+	}
+	if response == nil {
+		// Every attempt returned a retryable server error; surface the last.
+		return Result{}, fmt.Errorf("unexpected status %s", status)
 	}
 	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return Result{}, fmt.Errorf("unexpected status %s", response.Status)
-	}
 	var decision struct {
 		Triggered bool   `json:"triggered"`
 		Allowed   *bool  `json:"allowed"`
@@ -542,7 +600,7 @@ func (webhook webhookCheck) Evaluate(ctx context.Context, input GuardrailInput) 
 	if message == "" {
 		message = "External guardrail triggered: " + webhook.config.Name
 	}
-	return Result{Triggered: true, Type: "webhook:" + webhook.config.Name, Action: webhook.config.Action, Message: message, Details: decision.Details}, nil
+	return Result{Triggered: true, Type: "webhook:" + webhook.config.Name, Action: webhook.config.Action, Message: message, Details: decision.Details, Fallback: webhook.config.Fallback, RerouteProvider: webhook.config.RerouteProvider, MaxRetries: webhook.config.MaxRetries}, nil
 }
 
 func (judge llmJudgeCheck) Evaluate(ctx context.Context, input GuardrailInput) (Result, error) {
@@ -609,12 +667,12 @@ func (judge llmJudgeCheck) Evaluate(ctx context.Context, input GuardrailInput) (
 	if message == "" {
 		message = "LLM guardrail triggered: " + judge.config.Name
 	}
-	return Result{Triggered: true, Type: "llm:" + judge.config.Name, Action: judge.config.Action, Message: message, Details: decision.Details}, nil
+	return Result{Triggered: true, Type: "llm:" + judge.config.Name, Action: judge.config.Action, Message: message, Details: decision.Details, Fallback: judge.config.Fallback, RerouteProvider: judge.config.RerouteProvider, MaxRetries: judge.config.MaxRetries}, nil
 }
 
 func validAction(action string) bool {
 	switch strings.ToLower(strings.TrimSpace(action)) {
-	case "deny", "warn", "log", "redact":
+	case "deny", "warn", "log", "redact", "retry", "reroute", "fallback":
 		return true
 	default:
 		return false

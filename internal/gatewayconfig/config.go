@@ -133,11 +133,12 @@ type Guardrails struct {
 }
 
 type GuardrailRule struct {
-	Name    string `json:"name" yaml:"name"`
-	Stage   string `json:"stage,omitempty" yaml:"stage,omitempty"`
-	Pattern string `json:"pattern" yaml:"pattern"`
-	Action  string `json:"action,omitempty" yaml:"action,omitempty"`
-	Message string `json:"message,omitempty" yaml:"message,omitempty"`
+	Name     string `json:"name" yaml:"name"`
+	Stage    string `json:"stage,omitempty" yaml:"stage,omitempty"`
+	Pattern  string `json:"pattern" yaml:"pattern"`
+	Action   string `json:"action,omitempty" yaml:"action,omitempty"`
+	Message  string `json:"message,omitempty" yaml:"message,omitempty"`
+	Fallback string `json:"fallback,omitempty" yaml:"fallback,omitempty"`
 }
 
 type ToolGuardrailRule struct {
@@ -152,13 +153,14 @@ type ToolGuardrailRule struct {
 // GuardrailWebhook delegates a stage to an external moderation or safety
 // service. Its endpoint returns {triggered,message,details} or {allowed}.
 type GuardrailWebhook struct {
-	Name     string            `json:"name" yaml:"name"`
-	URL      string            `json:"url" yaml:"url"`
-	Stage    string            `json:"stage,omitempty" yaml:"stage,omitempty"`
-	Action   string            `json:"action,omitempty" yaml:"action,omitempty"`
-	Headers  map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
-	Timeout  *Duration         `json:"timeout,omitempty" yaml:"timeout,omitempty"`
-	FailOpen *bool             `json:"fail_open,omitempty" yaml:"fail_open,omitempty"`
+	Name       string            `json:"name" yaml:"name"`
+	URL        string            `json:"url" yaml:"url"`
+	Stage      string            `json:"stage,omitempty" yaml:"stage,omitempty"`
+	Action     string            `json:"action,omitempty" yaml:"action,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	Timeout    *Duration         `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	FailOpen   *bool             `json:"fail_open,omitempty" yaml:"fail_open,omitempty"`
+	MaxRetries *int              `json:"max_retries,omitempty" yaml:"max_retries,omitempty"`
 }
 
 type LLMGuardrailJudge struct {

@@ -230,6 +230,8 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		stageStart = time.Now()
 		results := gr.EvaluateInputContext(ctx, req.Messages)
 		h.recordGuardrailResults(ctx, reqID, results)
+		var rerouteProvider string
+		var fallbackTarget string
 		for _, gr := range results {
 			if gr.Action == "deny" {
 				recordTraceSpan(ctx, "guardrail_input", "", "denied", stageStart, map[string]any{"type": gr.Type, "message": gr.Message})
@@ -249,6 +251,30 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
+			if gr.Action == "reroute" && rerouteProvider == "" && gr.RerouteProvider != "" {
+				rerouteProvider = gr.RerouteProvider
+			}
+			if gr.Action == "fallback" && fallbackTarget == "" && gr.Fallback != "" {
+				fallbackTarget = gr.Fallback
+			}
+		}
+		if rerouteProvider != "" {
+			providerHint = rerouteProvider
+			recordTraceSpan(ctx, "guardrail_reroute", providerHint, "rerouted", stageStart, map[string]any{"target": rerouteProvider})
+		}
+		if fallbackTarget != "" {
+			providerName, modelID := parseFallbackTarget(fallbackTarget)
+			if providerName != "" {
+				providerHint = providerName
+			}
+			if modelID != "" {
+				req.Model = modelID
+			}
+			recordTraceSpan(ctx, "guardrail_fallback", providerHint, "rerouted", stageStart,
+				map[string]any{"target": fallbackTarget})
+			span.SetAttributes(
+				attribute.String("sentinel.guardrail.fallback_target", fallbackTarget),
+			)
 		}
 		recordTraceSpan(ctx, "guardrail_input", "", "ok", stageStart, nil)
 	}
@@ -263,15 +289,16 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	cachedResp, cacheHit := h.cachedResponse(ctx, tenantCacheScope, cacheProvider, backendReq)
 	recordTraceSpan(ctx, "cache_lookup", cacheProvider, map[bool]string{true: "hit", false: "miss"}[cacheHit], stageStart, nil)
 	if cacheHit {
-		if denied, _, reason := h.outputGuardrailDisposition(ctx, reqID, &cachedResp); denied {
+		disp := h.outputGuardrailDisposition(ctx, reqID, &cachedResp)
+		if disp.Denied {
 			h.logRequest(ctx, logContext{
 				ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &cachedResp,
-				APIKeyID: apiKeyID, Status: "denied", ErrorMessage: reason, Cached: true,
+				APIKeyID: apiKeyID, Status: "denied", ErrorMessage: disp.Reason, Cached: true,
 			})
 			w.Header().Set("x-omniswitch-trace-id", traceID)
 			w.Header().Set("x-omniswitch-session-id", sessionID)
 			writeJSON(w, http.StatusForbidden, map[string]any{
-				"error": map[string]string{"message": reason, "type": "guardrail", "code": "guardrail_triggered"},
+				"error": map[string]string{"message": disp.Reason, "type": "guardrail", "code": "guardrail_triggered"},
 			})
 			return
 		}
@@ -304,43 +331,76 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Route to provider.
-	stageStart = time.Now()
-	resp, meta, err := activeRouter.Execute(ctx, backendReq, providerHint)
-	if err != nil {
-		recordTraceSpan(ctx, "provider_call", meta.Provider, "error", stageStart, map[string]any{"error": err.Error()})
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "provider error")
-		span.SetAttributes(attribute.String("llm.response.provider", meta.Provider))
-		h.logRequest(ctx, logContext{
-			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Meta: &meta,
-			APIKeyID: apiKeyID, Status: "error", ErrorMessage: err.Error(),
-		})
-		w.Header().Set("x-omniswitch-trace-id", traceID)
-		w.Header().Set("x-omniswitch-session-id", sessionID)
-		writeError(w, http.StatusBadGateway, "provider error: "+err.Error())
-		return
-	}
-	recordTraceSpan(ctx, "provider_call", meta.Provider, "ok", stageStart, nil)
+	var resp provider.ChatResponse
+	var meta provider.ProviderMeta
+	var err error
 
-	// Output guardrails inspect every completion choice. Redacted output is what
-	// gets cached and logged, so a later cache hit cannot restore sensitive data.
-	if denied, _, reason := h.outputGuardrailDisposition(ctx, reqID, &resp); denied {
-		span.SetAttributes(
-			attribute.String("sentinel.decision", "DENY"),
-			attribute.String("sentinel.decision_reason", reason),
-			attribute.String("llm.response.provider", meta.Provider),
-		)
-		h.logRequest(ctx, logContext{
-			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &resp, Meta: &meta,
-			APIKeyID: apiKeyID, Status: "denied", ErrorMessage: reason,
-		})
-		w.Header().Set("x-omniswitch-trace-id", traceID)
-		w.Header().Set("x-omniswitch-session-id", sessionID)
-		writeJSON(w, http.StatusForbidden, map[string]any{
-			"error": map[string]string{"message": reason, "type": "guardrail", "code": "guardrail_triggered"},
-		})
-		return
+	maxAttempts := 1
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		stageStart = time.Now()
+		resp, meta, err = activeRouter.Execute(ctx, backendReq, providerHint)
+		if err != nil {
+			recordTraceSpan(ctx, "provider_call", meta.Provider, "error", stageStart, map[string]any{"error": err.Error()})
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "provider error")
+			span.SetAttributes(attribute.String("llm.response.provider", meta.Provider))
+			h.logRequest(ctx, logContext{
+				ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Meta: &meta,
+				APIKeyID: apiKeyID, Status: "error", ErrorMessage: err.Error(),
+			})
+			w.Header().Set("x-omniswitch-trace-id", traceID)
+			w.Header().Set("x-omniswitch-session-id", sessionID)
+			writeError(w, http.StatusBadGateway, "provider error: "+err.Error())
+			return
+		}
+		recordTraceSpan(ctx, "provider_call", meta.Provider, "ok", stageStart, nil)
+
+		// Output guardrails inspect every completion choice.
+		disp := h.outputGuardrailDisposition(ctx, reqID, &resp)
+		if disp.Denied {
+			span.SetAttributes(
+				attribute.String("sentinel.decision", "DENY"),
+				attribute.String("sentinel.decision_reason", disp.Reason),
+				attribute.String("llm.response.provider", meta.Provider),
+			)
+			h.logRequest(ctx, logContext{
+				ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &resp, Meta: &meta,
+				APIKeyID: apiKeyID, Status: "denied", ErrorMessage: disp.Reason,
+			})
+			w.Header().Set("x-omniswitch-trace-id", traceID)
+			w.Header().Set("x-omniswitch-session-id", sessionID)
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error": map[string]string{"message": disp.Reason, "type": "guardrail", "code": "guardrail_triggered"},
+			})
+			return
+		}
+
+		if disp.Retry || disp.RerouteProvider != "" || disp.Fallback != "" {
+			if disp.MaxRetries > 0 && maxAttempts == 1 {
+				maxAttempts = 1 + disp.MaxRetries
+			} else if maxAttempts == 1 {
+				maxAttempts = 2 // default 1 retry
+			}
+
+			if attempt+1 < maxAttempts {
+				if disp.RerouteProvider != "" {
+					providerHint = disp.RerouteProvider
+				}
+				if disp.Fallback != "" {
+					if pn, mod := parseFallbackTarget(disp.Fallback); pn != "" || mod != "" {
+						if pn != "" {
+							providerHint = pn
+						}
+						if mod != "" {
+							backendReq.Model = mod
+						}
+					}
+				}
+				continue
+			}
+		}
+
+		break
 	}
 
 	h.storeCache(ctx, tenantCacheScope, cacheProvider, backendReq, resp)
@@ -389,6 +449,18 @@ type streamContext struct {
 func (h *Handler) ListModels(w http.ResponseWriter, r *http.Request) {
 	models := h.registry.AllModels()
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": models})
+}
+
+
+
+// parseFallbackTarget splits a "provider/model" reroute target. Either half
+// may be empty; the caller applies only the halves present.
+func parseFallbackTarget(target string) (providerName, modelID string) {
+	name, model, ok := strings.Cut(target, "/")
+	if !ok {
+		return strings.TrimPrefix(target, "@"), ""
+	}
+	return strings.TrimPrefix(name, "@"), model
 }
 
 type logContext struct {
@@ -570,22 +642,22 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 	}
 
 	if bufferOutput {
-		denied, redacted, reason := h.outputGuardrailDisposition(ctx, streamCtx.ID, &aggregated)
-		if denied {
+		disp := h.outputGuardrailDisposition(ctx, streamCtx.ID, &aggregated)
+		if disp.Denied {
 			span.SetStatus(codes.Error, "stream output guardrail denied")
 			h.logRequest(ctx, logContext{
 				ID: streamCtx.ID, TraceID: streamCtx.TraceID, SessionID: streamCtx.SessionID, Request: streamCtx.Request, Response: &aggregated, Meta: &meta,
-				APIKeyID: streamCtx.APIKeyID, Status: "denied", ErrorMessage: reason,
+				APIKeyID: streamCtx.APIKeyID, Status: "denied", ErrorMessage: disp.Reason,
 			})
 			w.Header().Set("x-omniswitch-trace-id", streamCtx.TraceID)
 			w.Header().Set("x-omniswitch-session-id", streamCtx.SessionID)
 			writeJSON(w, http.StatusForbidden, map[string]any{
-				"error": map[string]string{"message": reason, "type": "guardrail", "code": "guardrail_triggered"},
+				"error": map[string]string{"message": disp.Reason, "type": "guardrail", "code": "guardrail_triggered"},
 			})
 			return
 		}
 		setStreamHeaders(w, streamCtx.TraceID, streamCtx.SessionID)
-		if redacted {
+		if disp.Redacted {
 			writeStream(w, aggregated)
 		} else {
 			w.WriteHeader(http.StatusOK)
@@ -628,27 +700,57 @@ func setStreamHeaders(w http.ResponseWriter, traceID, sessionID string) {
 	w.Header().Set("x-omniswitch-cache", "MISS")
 }
 
+type guardrailDisposition struct {
+	Denied          bool
+	Redacted        bool
+	Retry           bool
+	MaxRetries      int
+	RerouteProvider string
+	Fallback        string
+	Reason          string
+}
+
 // outputGuardrailDisposition evaluates every generated choice. A redaction
 // replaces the affected output before it is logged, cached, or returned.
-func (h *Handler) outputGuardrailDisposition(ctx context.Context, requestID string, resp *provider.ChatResponse) (denied, redacted bool, reason string) {
+func (h *Handler) outputGuardrailDisposition(ctx context.Context, requestID string, resp *provider.ChatResponse) guardrailDisposition {
 	gr := h.guardrails.Load()
 	if gr == nil {
-		return false, false, ""
+		return guardrailDisposition{}
 	}
+	var disp guardrailDisposition
 	for index := range resp.Choices {
 		results := gr.EvaluateOutputMessageContext(ctx, resp.Choices[index].Message)
 		h.recordGuardrailResults(ctx, requestID, results)
 		for _, result := range results {
+			if !result.Triggered {
+				continue
+			}
 			switch result.Action {
 			case "deny":
-				return true, false, result.Message
+				disp.Denied = true
+				if disp.Reason == "" {
+					disp.Reason = result.Message
+				}
 			case "redact":
 				resp.Choices[index].Message.Content = "[REDACTED BY OMNISWITCH]"
-				redacted = true
+				disp.Redacted = true
+			case "retry":
+				disp.Retry = true
+				if result.MaxRetries > disp.MaxRetries {
+					disp.MaxRetries = result.MaxRetries
+				}
+			case "reroute":
+				if disp.RerouteProvider == "" && result.RerouteProvider != "" {
+					disp.RerouteProvider = result.RerouteProvider
+				}
+			case "fallback":
+				if disp.Fallback == "" && result.Fallback != "" {
+					disp.Fallback = result.Fallback
+				}
 			}
 		}
 	}
-	return false, redacted, ""
+	return disp
 }
 
 // recordGuardrailResults keeps a structured audit trail for both enforced and
