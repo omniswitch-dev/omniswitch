@@ -69,7 +69,19 @@ func main() {
 	}()
 
 	// Initialize store.
-	st, err := store.New(settings.dataDir)
+	var st *store.Store
+	if dsn := strings.TrimSpace(os.Getenv("OMNISWITCH_DATABASE_URL")); strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		st, err = store.OpenPostgres(dsn)
+		if err != nil {
+			log.Fatalf("failed to connect to postgres: %v", err)
+		}
+		log.Printf("using PostgreSQL storage (shared state across replicas)")
+	} else {
+		st, err = store.New(settings.dataDir)
+		if err != nil {
+			log.Fatalf("failed to initialize store: %v", err)
+		}
+	}
 	if err != nil {
 		log.Fatalf("failed to initialize store: %v", err)
 	}
@@ -95,6 +107,7 @@ func main() {
 		registerProviderAccount(registry, account)
 	}
 	registerVaultProviders(registry, vaultManager)
+	registerOpenAICompatiblePresets(registry)
 
 	if len(registry.Names()) == 0 {
 		log.Println("WARNING: No provider API keys configured. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or GROQ_API_KEY.")
@@ -1312,6 +1325,56 @@ func expandStrings(values []string) []string {
 	return expanded
 }
 
+// openAICompatiblePreset describes a hosted provider whose API is
+// OpenAI-compatible. Setting the environment variable is enough to enable it;
+// a config account with the same type can override the base URL or models.
+type openAICompatiblePreset struct {
+	Type    string
+	EnvKey  string
+	BaseURL string
+	Models  []string
+}
+
+var openAICompatiblePresets = []openAICompatiblePreset{
+	{"mistral", "MISTRAL_API_KEY", "https://api.mistral.ai/v1", []string{"mistral-large-latest", "mistral-medium-latest", "mistral-small-latest", "codestral-latest", "open-mistral-nemo"}},
+	{"xai", "XAI_API_KEY", "https://api.x.ai/v1", []string{"grok-4", "grok-4-fast", "grok-3", "grok-3-mini"}},
+	{"deepseek", "DEEPSEEK_API_KEY", "https://api.deepseek.com/v1", []string{"deepseek-chat", "deepseek-reasoner"}},
+	{"together", "TOGETHER_API_KEY", "https://api.together.xyz/v1", []string{"meta-llama/Llama-3.3-70B-Instruct-Turbo", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo", "Qwen/Qwen2.5-72B-Instruct-Turbo", "deepseek-ai/DeepSeek-V3"}},
+	{"fireworks", "FIREWORKS_API_KEY", "https://api.fireworks.ai/inference/v1", []string{"accounts/fireworks/models/llama-v3p3-70b-instruct", "accounts/fireworks/models/deepseek-v3"}},
+	{"perplexity", "PERPLEXITY_API_KEY", "https://api.perplexity.ai", []string{"sonar", "sonar-pro", "sonar-reasoning-pro"}},
+	{"cerebras", "CEREBRAS_API_KEY", "https://api.cerebras.ai/v1", []string{"llama-3.3-70b", "llama3.1-8b"}},
+	{"openrouter", "OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", nil}, // dynamic catalog; route by full model id
+}
+
+// registerOpenAICompatiblePresets lights up hosted providers whose credentials
+// are present in the environment, giving broad provider coverage without any
+// per-provider adapter code.
+func registerOpenAICompatiblePresets(registry *provider.Registry) {
+	for _, preset := range openAICompatiblePresets {
+		apiKey := os.Getenv(preset.EnvKey)
+		if apiKey == "" {
+			continue
+		}
+		var opts []provider.CustomOption
+		if len(preset.Models) > 0 {
+			opts = append(opts, provider.WithCustomModels(preset.Models))
+		}
+		p := provider.NewCustom(preset.Type, preset.BaseURL, apiKey, opts...)
+		registry.Register(p)
+		log.Printf("registered %s provider: %s (%s)", preset.Type, p.Name(), preset.BaseURL)
+	}
+}
+
+func presetForType(providerType string) *openAICompatiblePreset {
+	normalized := strings.ToLower(strings.TrimSpace(providerType))
+	for i := range openAICompatiblePresets {
+		if openAICompatiblePresets[i].Type == normalized {
+			return &openAICompatiblePresets[i]
+		}
+	}
+	return nil
+}
+
 func registerEnvProvider(registry *provider.Registry, providerType string, envKey string) {
 	if key := os.Getenv(envKey); key != "" {
 		if p := newProvider(providerType, key); p != nil {
@@ -1388,20 +1451,33 @@ func registerProviderAccount(registry *provider.Registry, account gatewayconfig.
 	}
 
 	// Custom or generic OpenAI-compatible provider with explicit base_url.
-	if providerType == "custom" || account.BaseURL != "" {
+	if providerType == "custom" || account.BaseURL != "" || presetForType(providerType) != nil {
 		envKey := strings.TrimSpace(account.APIKeyEnv)
 		apiKey := ""
 		if envKey != "" {
 			apiKey = os.Getenv(envKey)
 		}
 		var opts []provider.CustomOption
-		if len(account.Models) > 0 {
-			opts = append(opts, provider.WithCustomModels(account.Models))
+		models := account.Models
+		baseURL := account.BaseURL
+		if preset := presetForType(providerType); preset != nil {
+			if baseURL == "" {
+				baseURL = preset.BaseURL
+			}
+			if len(models) == 0 {
+				models = preset.Models
+			}
+			if envKey == "" {
+				envKey = preset.EnvKey
+				apiKey = os.Getenv(envKey)
+			}
+		}
+		if len(models) > 0 {
+			opts = append(opts, provider.WithCustomModels(models))
 		}
 		if len(account.ExtraHeaders) > 0 {
 			opts = append(opts, provider.WithCustomHeaders(expandHeaderValues(account.ExtraHeaders)))
 		}
-		baseURL := account.BaseURL
 		if baseURL == "" {
 			log.Printf("skipping custom provider %q: base_url is required for type=custom", account.Name)
 			return
@@ -1497,6 +1573,9 @@ func newProvider(providerType string, apiKey string) provider.Provider {
 }
 
 func defaultProviderKeyEnv(providerType string) string {
+	if preset := presetForType(providerType); preset != nil {
+		return preset.EnvKey
+	}
 	switch strings.ToLower(strings.TrimSpace(providerType)) {
 	case "openai":
 		return "OPENAI_API_KEY"

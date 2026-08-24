@@ -1,0 +1,95 @@
+# Default values for the OmniSwitch Helm chart.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/omniswitch-dev/omniswitch
+  tag: ""            # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+# Provider credentials. Rendered into a Secret and injected via envFrom.
+# Example:
+#   secrets:
+#     OPENAI_API_KEY: sk-...
+#     ANTHROPIC_API_KEY: sk-ant-...
+secrets: {}
+existingSecret: ""    # use an existing Secret instead of creating one
+
+# Gateway configuration (rendered to /config/gateway.yaml).
+config:
+  apiVersion: omniswitch.dev/v1
+  kind: GatewayConfig
+  gateway:
+    auth: true
+    cache_scope: api_key
+    log_payloads: false
+  # routes: {}
+  # guardrails: {}
+  # rate_limit: {}
+  # identity: {}
+  # authorization: {}
+  # mcp: {}
+  # providers: []
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+
+redis:
+  enabled: false
+  url: redis://omniswitch-redis:6379/0
+  image:
+    repository: redis
+    tag: "7-alpine"
+  storage:
+    size: 1Gi
+
+observability:
+  prometheus:
+    enabled: true
+    path: /metrics
+    port: http
+  otel:
+    enabled: false
+    endpoint: ""
+    serviceName: omniswitch
+    insecure: false
+    headers: {}       # e.g. authorization: "Bearer ${OTEL_TOKEN}"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+podAnnotations: {}
+podLabels: {}
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

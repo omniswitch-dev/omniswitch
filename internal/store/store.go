@@ -7,18 +7,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/omniswitch-dev/omniswitch/internal/cache"
 	"github.com/omniswitch-dev/omniswitch/internal/provider"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
 // Store provides persistent storage for the gateway.
 type Store struct {
 	db *sql.DB
+	pg bool // PostgreSQL dialect when true; SQLite otherwise
 }
 
 // RequestLog represents a logged gateway request.
@@ -259,6 +262,72 @@ func New(dir string) (*Store, error) {
 	return store, nil
 }
 
+// OpenPostgres creates a Store backed by a PostgreSQL database. It enables
+// horizontally scaled gateway replicas to share keys, logs, budgets, and
+// configuration. The DSN is a standard postgres:// connection string.
+func OpenPostgres(dsn string) (*Store, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, fmt.Errorf("postgres DSN is required")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
+	}
+	db.SetMaxOpenConns(25)
+	store := &Store{db: db, pg: true}
+	if err := store.migrate(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	return store, nil
+}
+
+// rewriteSQL converts SQLite-style ? placeholders into PostgreSQL $n
+// placeholders. Placeholders inside single-quoted strings are preserved.
+func rewriteSQL(query string) string {
+	var b strings.Builder
+	b.Grow(len(query) + 8)
+	inString := false
+	n := 0
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+		if ch == '\'' {
+			inString = !inString
+			b.WriteByte(ch)
+			continue
+		}
+		if ch == '?' && !inString {
+			n++
+			b.WriteByte('$')
+			b.WriteString(strconv.Itoa(n))
+			continue
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
+func (s *Store) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if s.pg {
+		query = rewriteSQL(query)
+	}
+	return s.db.ExecContext(ctx, query, args...)
+}
+
+func (s *Store) query(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if s.pg {
+		query = rewriteSQL(query)
+	}
+	return s.db.QueryContext(ctx, query, args...)
+}
+
+func (s *Store) queryRow(ctx context.Context, query string, args ...any) *sql.Row {
+	if s.pg {
+		query = rewriteSQL(query)
+	}
+	return s.db.QueryRowContext(ctx, query, args...)
+}
+
 func (s *Store) migrate() error {
 	migrations := []string{
 		`CREATE TABLE IF NOT EXISTS request_logs (
@@ -464,7 +533,7 @@ func (s *Store) migrate() error {
 
 // InsertLog stores a request log entry.
 func (s *Store) InsertLog(ctx context.Context, log RequestLog) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO request_logs (id, timestamp, trace_id, session_id, provider, model, api_key_id, status,
 			input_tokens, output_tokens, total_tokens, latency_ms, cost,
 			request_body, response_body, decision, decision_reason, error_message, cached, metadata)
@@ -505,7 +574,7 @@ func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, statu
 
 	var total int
 	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM request_logs WHERE %s", where)
-	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+	if err := s.queryRow(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
@@ -514,7 +583,7 @@ func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, statu
 		where,
 	)
 	args = append(args, limit, offset)
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.query(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -549,7 +618,7 @@ func (s *Store) UpsertGatewayConfig(ctx context.Context, record GatewayConfigRec
 		record.Format = "yaml"
 	}
 	if strings.TrimSpace(record.ID) != "" {
-		result, err := s.db.ExecContext(ctx,
+		result, err := s.exec(ctx,
 			`UPDATE gateway_configs
 			SET name = ?, description = ?, format = ?, body = ?, updated_at = ?, enabled = ?
 			WHERE id = ?`,
@@ -568,7 +637,7 @@ func (s *Store) UpsertGatewayConfig(ctx context.Context, record GatewayConfigRec
 			return nil
 		}
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO gateway_configs (id, name, description, format, body, created_at, updated_at, enabled)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
@@ -590,7 +659,7 @@ func (s *Store) UpsertGatewayConfig(ctx context.Context, record GatewayConfigRec
 }
 
 func (s *Store) SetGatewayConfigEnabled(ctx context.Context, ref string, enabled bool) error {
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.exec(ctx,
 		`UPDATE gateway_configs SET enabled = ?, updated_at = ? WHERE id = ? OR name = ?`,
 		boolToInt(enabled),
 		time.Now().UTC().Format(time.RFC3339Nano),
@@ -610,7 +679,7 @@ func (s *Store) GetGatewayConfig(ctx context.Context, ref string) (GatewayConfig
 	var record GatewayConfigRecord
 	var createdAt, updatedAt string
 	var enabled int
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT id, name, COALESCE(description, ''), format, body, created_at, updated_at, enabled
 		FROM gateway_configs
 		WHERE (id = ? OR name = ?) AND enabled = 1`,
@@ -631,7 +700,7 @@ func (s *Store) ListGatewayConfigs(ctx context.Context, includeDisabled bool) ([
 	if includeDisabled {
 		where = "1=1"
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		fmt.Sprintf(`SELECT id, name, COALESCE(description, ''), format, body, created_at, updated_at, enabled
 		FROM gateway_configs WHERE %s ORDER BY updated_at DESC`, where),
 	)
@@ -656,7 +725,7 @@ func (s *Store) ListGatewayConfigs(ctx context.Context, includeDisabled bool) ([
 }
 
 func (s *Store) DeleteGatewayConfig(ctx context.Context, ref string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE gateway_configs SET enabled = 0, updated_at = ? WHERE id = ? OR name = ?`,
+	result, err := s.exec(ctx, `UPDATE gateway_configs SET enabled = 0, updated_at = ? WHERE id = ? OR name = ?`,
 		time.Now().UTC().Format(time.RFC3339Nano),
 		ref,
 		ref,
@@ -681,7 +750,7 @@ func (s *Store) GetCostAnalytics(ctx context.Context, since time.Time, groupBy, 
 		where += " AND api_key_id = ?"
 		args = append(args, apiKeyID)
 	}
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+	rows, err := s.query(ctx, fmt.Sprintf(`
 		SELECT %s AS bucket,
 			COUNT(*) AS request_count,
 			COALESCE(SUM(cost), 0) AS total_cost,
@@ -714,7 +783,7 @@ func (s *Store) GetTrace(ctx context.Context, traceID, apiKeyID string) (TraceDe
 		where += " AND api_key_id = ?"
 		args = append(args, apiKeyID)
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		fmt.Sprintf(`SELECT id, timestamp, trace_id, session_id, provider, model, api_key_id, status,
 			input_tokens, output_tokens, total_tokens, latency_ms, cost, COALESCE(request_body, ''),
 			COALESCE(response_body, ''), decision, decision_reason, error_message, cached, COALESCE(metadata, '')
@@ -802,7 +871,7 @@ func (s *Store) getMetrics(ctx context.Context, since time.Time, apiKeyID string
 		where += " AND api_key_id = ?"
 		args = append(args, apiKeyID)
 	}
-	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+	err := s.queryRow(ctx, fmt.Sprintf(`
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN decision = 'ALLOW' THEN 1 ELSE 0 END), 0),
@@ -844,7 +913,7 @@ func (s *Store) getProviderMetrics(ctx context.Context, since time.Time, apiKeyI
 		where += " AND api_key_id = ?"
 		args = append(args, apiKeyID)
 	}
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+	rows, err := s.query(ctx, fmt.Sprintf(`
 		SELECT provider,
 			COUNT(*),
 			COALESCE(AVG(latency_ms), 0),
@@ -876,7 +945,7 @@ func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
 		s := key.ExpiresAt.Format(time.RFC3339)
 		expiresAt = &s
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO api_keys (id, name, key_hash, key_prefix, created_at, expires_at, rate_limit, enabled, workspace_id, role, metadata)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -896,7 +965,7 @@ func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx,
+	_, err = s.exec(ctx,
 		"UPDATE api_keys SET budget_usd = ?, spend_usd = ?, monthly_cost_budget = ?, monthly_token_budget = ? WHERE id = ?",
 		firstPositive(key.BudgetUSD, key.MonthlyCostBudget), key.SpendUSD, key.MonthlyCostBudget, key.MonthlyTokenBudget, key.ID,
 	)
@@ -910,7 +979,7 @@ func (s *Store) GetAPIKeyByHash(ctx context.Context, hash string) (APIKey, error
 	var expiresAt, workspaceID, role sql.NullString
 	var enabled int
 
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		"SELECT id, name, key_hash, key_prefix, created_at, expires_at, rate_limit, budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, workspace_id, role, metadata FROM api_keys WHERE key_hash = ?",
 		hash,
 	).Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &createdAt, &expiresAt, &key.RateLimit, &key.BudgetUSD, &key.SpendUSD, &key.MonthlyCostBudget, &key.MonthlyTokenBudget, &enabled, &workspaceID, &role, &metaStr)
@@ -932,7 +1001,7 @@ func (s *Store) GetAPIKeyByHash(ctx context.Context, hash string) (APIKey, error
 
 // ListAPIKeys returns all API keys.
 func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		"SELECT id, name, key_prefix, created_at, expires_at, rate_limit, budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, workspace_id, role FROM api_keys ORDER BY created_at DESC")
 	if err != nil {
 		return nil, err
@@ -963,7 +1032,7 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 
 // DeleteAPIKey disables an API key.
 func (s *Store) DeleteAPIKey(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, "UPDATE api_keys SET enabled = 0 WHERE id = ?", id)
+	_, err := s.exec(ctx, "UPDATE api_keys SET enabled = 0 WHERE id = ?", id)
 	return err
 }
 
@@ -971,7 +1040,7 @@ func (s *Store) DeleteAPIKey(ctx context.Context, id string) error {
 func (s *Store) InsertPrompt(ctx context.Context, p Prompt) error {
 	vars, _ := json.Marshal(p.Variables)
 	meta, _ := json.Marshal(p.Metadata)
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO prompts (id, name, version, template, variables, created_at, updated_at, metadata)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, p.Name, p.Version, p.Template, string(vars),
@@ -982,7 +1051,7 @@ func (s *Store) InsertPrompt(ctx context.Context, p Prompt) error {
 
 // ListPrompts returns all prompts.
 func (s *Store) ListPrompts(ctx context.Context) ([]Prompt, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		"SELECT id, name, version, template, variables, created_at, updated_at FROM prompts ORDER BY updated_at DESC")
 	if err != nil {
 		return nil, err
@@ -1005,7 +1074,7 @@ func (s *Store) ListPrompts(ctx context.Context) ([]Prompt, error) {
 }
 
 func (s *Store) ListPromptVersions(ctx context.Context, name string) ([]Prompt, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		"SELECT id, name, version, template, variables, created_at, updated_at FROM prompts WHERE name = ? ORDER BY version DESC",
 		name,
 	)
@@ -1031,7 +1100,7 @@ func (s *Store) ListPromptVersions(ctx context.Context, name string) ([]Prompt, 
 
 func (s *Store) NextPromptVersion(ctx context.Context, name string) (int, error) {
 	var latest int
-	err := s.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM prompts WHERE name = ?", name).Scan(&latest)
+	err := s.queryRow(ctx, "SELECT COALESCE(MAX(version), 0) FROM prompts WHERE name = ?", name).Scan(&latest)
 	if err != nil {
 		return 0, err
 	}
@@ -1042,7 +1111,7 @@ func (s *Store) NextPromptVersion(ctx context.Context, name string) (int, error)
 func (s *Store) GetPrompt(ctx context.Context, id string) (Prompt, error) {
 	var p Prompt
 	var createdAt, updatedAt, varsStr string
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		"SELECT id, name, version, template, variables, created_at, updated_at FROM prompts WHERE id = ?", id,
 	).Scan(&p.ID, &p.Name, &p.Version, &p.Template, &varsStr, &createdAt, &updatedAt)
 	if err != nil {
@@ -1056,7 +1125,7 @@ func (s *Store) GetPrompt(ctx context.Context, id string) (Prompt, error) {
 
 // InsertGuardrailEvent stores a guardrail event.
 func (s *Store) InsertGuardrailEvent(ctx context.Context, e GuardrailEvent) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO guardrail_events (id, request_id, timestamp, guardrail_type, action, matched, details)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, e.RequestID, e.Timestamp.Format(time.RFC3339Nano),
@@ -1075,7 +1144,7 @@ func (s *Store) listGuardrailEventsForRequests(ctx context.Context, requestIDs [
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		fmt.Sprintf(`SELECT id, request_id, timestamp, guardrail_type, action, matched, details
 		FROM guardrail_events WHERE request_id IN (%s) ORDER BY timestamp ASC`, strings.Join(placeholders, ",")),
 		args...,
@@ -1105,7 +1174,7 @@ func (s *Store) GetAPIKeyByID(ctx context.Context, id string) (APIKey, error) {
 	var expiresAt, workspaceID, role sql.NullString
 	var enabled int
 
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		"SELECT id, name, key_hash, key_prefix, created_at, expires_at, rate_limit, budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, workspace_id, role, metadata FROM api_keys WHERE id = ?",
 		id,
 	).Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &createdAt, &expiresAt, &key.RateLimit, &key.BudgetUSD, &key.SpendUSD, &key.MonthlyCostBudget, &key.MonthlyTokenBudget, &enabled, &workspaceID, &role, &metaStr)
@@ -1129,13 +1198,13 @@ func (s *Store) IncrementAPIKeySpend(ctx context.Context, id string, amount floa
 	if id == "" || amount <= 0 {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, "UPDATE api_keys SET spend_usd = spend_usd + ? WHERE id = ?", amount, id)
+	_, err := s.exec(ctx, "UPDATE api_keys SET spend_usd = spend_usd + ? WHERE id = ?", amount, id)
 	return err
 }
 
 func (s *Store) GetBudgetUsage(ctx context.Context, apiKeyID string, since time.Time) (BudgetUsage, error) {
 	var usage BudgetUsage
-	err := s.db.QueryRowContext(ctx, `
+	err := s.queryRow(ctx, `
 		SELECT COALESCE(SUM(cost), 0), COALESCE(SUM(total_tokens), 0)
 		FROM request_logs
 		WHERE api_key_id = ? AND timestamp >= ? AND decision = 'ALLOW'`,
@@ -1161,9 +1230,13 @@ func (s *Store) InsertSemanticCache(ctx context.Context, entry CacheEntry) error
 		expiresAt = &value
 	}
 
-	_, err = s.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO semantic_cache (id, cache_key, created_at, expires_at, model, prompt_text, vector_json, response_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err = s.exec(ctx,
+		`INSERT INTO semantic_cache (id, cache_key, created_at, expires_at, model, prompt_text, vector_json, response_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			cache_key = excluded.cache_key, created_at = excluded.created_at, expires_at = excluded.expires_at,
+			model = excluded.model, prompt_text = excluded.prompt_text,
+			vector_json = excluded.vector_json, response_json = excluded.response_json`,
 		entry.ID,
 		entry.Key,
 		entry.CreatedAt.Format(time.RFC3339Nano),
@@ -1179,7 +1252,7 @@ func (s *Store) InsertSemanticCache(ctx context.Context, entry CacheEntry) error
 func (s *Store) GetExactCache(ctx context.Context, key string) (CacheEntry, bool, error) {
 	var entry CacheEntry
 	var createdAt, expiresAt, vectorJSON, responseJSON string
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT id, cache_key, created_at, COALESCE(expires_at, ''), model, prompt_text, vector_json, response_json
 		FROM semantic_cache
 		WHERE cache_key = ? AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?)
@@ -1208,7 +1281,7 @@ func (s *Store) GetExactCache(ctx context.Context, key string) (CacheEntry, bool
 }
 
 func (s *Store) FindSemanticCache(ctx context.Context, model string, vector map[string]float64, threshold float64) (CacheEntry, bool, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT id, cache_key, created_at, COALESCE(expires_at, ''), model, prompt_text, vector_json, response_json
 		FROM semantic_cache
 		WHERE model = ? AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?)
@@ -1258,7 +1331,7 @@ func (s *Store) FindSemanticCache(ctx context.Context, model string, vector map[
 }
 
 func (s *Store) InsertShadowLog(ctx context.Context, entry ShadowLog) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO shadow_requests (id, request_id, trace_id, timestamp, primary_provider, shadow_provider, model, latency_ms, cost, status, error_message)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID,
@@ -1277,7 +1350,7 @@ func (s *Store) InsertShadowLog(ctx context.Context, entry ShadowLog) error {
 }
 
 func (s *Store) ListShadowLogs(ctx context.Context, requestID string) ([]ShadowLog, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT id, request_id, trace_id, timestamp, primary_provider, shadow_provider, model, latency_ms, cost, status, error_message
 		FROM shadow_requests WHERE request_id = ? ORDER BY timestamp DESC`,
 		requestID,
@@ -1301,7 +1374,7 @@ func (s *Store) ListShadowLogs(ctx context.Context, requestID string) ([]ShadowL
 }
 
 func (s *Store) listShadowLogsForTrace(ctx context.Context, traceID string) ([]ShadowLog, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT id, request_id, trace_id, timestamp, primary_provider, shadow_provider, model, latency_ms, cost, status, error_message
 		FROM shadow_requests WHERE trace_id = ? ORDER BY timestamp ASC`,
 		traceID,
@@ -1325,7 +1398,7 @@ func (s *Store) listShadowLogsForTrace(ctx context.Context, traceID string) ([]S
 
 func (s *Store) InsertFeedback(ctx context.Context, entry Feedback) error {
 	metadata, _ := json.Marshal(entry.Metadata)
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO feedback (id, request_id, trace_id, timestamp, score, rating, comment, user_id, metadata)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID,
@@ -1357,7 +1430,7 @@ func (s *Store) ListFeedback(ctx context.Context, limit int, requestID, traceID 
 	}
 	args = append(args, limit)
 
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		fmt.Sprintf(`SELECT id, request_id, trace_id, timestamp, score, rating, comment, user_id, metadata
 		FROM feedback WHERE %s ORDER BY timestamp DESC LIMIT ?`, where),
 		args...,
@@ -1387,7 +1460,7 @@ func (s *Store) InsertOrganization(ctx context.Context, org Organization) error 
 		org.CreatedAt = time.Now().UTC()
 	}
 	metadata, _ := json.Marshal(org.Metadata)
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO organizations (id, name, created_at, metadata)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET name = excluded.name, metadata = excluded.metadata`,
@@ -1400,7 +1473,7 @@ func (s *Store) InsertOrganization(ctx context.Context, org Organization) error 
 }
 
 func (s *Store) ListOrganizations(ctx context.Context) ([]Organization, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		"SELECT id, name, created_at, metadata FROM organizations ORDER BY created_at DESC")
 	if err != nil {
 		return nil, err
@@ -1426,7 +1499,7 @@ func (s *Store) InsertWorkspace(ctx context.Context, workspace Workspace) error 
 		workspace.CreatedAt = time.Now().UTC()
 	}
 	metadata, _ := json.Marshal(workspace.Metadata)
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO workspaces (id, organization_id, name, created_at, metadata)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -1449,7 +1522,7 @@ func (s *Store) ListWorkspaces(ctx context.Context, organizationID string) ([]Wo
 		where = "organization_id = ?"
 		args = append(args, organizationID)
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		fmt.Sprintf("SELECT id, organization_id, name, created_at, metadata FROM workspaces WHERE %s ORDER BY created_at DESC", where),
 		args...,
 	)
@@ -1478,7 +1551,7 @@ func (s *Store) ListWorkspaces(ctx context.Context, organizationID string) ([]Wo
 func (s *Store) GetWorkspaceByID(ctx context.Context, id string) (Workspace, error) {
 	var workspace Workspace
 	var createdAt, metadata string
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		"SELECT id, organization_id, name, created_at, metadata FROM workspaces WHERE id = ?", id,
 	).Scan(&workspace.ID, &workspace.OrganizationID, &workspace.Name, &createdAt, &metadata)
 	if err != nil {
@@ -1494,7 +1567,7 @@ func (s *Store) InsertUser(ctx context.Context, user User) error {
 		user.CreatedAt = time.Now().UTC()
 	}
 	metadata, _ := json.Marshal(user.Metadata)
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO users (id, email, name, created_at, metadata)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(email) DO UPDATE SET name = excluded.name, metadata = excluded.metadata`,
@@ -1508,7 +1581,7 @@ func (s *Store) InsertUser(ctx context.Context, user User) error {
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		"SELECT id, email, COALESCE(name, ''), created_at, metadata FROM users ORDER BY created_at DESC")
 	if err != nil {
 		return nil, err
@@ -1533,7 +1606,7 @@ func (s *Store) UpsertWorkspaceMember(ctx context.Context, member WorkspaceMembe
 	if member.CreatedAt.IsZero() {
 		member.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(workspace_id, user_id) DO UPDATE SET role = excluded.role`,
@@ -1552,7 +1625,7 @@ func (s *Store) ListWorkspaceMembers(ctx context.Context, workspaceID string) ([
 		where = "workspace_id = ?"
 		args = append(args, workspaceID)
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		fmt.Sprintf("SELECT workspace_id, user_id, role, created_at FROM workspace_members WHERE %s ORDER BY created_at DESC", where),
 		args...,
 	)
@@ -1581,7 +1654,7 @@ func (s *Store) InsertVirtualKey(ctx context.Context, key VirtualKeyRecord) erro
 	if key.UpdatedAt.IsZero() {
 		key.UpdatedAt = key.CreatedAt
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO virtual_keys (id, name, provider_type, provider_name, base_url, encrypted_key, created_at, updated_at, enabled, metadata)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
@@ -1610,7 +1683,7 @@ func (s *Store) GetVirtualKey(ctx context.Context, name string) (VirtualKeyRecor
 	var record VirtualKeyRecord
 	var createdAt, updatedAt string
 	var enabled int
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT id, name, provider_type, COALESCE(provider_name, ''), COALESCE(base_url, ''), encrypted_key,
 			created_at, updated_at, enabled, COALESCE(metadata, '{}')
 		FROM virtual_keys WHERE name = ?`,
@@ -1627,7 +1700,7 @@ func (s *Store) GetVirtualKey(ctx context.Context, name string) (VirtualKeyRecor
 }
 
 func (s *Store) ListVirtualKeys(ctx context.Context) ([]VirtualKeyRecord, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT id, name, provider_type, COALESCE(provider_name, ''), COALESCE(base_url, ''), encrypted_key,
 			created_at, updated_at, enabled, COALESCE(metadata, '{}')
 		FROM virtual_keys ORDER BY created_at DESC`)
@@ -1654,7 +1727,7 @@ func (s *Store) ListVirtualKeys(ctx context.Context) ([]VirtualKeyRecord, error)
 }
 
 func (s *Store) RotateVirtualKey(ctx context.Context, name, encryptedKey string) error {
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.exec(ctx,
 		"UPDATE virtual_keys SET encrypted_key = ?, updated_at = ? WHERE name = ?",
 		encryptedKey,
 		time.Now().UTC().Format(time.RFC3339Nano),
@@ -1671,7 +1744,7 @@ func (s *Store) RotateVirtualKey(ctx context.Context, name, encryptedKey string)
 }
 
 func (s *Store) DisableVirtualKey(ctx context.Context, name string) error {
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.exec(ctx,
 		"UPDATE virtual_keys SET enabled = 0, updated_at = ? WHERE name = ?",
 		time.Now().UTC().Format(time.RFC3339Nano),
 		name,
@@ -1692,9 +1765,30 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) ensureColumn(table, column, definition string) error {
-	rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
+	var exists bool
+	var err error
+	if s.pg {
+		exists, err = s.pgColumnExists(table, column)
+	} else {
+		exists, err = s.sqliteColumnExists(table, column)
+	}
 	if err != nil {
 		return err
+	}
+	if exists {
+		return nil
+	}
+
+	if _, err := s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)); err != nil {
+		return fmt.Errorf("add column %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+func (s *Store) sqliteColumnExists(table, column string) (bool, error) {
+	rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false, err
 	}
 	defer rows.Close()
 
@@ -1704,20 +1798,24 @@ func (s *Store) ensureColumn(table, column, definition string) error {
 		var notNull, pk int
 		var defaultValue any
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			return err
+			return false, err
 		}
 		if name == column {
-			return nil
+			return true, nil
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
+	return false, rows.Err()
+}
 
-	if _, err := s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)); err != nil {
-		return fmt.Errorf("add column %s.%s: %w", table, column, err)
+func (s *Store) pgColumnExists(table, column string) (bool, error) {
+	row := s.db.QueryRow(`
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2`, table, column)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return false, err
 	}
-	return nil
+	return count > 0, nil
 }
 
 func boolToInt(b bool) int {

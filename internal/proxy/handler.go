@@ -14,6 +14,7 @@ import (
 	"github.com/omniswitch-dev/omniswitch/internal/audit"
 	"github.com/omniswitch-dev/omniswitch/internal/model"
 	"github.com/omniswitch-dev/omniswitch/internal/policy"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // TargetConfig defines a named upstream MCP server. A configured target is
@@ -155,7 +156,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Initialization, notifications, prompts, and resources are forwarded to
 		// the default target intact. Tool calls/listing are the operations that
 		// require virtual-target routing and policy mediation.
-		h.forwardToTarget(w, r.Context(), h.targets[h.defaultName], body, r.Header)
+		h.forwardToTarget(w, r.Context(), h.targets[h.defaultName], injectTraceMeta(r.Context(), body), r.Header)
 	}
 }
 
@@ -184,7 +185,7 @@ func (h *Handler) handleToolCall(w http.ResponseWriter, r *http.Request, rpcReq 
 		writeJSON(w, http.StatusBadRequest, mcp.ErrorResponse(rpcReq.ID, -32700, "Parse error", err))
 		return
 	}
-	h.forwardToTarget(w, r.Context(), target, body, r.Header)
+	h.forwardToTarget(w, r.Context(), target, injectTraceMeta(r.Context(), body), r.Header)
 }
 
 func (h *Handler) handleToolList(w http.ResponseWriter, r *http.Request, rpcReq mcp.Request, body []byte) {
@@ -359,6 +360,49 @@ func replaceToolName(body []byte, name string) ([]byte, error) {
 	}
 	params["name"] = name
 	return json.Marshal(request)
+}
+
+// injectTraceMeta implements MCP distributed trace context propagation
+// (SEP-414): the active OpenTelemetry span is written into params._meta as a
+// W3C traceparent so downstream MCP servers can continue the trace. Requests
+// without params or without an active span are returned unchanged.
+func injectTraceMeta(ctx context.Context, body []byte) []byte {
+	sc := oteltrace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return body
+	}
+	flags := "01"
+	if !sc.IsSampled() {
+		flags = "00"
+	}
+	traceparent := fmt.Sprintf("00-%s-%s-%s", sc.TraceID().String(), sc.SpanID().String(), flags)
+
+	var request map[string]any
+	if err := json.Unmarshal(body, &request); err != nil {
+		return body
+	}
+	params, ok := request["params"].(map[string]any)
+	if !ok {
+		// Do not fabricate params for notifications or malformed requests.
+		return body
+	}
+	meta, ok := params["_meta"].(map[string]any)
+	if !ok {
+		meta = map[string]any{}
+		params["_meta"] = meta
+	}
+	if _, exists := meta["traceparent"]; exists {
+		return body // caller-supplied context wins
+	}
+	meta["traceparent"] = traceparent
+	if state := sc.TraceState(); state.String() != "" {
+		meta["tracestate"] = state.String()
+	}
+	out, err := json.Marshal(request)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 func cloneHeaders(source map[string]string) map[string]string {

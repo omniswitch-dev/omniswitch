@@ -167,6 +167,30 @@ Supported provider types:
 - `groq`
 - `custom`
 
+### OpenAI-compatible presets
+
+Setting an environment variable enables these providers instantly - no config entry required. Each preset ships a default endpoint and a curated model list; a config `providers` entry with the same `type` can override `base_url` or `models`.
+
+| Type | Environment variable | Default endpoint |
+| --- | --- | --- |
+| `mistral` | `MISTRAL_API_KEY` | `https://api.mistral.ai/v1` |
+| `xai` | `XAI_API_KEY` | `https://api.x.ai/v1` |
+| `deepseek` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/v1` |
+| `together` | `TOGETHER_API_KEY` | `https://api.together.xyz/v1` |
+| `fireworks` | `FIREWORKS_API_KEY` | `https://api.fireworks.ai/inference/v1` |
+| `perplexity` | `PERPLEXITY_API_KEY` | `https://api.perplexity.ai` |
+| `cerebras` | `CEREBRAS_API_KEY` | `https://api.cerebras.ai/v1` |
+| `openrouter` | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` |
+
+```yaml
+providers:
+  # Explicit account form (overrides preset defaults)
+  - name: mistral-eu
+    type: mistral
+    api_key_env: MISTRAL_EU_KEY
+    models: [mistral-large-latest]
+```
+
 `custom` connects any OpenAI-compatible endpoint. Use `base_url`, optional `models`, and optional `extra_headers`. Header values support environment expansion.
 
 ```yaml
@@ -308,6 +332,7 @@ curl -X POST http://localhost:8080/api/virtual-keys \
 
 - `OMNISWITCH_LISTEN`
 - `OMNISWITCH_DATA`
+- `OMNISWITCH_DATABASE_URL` - a `postgres://` DSN enables PostgreSQL storage so multiple gateway replicas share keys, logs, budgets, and configuration. When unset (or not a postgres URL), SQLite in the data directory is used.
 - `OMNISWITCH_AUTH`
 - `OMNISWITCH_BOOTSTRAP_API_KEY`
 - `OMNISWITCH_BOOTSTRAP_WORKSPACE`
