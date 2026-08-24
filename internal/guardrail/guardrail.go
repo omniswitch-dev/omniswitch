@@ -27,7 +27,7 @@ type Engine struct {
 	actions   map[string]string
 	rules     []Rule
 	compiled  []compiledRule
-	toolRules []ToolRule
+	toolRules []compiledToolRule
 	webhooks  []webhookCheck
 	llmJudges []llmJudgeCheck
 
@@ -99,6 +99,14 @@ type ToolRule struct {
 	Message          string `json:"message,omitempty" yaml:"message,omitempty"`
 }
 
+// compiledToolRule holds a ToolRule with its regexes precompiled at engine
+// construction time, removing regexp.Compile from the hot evaluation path.
+type compiledToolRule struct {
+	rule    ToolRule
+	namePat *regexp.Regexp
+	argsPat *regexp.Regexp
+}
+
 type LLMJudge struct {
 	Name         string            `json:"name" yaml:"name"`
 	URL          string            `json:"url" yaml:"url"`
@@ -150,10 +158,10 @@ func NewEngineWithConfig(config Config) *Engine {
 		rules = append(rules, rule)
 		compiled = append(compiled, compiledRule{rule: rule, re: pattern})
 	}
-	toolRules := make([]ToolRule, 0, len(config.ToolRules))
+	toolRules := make([]compiledToolRule, 0, len(config.ToolRules))
 	for _, rule := range config.ToolRules {
-		if normalized, ok := normalizeToolRule(rule); ok {
-			toolRules = append(toolRules, normalized)
+		if ct, ok := compileToolRule(rule); ok {
+			toolRules = append(toolRules, ct)
 		}
 	}
 	webhooks := make([]webhookCheck, 0, len(config.Webhooks))
@@ -306,22 +314,22 @@ func (e *Engine) evaluate(ctx context.Context, input GuardrailInput) []Result {
 		}
 		triggered = append(triggered, Result{Triggered: true, Type: cr.rule.Name, Action: cr.rule.Action, Message: cr.rule.Message, Details: cr.rule.Pattern})
 	}
-	for _, rule := range e.toolRules {
-		if rule.Stage != "both" && rule.Stage != stage {
+	for _, ct := range e.toolRules {
+		if ct.rule.Stage != "both" && ct.rule.Stage != stage {
 			continue
 		}
 		for _, call := range input.ToolCalls {
-			if !toolRuleMatches(rule, call) {
+			if !compiledToolRuleMatches(ct, call) {
 				continue
 			}
-			message := rule.Message
+			message := ct.rule.Message
 			if message == "" {
-				message = "Tool guardrail triggered: " + rule.Name
+				message = "Tool guardrail triggered: " + ct.rule.Name
 			}
 			triggered = append(triggered, Result{
 				Triggered: true,
-				Type:      "tool:" + rule.Name,
-				Action:    rule.Action,
+				Type:      "tool:" + ct.rule.Name,
+				Action:    ct.rule.Action,
 				Message:   message,
 				Details:   call.Function.Name,
 			})
@@ -362,26 +370,34 @@ func (e *Engine) evaluate(ctx context.Context, input GuardrailInput) []Result {
 	return triggered
 }
 
-func normalizeToolRule(rule ToolRule) (ToolRule, bool) {
+// compileToolRule normalizes the rule and precompiles its regexes so that
+// the evaluation hot path never calls regexp.Compile.
+func compileToolRule(rule ToolRule) (compiledToolRule, bool) {
 	rule.Name = strings.TrimSpace(rule.Name)
 	if rule.Name == "" {
-		return ToolRule{}, false
+		return compiledToolRule{}, false
 	}
 	rule.Stage = strings.ToLower(strings.TrimSpace(rule.Stage))
 	if rule.Stage == "" {
 		rule.Stage = "output"
 	}
 	if rule.Stage != "input" && rule.Stage != "output" && rule.Stage != "both" {
-		return ToolRule{}, false
+		return compiledToolRule{}, false
 	}
+	var namePat *regexp.Regexp
 	if strings.TrimSpace(rule.ToolName) != "" {
-		if _, err := regexp.Compile(rule.ToolName); err != nil {
-			return ToolRule{}, false
+		var err error
+		namePat, err = regexp.Compile(rule.ToolName)
+		if err != nil {
+			return compiledToolRule{}, false
 		}
 	}
+	var argsPat *regexp.Regexp
 	if strings.TrimSpace(rule.ArgumentsPattern) != "" {
-		if _, err := regexp.Compile(rule.ArgumentsPattern); err != nil {
-			return ToolRule{}, false
+		var err error
+		argsPat, err = regexp.Compile(rule.ArgumentsPattern)
+		if err != nil {
+			return compiledToolRule{}, false
 		}
 	}
 	rule.Action = strings.ToLower(strings.TrimSpace(rule.Action))
@@ -389,25 +405,23 @@ func normalizeToolRule(rule ToolRule) (ToolRule, bool) {
 		rule.Action = "deny"
 	}
 	if !validAction(rule.Action) {
-		return ToolRule{}, false
+		return compiledToolRule{}, false
 	}
-	return rule, true
+	return compiledToolRule{rule: rule, namePat: namePat, argsPat: argsPat}, true
 }
 
-func toolRuleMatches(rule ToolRule, call provider.ToolCall) bool {
-	if strings.TrimSpace(rule.ToolName) != "" {
-		pattern := regexp.MustCompile(rule.ToolName)
-		if !pattern.MatchString(call.Function.Name) {
+func compiledToolRuleMatches(ct compiledToolRule, call provider.ToolCall) bool {
+	if ct.namePat != nil {
+		if !ct.namePat.MatchString(call.Function.Name) {
 			return false
 		}
 	}
-	if strings.TrimSpace(rule.ArgumentsPattern) != "" {
-		pattern := regexp.MustCompile(rule.ArgumentsPattern)
-		if !pattern.MatchString(call.Function.Arguments) {
+	if ct.argsPat != nil {
+		if !ct.argsPat.MatchString(call.Function.Arguments) {
 			return false
 		}
 	}
-	return strings.TrimSpace(rule.ToolName) != "" || strings.TrimSpace(rule.ArgumentsPattern) != ""
+	return ct.namePat != nil || ct.argsPat != nil
 }
 
 func normalizeWebhook(webhook Webhook) (Webhook, bool) {
@@ -673,16 +687,17 @@ func checkToxicContent(input GuardrailInput) Result {
 	return Result{Type: "toxic"}
 }
 
+var secretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`sk-[a-zA-Z0-9]{32,}`),
+	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
+	regexp.MustCompile(`ghp_[a-zA-Z0-9]{36}`),
+}
+
 func checkCodeLeakage(input GuardrailInput) Result {
 	if input.IsInput {
 		return Result{Type: "code_leakage"}
 	}
-	secrets := []*regexp.Regexp{
-		regexp.MustCompile(`sk-[a-zA-Z0-9]{32,}`),
-		regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
-		regexp.MustCompile(`ghp_[a-zA-Z0-9]{36}`),
-	}
-	for _, p := range secrets {
+	for _, p := range secretPatterns {
 		if p.MatchString(input.Response) {
 			return Result{Triggered: true, Type: "code_leakage", Action: "warn", Message: "Secret detected in output"}
 		}

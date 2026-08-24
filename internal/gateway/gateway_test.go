@@ -325,24 +325,34 @@ func TestA2ASendMessageUsesChatPipeline(t *testing.T) {
 	}
 	var body struct {
 		Result struct {
-			Message struct {
-				Role      string `json:"role"`
-				ContextID string `json:"contextId"`
-				MessageID string `json:"messageId"`
-				Parts     []struct {
+			ID        string `json:"id"`
+			ContextID string `json:"contextId"`
+			Status    struct {
+				State string `json:"state"`
+			} `json:"status"`
+			Artifacts []struct {
+				Name  string `json:"name"`
+				Parts []struct {
 					Text string `json:"text"`
 				} `json:"parts"`
-			} `json:"message"`
+			} `json:"artifacts"`
+			History []struct {
+				MessageID string `json:"messageId"`
+				Role      string `json:"role"`
+			} `json:"history"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v, body = %s", err, rec.Body.String())
 	}
-	if body.Result.Message.Role != "ROLE_AGENT" || body.Result.Message.ContextID != "ctx_1" || body.Result.Message.MessageID != "msg_chat_test" {
-		t.Fatalf("message = %+v, want direct agent response with context and id", body.Result.Message)
+	if !strings.HasPrefix(body.Result.ID, "task_") || body.Result.ContextID != "ctx_1" || body.Result.Status.State != "completed" {
+		t.Fatalf("task = %+v, want completed task with context", body.Result)
 	}
-	if len(body.Result.Message.Parts) != 1 || body.Result.Message.Parts[0].Text != "hello from a2a" {
-		t.Fatalf("parts = %+v, want provider content", body.Result.Message.Parts)
+	if len(body.Result.History) != 1 || body.Result.History[0].MessageID != "msg_chat_test" || body.Result.History[0].Role != "ROLE_AGENT" {
+		t.Fatalf("history = %+v, want agent message with provider id", body.Result.History)
+	}
+	if len(body.Result.Artifacts) != 1 || len(body.Result.Artifacts[0].Parts) != 1 || body.Result.Artifacts[0].Parts[0].Text != "hello from a2a" {
+		t.Fatalf("artifacts = %+v, want provider content", body.Result.Artifacts)
 	}
 	logs, total, err := st.ListLogs(context.Background(), 10, 0, "test", "success")
 	if err != nil {
