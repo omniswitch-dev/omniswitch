@@ -58,7 +58,7 @@ brews:
       owner: omniswitch-dev
       name: homebrew-tap
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
-    folder: Formula
+    directory: Formula
     homepage: https://omniswitch.dev
     description: Open-source AI gateway, guardrail, and agent-protocol layer
     license: Apache-2.0
