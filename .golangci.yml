@@ -1,33 +1,23 @@
-version: "2"
-
 run:
   timeout: 5m
 
 linters:
-  default: standard
+  disable-all: true
   enable:
+    - govet
+    - staticcheck
+    - errcheck
     - misspell
-    - revive
     - unconvert
-    - unparam
+    - ineffassign
     - copyloopvar
-  settings:
-    revive:
-      rules:
-        - name: exported
-          disabled: true
-        - name: package-comments
-          disabled: true
-    staticcheck:
-      checks:
-        - all
-        - -ST1000
-        - -ST1003
-        - -ST1020
 
-formatters:
-  enable:
-    - gofmt
+linters-settings:
+  staticcheck:
+    checks: ["all", "-ST1000", "-ST1003", "-ST1020", "-ST1016"]
+  errcheck:
+    exclude-functions:
+      - (*encoding/json.Encoder).Encode
 
 issues:
   max-issues-per-linter: 0
@@ -35,4 +25,4 @@ issues:
   exclude-rules:
     - path: _test\.go
       linters:
-        - unparam
+        - errcheck

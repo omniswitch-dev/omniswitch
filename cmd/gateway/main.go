@@ -1096,7 +1096,7 @@ func startConfigReloader(path string, rtr *router.Router, gw *gateway.Handler, b
 		defer ticker.Stop()
 		for range ticker.C {
 			info, err := os.Stat(path)
-			if err != nil || !info.ModTime().After(lastMod) {
+			if err != nil || info.ModTime().Equal(lastMod) {
 				continue
 			}
 			lastMod = info.ModTime()

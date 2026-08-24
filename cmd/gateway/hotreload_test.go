@@ -99,6 +99,10 @@ routes:
 
 	startConfigReloader(path, rtr, gw, settings)
 
+	// Let the reloader capture the initial mtime before we touch the file,
+	// otherwise its startup stat may observe the modified time and skip reload.
+	time.Sleep(300 * time.Millisecond)
+
 	future := time.Now().Add(2 * time.Second)
 	if err := os.Chtimes(path, future, future); err != nil {
 		t.Fatalf("chtimes: %v", err)
