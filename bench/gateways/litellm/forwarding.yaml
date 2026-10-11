@@ -1,0 +1,21 @@
+# bench/gateways/litellm/forwarding.yaml
+#
+# Minimum config that forwards to the mock upstream. No master key, no
+# database, no logging callbacks. Adapted from LiteLLM's quick-start
+# (https://docs.litellm.ai/docs/proxy/quick_start) and config reference
+# (https://docs.litellm.ai/docs/proxy/configs).
+model_list:
+  - model_name: bench-model
+    litellm_params:
+      model: openai/bench-model
+      api_base: http://mock-upstream:4000/v1
+      api_key: os.environ/MOCK_UPSTREAM_API_KEY
+
+general_settings:
+  # No master_key: forwarding cell has no auth on any gateway.
+  disable_spend_logs: true
+  disable_error_logs: true
+
+litellm_settings:
+  cache: false
+  drop_params: true

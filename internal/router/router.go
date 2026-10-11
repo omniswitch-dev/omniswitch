@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -860,6 +862,14 @@ func isRetryable(err error, codes []int) bool {
 	if err == nil {
 		return false
 	}
+	// A request field an adapter cannot honour (e.g. seed on Anthropic) will
+	// fail identically on every retry against the same provider; surface it
+	// immediately instead of burning retry budget. Fallback to a different
+	// provider is still attempted by the caller's provider loop.
+	var unsupported *provider.UnsupportedParameterError
+	if errors.As(err, &unsupported) {
+		return false
+	}
 	if len(codes) == 0 {
 		return true
 	}
@@ -921,8 +931,37 @@ func requestFieldSet(req provider.ChatRequest, field string) bool {
 		return len(req.Stop) > 0
 	case "stream":
 		return req.Stream
+	case "response_format":
+		return req.ResponseFormat != nil
+	case "max_completion_tokens":
+		return req.MaxCompletionTokens != nil
+	case "n":
+		return req.N != nil
+	case "seed":
+		return req.Seed != nil
+	case "presence_penalty":
+		return req.PresencePenalty != nil
+	case "frequency_penalty":
+		return req.FrequencyPenalty != nil
+	case "logit_bias":
+		return len(req.LogitBias) > 0
+	case "user":
+		return req.User != ""
+	case "stream_options":
+		return req.StreamOptions != nil
+	case "parallel_tool_calls":
+		return req.ParallelToolCalls != nil
+	case "reasoning_effort":
+		return req.ReasoningEffort != ""
+	case "service_tier":
+		return req.ServiceTier != ""
+	case "store":
+		return req.Store != nil
+	case "metadata":
+		return len(req.Metadata) > 0
 	default:
-		return false
+		_, ok := req.Extra[field]
+		return ok
 	}
 }
 
@@ -964,9 +1003,132 @@ func setRequestField(req *provider.ChatRequest, field string, value any) error {
 			return fmt.Errorf("must be an array of strings")
 		}
 		req.Stop = stops
+	case "max_completion_tokens":
+		number, ok := intValue(value)
+		if !ok || number < 1 {
+			return fmt.Errorf("must be a positive integer")
+		}
+		req.MaxCompletionTokens = &number
+	case "n":
+		number, ok := intValue(value)
+		if !ok || number < 1 {
+			return fmt.Errorf("must be a positive integer")
+		}
+		req.N = &number
+	case "seed":
+		number, ok := intValue(value)
+		if !ok {
+			return fmt.Errorf("must be an integer")
+		}
+		req.Seed = &number
+	case "presence_penalty":
+		number, ok := floatValue(value)
+		if !ok {
+			return fmt.Errorf("must be a number")
+		}
+		req.PresencePenalty = &number
+	case "frequency_penalty":
+		number, ok := floatValue(value)
+		if !ok {
+			return fmt.Errorf("must be a number")
+		}
+		req.FrequencyPenalty = &number
+	case "user":
+		text, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("must be a string")
+		}
+		req.User = text
+	case "parallel_tool_calls":
+		flag, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("must be a boolean")
+		}
+		req.ParallelToolCalls = &flag
+	case "reasoning_effort":
+		text, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("must be a string")
+		}
+		req.ReasoningEffort = text
+	case "service_tier":
+		text, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("must be a string")
+		}
+		req.ServiceTier = text
+	case "store":
+		flag, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("must be a boolean")
+		}
+		req.Store = &flag
+	case "logit_bias", "stream_options", "metadata", "response_format":
+		// Structured fields: round-trip through JSON so router configs can
+		// express them as plain YAML/JSON maps without a bespoke decoder.
+		if err := setStructuredRequestField(req, field, value); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("is not a supported chat-completions parameter")
+		// Unknown parameter: forward it verbatim via Extra instead of
+		// rejecting, so future/beta OpenAI fields configured through
+		// default_params/override_params still reach OpenAI-compatible
+		// upstreams.
+		if err := setExtraRequestField(req, field, value); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+// setStructuredRequestField assigns a map/array-shaped field by marshaling
+// the dynamically typed config value to JSON and unmarshaling it into the
+// field's concrete Go type.
+func setStructuredRequestField(req *provider.ChatRequest, field string, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("must be JSON-encodable: %w", err)
+	}
+	switch field {
+	case "logit_bias":
+		var bias map[string]int
+		if err := json.Unmarshal(data, &bias); err != nil {
+			return fmt.Errorf("must be a map of token to bias: %w", err)
+		}
+		req.LogitBias = bias
+	case "stream_options":
+		var opts provider.StreamOptions
+		if err := json.Unmarshal(data, &opts); err != nil {
+			return fmt.Errorf("must be a stream_options object: %w", err)
+		}
+		req.StreamOptions = &opts
+	case "metadata":
+		var metadata map[string]string
+		if err := json.Unmarshal(data, &metadata); err != nil {
+			return fmt.Errorf("must be a map of string to string: %w", err)
+		}
+		req.Metadata = metadata
+	case "response_format":
+		var format provider.ResponseFormat
+		if err := json.Unmarshal(data, &format); err != nil {
+			return fmt.Errorf("must be a response_format object: %w", err)
+		}
+		req.ResponseFormat = &format
+	}
+	return nil
+}
+
+// setExtraRequestField stores an arbitrary config-supplied value under the
+// request's Extra map, keyed by its wire field name.
+func setExtraRequestField(req *provider.ChatRequest, field string, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("must be JSON-encodable: %w", err)
+	}
+	if req.Extra == nil {
+		req.Extra = map[string]json.RawMessage{}
+	}
+	req.Extra[field] = json.RawMessage(data)
 	return nil
 }
 
@@ -982,6 +1144,36 @@ func dropRequestField(req *provider.ChatRequest, field string) {
 		req.Stop = nil
 	case "stream":
 		req.Stream = false
+	case "response_format":
+		req.ResponseFormat = nil
+	case "max_completion_tokens":
+		req.MaxCompletionTokens = nil
+	case "n":
+		req.N = nil
+	case "seed":
+		req.Seed = nil
+	case "presence_penalty":
+		req.PresencePenalty = nil
+	case "frequency_penalty":
+		req.FrequencyPenalty = nil
+	case "logit_bias":
+		req.LogitBias = nil
+	case "user":
+		req.User = ""
+	case "stream_options":
+		req.StreamOptions = nil
+	case "parallel_tool_calls":
+		req.ParallelToolCalls = nil
+	case "reasoning_effort":
+		req.ReasoningEffort = ""
+	case "service_tier":
+		req.ServiceTier = ""
+	case "store":
+		req.Store = nil
+	case "metadata":
+		req.Metadata = nil
+	default:
+		delete(req.Extra, field)
 	}
 }
 

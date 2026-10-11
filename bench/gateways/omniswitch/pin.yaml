@@ -1,0 +1,13 @@
+gateway: omniswitch
+image: local build from repository Dockerfile (no published tag pinned yet -- pre-1.0 beta)
+build_context: ../../.. # repository root, Dockerfile at repo root
+digest: n/a (built locally with `docker build -t bench/omniswitch:bench .` from repo root at commit 88a27c0)
+version_label: v0.2.0-beta (commit 88a27c0)
+source_url: https://github.com/omniswitch-dev/omniswitch/blob/main/Dockerfile
+pinned_on: "2026-09-11"
+notes: |
+  OmniSwitch has no published container registry image yet (goreleaser/GHCR
+  publishing is being added by a sibling workstream), so the harness builds
+  from this exact worktree's Dockerfile instead of pulling a tag. Record the
+  git SHA used for the build in manifest.json (bench/scripts/capture-env.sh)
+  for every run, since "the image" is not otherwise reproducible by digest.

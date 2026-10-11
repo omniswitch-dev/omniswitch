@@ -1,0 +1,23 @@
+gateway: kong-ai-gateway
+image: docker.io/library/kong:3.9
+digest: sha256:ca71c5591eabaf18de96d26b7eed5e2fdb590dac141e467a779c38017e5bdf81
+resolved_via: "docker buildx imagetools inspect docker.io/library/kong:3.9"
+license: Apache-2.0 (Kong Gateway OSS core)
+source_url: https://github.com/Kong/kong
+docs_url: https://developer.konghq.com/plugins/ai-proxy/
+pinned_on: "2026-09-11"
+oss_vs_enterprise_caveat: >
+  Kong Gateway OSS 3.9 ships the community `ai-proxy` plugin used here
+  (single provider/model, no fallback). The following AI features that
+  claims.yaml lists for "Kong AI Gateway" are Kong **Enterprise**-only and
+  are NOT exercised by this harness cell, which uses OSS only:
+    - Fallback / multi-provider weighted load balancing: "AI Proxy Advanced"
+      plugin (Enterprise).
+    - Token-aware / model-aware rate limiting: "AI Rate Limiting Advanced"
+      plugin (Enterprise).
+    - Semantic cache: separate "AI Semantic Cache" plugin; licensing/tier
+      unclear at research time, treated as unavailable in this OSS-only
+      harness cell.
+  These are marked `n/a` (not `no`) in the results matrix for the OSS
+  harness cell, with an explicit note that Enterprise plugins exist and
+  were not tested -- see NOTES.md.

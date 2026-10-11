@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -349,6 +350,10 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			})
 			w.Header().Set("x-omniswitch-trace-id", traceID)
 			w.Header().Set("x-omniswitch-session-id", sessionID)
+			if upErr, ok := asUnsupportedParameterError(err); ok {
+				writeUnsupportedParameterError(w, upErr)
+				return
+			}
 			writeError(w, http.StatusBadGateway, "provider error: "+err.Error())
 			return
 		}
@@ -592,6 +597,10 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 			})
 			w.Header().Set("x-omniswitch-trace-id", streamCtx.TraceID)
 			w.Header().Set("x-omniswitch-session-id", streamCtx.SessionID)
+			if upErr, ok := asUnsupportedParameterError(err); ok {
+				writeUnsupportedParameterError(w, upErr)
+				return
+			}
 			writeError(w, http.StatusBadGateway, "provider stream error: "+err.Error())
 			return
 		}
@@ -991,6 +1000,30 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]any{
 		"error": map[string]string{"message": message, "type": "invalid_request_error"},
 	})
+}
+
+// writeUnsupportedParameterError surfaces a provider adapter's refusal to
+// silently drop a request field it cannot honour, matching OpenAI's error
+// body shape so SDKs decode it the same way they decode a real OpenAI 400.
+func writeUnsupportedParameterError(w http.ResponseWriter, err *provider.UnsupportedParameterError) {
+	writeJSON(w, http.StatusBadRequest, map[string]any{
+		"error": map[string]any{
+			"message": err.Error(),
+			"type":    "invalid_request_error",
+			"param":   err.Param,
+			"code":    "unsupported_parameter",
+		},
+	})
+}
+
+// asUnsupportedParameterError reports whether err (or a wrapped cause) is an
+// UnsupportedParameterError from a provider adapter.
+func asUnsupportedParameterError(err error) (*provider.UnsupportedParameterError, bool) {
+	var upErr *provider.UnsupportedParameterError
+	if errors.As(err, &upErr) {
+		return upErr, true
+	}
+	return nil, false
 }
 
 func writeStream(w http.ResponseWriter, resp provider.ChatResponse) {

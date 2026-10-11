@@ -4,12 +4,33 @@ project_name: omniswitch
 
 before:
   hooks:
-    - go mod tidy
+    # Releases must not rewrite the checked-in dependency manifests.
+    - go mod download
 
 builds:
   - id: gateway
     main: ./cmd/gateway
     binary: omniswitch
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+  - id: policy
+    main: ./cmd/omniswitch
+    binary: omniswitch-policy
     env:
       - CGO_ENABLED=0
     goos:
@@ -35,9 +56,47 @@ archives:
     format_overrides:
       - goos: windows
         formats: [zip]
+    ids:
+      - gateway
+      - policy
 
 checksum:
   name_template: "checksums.txt"
+
+sboms:
+  - artifacts: archive
+    documents:
+      - "{{ .ArtifactName }}.sbom.spdx.json"
+    cmd: syft
+    args:
+      - "${artifact}"
+      - --output
+      - "spdx-json=${document}"
+
+# Keep detached files for users with either cosign v2 or v3. Cosign v3
+# defaults to bundle-only signing, so explicitly select its legacy output.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - --yes
+      - --use-signing-config=false
+      - --output-signature
+      - "${signature}"
+      - --output-certificate
+      - "${certificate}"
+      - "${artifact}"
+
+docker_signs:
+  - cmd: cosign
+    artifacts: manifests
+    args:
+      - sign
+      - --yes
+      - "${artifact}@${digest}"
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
@@ -62,8 +121,12 @@ brews:
     homepage: https://omniswitch.dev
     description: Open-source AI gateway, guardrail, and agent-protocol layer
     license: Apache-2.0
+    skip_upload: "{{ .Prerelease }}"
     install: |
       bin.install("omniswitch")
+      bin.install("omniswitch-policy")
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/omniswitch version")
 
 dockers:
   - image_templates:
@@ -103,6 +166,7 @@ docker_manifests:
       - ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}-amd64
       - ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}-arm64
   - name_template: ghcr.io/omniswitch-dev/omniswitch:latest
+    skip_push: auto
     image_templates:
       - ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}-amd64
       - ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}-arm64
@@ -112,6 +176,7 @@ release:
   mode: replace
   header: |
     ## OmniSwitch {{ .Tag }}
-    Download the archive for your platform, extract, and run `./omniswitch`.
-    Docker: `docker run -p 8080:8080 ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}`
+    Download the archive for your platform, extract, and run:
+    `OPENAI_API_KEY=sk-... ./omniswitch serve`
+    Docker: `docker run -p 8080:8080 -e OPENAI_API_KEY=sk-... ghcr.io/omniswitch-dev/omniswitch:{{ .Version }}`
 

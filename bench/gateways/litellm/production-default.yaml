@@ -1,0 +1,35 @@
+# bench/gateways/litellm/production-default.yaml
+#
+# LiteLLM's own documented production posture: master key auth, Postgres
+# for spend tracking/virtual keys, retry/fallback/timeout settings matching
+# the harness parity matrix. Adapted from
+# https://docs.litellm.ai/docs/proxy/prod and
+# https://docs.litellm.ai/docs/proxy/reliability.
+model_list:
+  - model_name: bench-model
+    litellm_params:
+      model: openai/bench-model
+      api_base: http://mock-upstream:4000/v1
+      api_key: os.environ/MOCK_UPSTREAM_API_KEY
+      num_retries: 2
+      timeout: 10
+      retry_after: 0.5
+
+router_settings:
+  fallbacks: []
+  allowed_fails: 2
+  cooldown_time: 60
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  disable_spend_logs: false
+
+litellm_settings:
+  cache: false
+  drop_params: true
+  success_callback: []
+  failure_callback: []
+
+# Run with, per LiteLLM's production guide:
+#   litellm --config production-default.yaml --num_workers 4

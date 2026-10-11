@@ -1,0 +1,17 @@
+# forwarding cell: no cache, no gateway-level API key requirement.
+# Router config format per https://docs.helicone.ai/gateway/overview
+# Custom/OpenAI-compatible upstream override via provider base-url is
+# NOT independently confirmed in this session -- see NOTES.md.
+helicone:
+  features: minimal
+
+routers:
+  bench:
+    providers:
+      bench-mock:
+        base-url: "http://mock-upstream:4000/v1"
+    load-balance:
+      chat:
+        strategy: model-latency
+        models:
+          - bench-mock/bench-model

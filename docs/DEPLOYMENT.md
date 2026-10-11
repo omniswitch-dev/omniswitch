@@ -33,6 +33,23 @@ docker run --rm -p 8080:8080 \
   omniswitch-ai-gateway
 ```
 
+## Compose with Postgres
+
+The base compose quickstart uses SQLite. To use a shared Postgres 16 store,
+set a URI-safe password in your shell or an uncommitted `.env` file, alongside
+your bootstrap key and provider credentials:
+
+```bash
+export OMNISWITCH_POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up --build
+```
+
+The overlay waits for Postgres readiness before starting the gateway and keeps
+Postgres data in a named volume. It exposes no database port on the host.
+`sslmode=disable` is for this local compose network only; use TLS for an external
+production database. The base `/data` volume remains available for the local
+semantic cache. Existing SQLite data is **not** copied into Postgres.
+
 ## Run on Kubernetes
 
 The repository includes a Kustomize baseline in `deploy/kubernetes`. It creates
@@ -49,6 +66,28 @@ an overlay. Keep `replicas: 1` while using the bundled SQLite control-plane
 store. Redis lets multiple gateway pods share request quotas, but API keys,
 logs, prompts, budgets, and cache entries remain on the mounted SQLite volume
 until OmniSwitch is connected to a shared database or external control plane.
+
+For a shared Postgres database, use the example overlay:
+
+```bash
+kubectl kustomize deploy/kubernetes-postgres
+# Replace the example database URL and bootstrap/vault/provider secrets first.
+kubectl apply -k deploy/kubernetes-postgres
+```
+
+The overlay reads `OMNISWITCH_DATABASE_URL` from the `database-url` key in
+`omniswitch-database`, removes the SQLite PVC and `/data` mount, and uses three
+replicas with the base Redis service. It does not deploy Postgres or migrate
+existing SQLite data. The database Secret is an example only; supply your own
+through a secret manager. Mounted `/data` directories must be writable by
+uid/gid **65532**; pre-provision host paths with that ownership. `fsGroup: 65532`
+handles volume ownership only when the storage driver supports it.
+
+The [Helm chart](../deploy/helm/omniswitch/README.md) provides database Secrets,
+replica validation, configurable startup/readiness/liveness probes, an optional
+PodDisruptionBudget, and authenticated Prometheus ServiceMonitors. Private
+metrics must use a bearer token; annotation-based scraping is enabled only when
+`observability.prometheus.public=true` explicitly permits anonymous reads.
 
 ## Persistence
 

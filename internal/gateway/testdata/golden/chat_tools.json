@@ -1,0 +1,28 @@
+{
+  "description": "Chat completion with a tool/function-calling definition, explicit tool_choice, and parallel_tool_calls, matching the openai-python SDK's tools=[...] parameter shape.",
+  "source": "reference-derived from https://platform.openai.com/docs/api-reference/chat/create#chat-create-tools and #chat-create-parallel_tool_calls",
+  "verified_on": "2026-09-11",
+  "endpoint": "chat",
+  "request": {
+    "model": "golden-chat-model",
+    "messages": [
+      {"role": "user", "content": "What's the weather in Paris?"}
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get the current weather for a city",
+          "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto",
+    "parallel_tool_calls": true
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://www.getbifrost.ai/schema",
+  "_comment": "production-default cell: governance/auth enabled, retry chain matching the harness parity matrix (2 retries, 10s timeout). Retry/timeout field names below were not independently confirmed against Bifrost's current config schema in this session -- see NOTES.md.",
+  "providers": {
+    "bench-mock": {
+      "keys": [
+        {
+          "name": "bench-key",
+          "value": "env.MOCK_UPSTREAM_API_KEY",
+          "models": ["bench-model"],
+          "weight": 1.0
+        }
+      ],
+      "custom_provider_config": {
+        "base_provider_type": "openai",
+        "allowed_requests": {
+          "chat_completion": true,
+          "chat_completion_stream": true,
+          "text_completion": false,
+          "embedding": true,
+          "list_models": false
+        }
+      },
+      "network_config": {
+        "base_url": "http://mock-upstream:4000/v1",
+        "max_retries": 2,
+        "timeout_seconds": 10
+      }
+    }
+  },
+  "governance": {
+    "api_keys": [
+      {
+        "name": "bench-key",
+        "value": "env.BIFROST_API_KEY"
+      }
+    ]
+  }
+}

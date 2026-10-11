@@ -1,0 +1,35 @@
+# Label definitions for omniswitch-dev/omniswitch.
+#
+# This file documents the intended label set; it is not automatically applied.
+# A maintainer with repo admin access can sync it with a tool such as
+# https://github.com/crazy-max/ghaction-github-labeler or by creating the
+# labels manually in Settings -> Labels. Keep this file in sync with the
+# labels actually configured on the repository.
+
+- name: "beta-blocker"
+  color: "b60205"
+  description: "Blocks completing the quickstart or trusting the public beta; highest triage priority."
+
+- name: "good first issue"
+  color: "7057ff"
+  description: "Scoped and documented well enough for a first-time contributor."
+
+- name: "help wanted"
+  color: "008672"
+  description: "Maintainers want outside help on this."
+
+- name: "docs"
+  color: "0075ca"
+  description: "Documentation-only change or gap."
+
+- name: "provider"
+  color: "fbca04"
+  description: "Provider adapters, model catalog, or pricing."
+
+- name: "mcp"
+  color: "5319e7"
+  description: "MCP tool gateway, policy engine, or A2A."
+
+- name: "security"
+  color: "d93f0b"
+  description: "Security-relevant. Use GitHub private vulnerability reporting for actual vulnerability reports; see SECURITY.md."

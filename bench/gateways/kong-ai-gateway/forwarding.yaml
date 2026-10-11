@@ -1,0 +1,21 @@
+# forwarding cell: DB-less declarative config, no upstream auth injection,
+# ai-proxy (OSS) community plugin, route_type llm/v1/chat.
+# Format per https://docs.konghq.com/hub/kong-inc/ai-proxy/how-to/basic-example/
+_format_version: "3.0"
+
+services:
+  - name: bench-mock-service
+    url: http://mock-upstream:4000
+    routes:
+      - name: bench-mock-route
+        paths:
+          - /bench
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              model:
+                provider: openai
+                name: bench-model
+                options:
+                  upstream_url: http://mock-upstream:4000/v1/chat/completions

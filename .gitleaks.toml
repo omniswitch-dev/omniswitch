@@ -1,0 +1,19 @@
+title = "OmniSwitch secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "omniswitch-api-key"
+description = "OmniSwitch API key (current or legacy format)"
+regex = '''\bsk-(?:osw|sentinel)-[0-9a-f]{64}\b'''
+keywords = ["sk-osw-", "sk-sentinel-"]
+
+# The checked-in Secret example is not a credential. Match only this exact
+# placeholder in this one file; actual keys in examples/tests remain scanned.
+[[allowlists]]
+description = "Persistent vault-key placeholder in the Kubernetes example"
+condition = "AND"
+paths = ['''^deploy/kubernetes/secret\.example\.yaml$''']
+regexTarget = "secret"
+regexes = ['''^replace-with-32-plus-character-persistent-secret$''']

@@ -8,16 +8,46 @@ OmniSwitch exposes OpenAI-compatible inference endpoints and OmniSwitch manageme
 
 Accepts OpenAI-style chat completion requests.
 
-Supported request features:
+Supported request fields, and how each is handled per adapter:
 
-- `model`
-- `messages`
-- `temperature`
-- `max_tokens`
-- `top_p`
-- `stream`
-- `stop`
-- OpenAI-style content arrays with text and image URL parts
+| Field | openai / azure / groq / custom (OpenAI-compatible) | anthropic | google |
+|---|---|---|---|
+| `model`, `messages`, `temperature`, `max_tokens`, `top_p`, `stream`, `stop` | forwarded | forwarded/translated | forwarded/translated |
+| `tools`, `tool_choice` | forwarded | translated | translated |
+| `message.name` (per-message) | forwarded | dropped (no Anthropic equivalent) | dropped (no Gemini equivalent) |
+| OpenAI content arrays with `text` and `image_url` parts | forwarded | translated | translated |
+| `response_format` (`text`, `json_object`, `json_schema`) | forwarded | translated to `output_config.format` (`json_schema`); any other `type` is rejected | translated to `responseMimeType`/`responseSchema`; any other `type` is rejected |
+| `max_completion_tokens` | forwarded | translated to `max_tokens` (wins over `max_tokens` if both set) | translated to `maxOutputTokens` (wins over `max_tokens` if both set) |
+| `parallel_tool_calls` | forwarded | translated to `tool_choice.disable_parallel_tool_use` | **rejected** (400 `unsupported_parameter`) |
+| `stream_options.include_usage` | forwarded | honored: an extra chunk with empty `choices` and populated `usage` is emitted before `[DONE]` | honored: same synthesized final-chunk behavior |
+| `store`, `metadata` | forwarded | ignored (platform bookkeeping only; no effect on generation, not forwarded upstream) | ignored (same as anthropic) |
+| `n` (only `1` is safe) | forwarded | **rejected** if `n > 1` | **rejected** if `n > 1` |
+| `seed` | forwarded | **rejected** | **rejected** |
+| `presence_penalty`, `frequency_penalty` | forwarded | **rejected** | **rejected** |
+| `logit_bias` | forwarded | **rejected** if non-empty | **rejected** if non-empty |
+| `reasoning_effort` | forwarded | **rejected** if non-empty | **rejected** if non-empty |
+| `service_tier` | forwarded | **rejected** if non-empty | **rejected** if non-empty |
+| `user` | forwarded | dropped (no Anthropic equivalent) | dropped (no Gemini equivalent) |
+| any other/future top-level OpenAI field (e.g. `prediction`, `modalities`, `audio`) | forwarded byte-for-byte (captured via an internal `Extra` map, not silently dropped) | dropped (adapter-specific request shape has no passthrough slot) | dropped (same) |
+
+"Rejected" means the gateway returns HTTP 400 with an OpenAI-style error body
+instead of silently ignoring the field or forwarding a request that would
+behave differently than requested:
+
+```json
+{"error": {"message": "anthropic does not support the \"seed\" parameter; remove it or use an OpenAI-compatible provider", "type": "invalid_request_error", "param": "seed", "code": "unsupported_parameter"}}
+```
+
+This applies to both the non-streaming and streaming (`stream: true`) paths.
+Requests to OpenAI-compatible upstreams (`openai`, `azure`, `groq`, `custom`,
+and any preset built on `custom`) never hit this path: every field above,
+plus any field OmniSwitch does not model by name, is forwarded verbatim.
+
+Cache keys (exact-match cache) and guardrail evaluation see the full request:
+the cache key is derived from the request's complete JSON encoding (so two
+requests differing only in, say, `response_format` or `seed` never collide on
+the same cached response), and guardrails evaluate the actual `messages`
+content, which is unaffected by any of the fields above.
 
 Headers:
 
@@ -66,6 +96,11 @@ guardrails before the provider call.
 ### `GET /v1/models`
 
 Returns all models registered through provider adapters and provider catalog aliases.
+For OpenAI, Anthropic, Google, and Groq, the advertised model list and the
+per-1M-token pricing used for cost estimation and cost-optimal routing both
+come from the consolidated model catalog at
+`internal/provider/catalog/models.json` (see "Model catalog" in
+[docs/CONFIGURATION.md](CONFIGURATION.md)).
 
 ## A2A Gateway
 

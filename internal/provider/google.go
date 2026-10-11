@@ -30,15 +30,7 @@ func NewGoogle(apiKey string) *Google {
 func (g *Google) Name() string { return "google" }
 
 func (g *Google) Models() []ModelInfo {
-	models := []string{
-		"gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash",
-		"gemini-1.5-pro", "gemini-1.5-flash",
-	}
-	out := make([]ModelInfo, len(models))
-	for i, m := range models {
-		out[i] = ModelInfo{ID: m, Object: "model", OwnedBy: "google", Provider: "google"}
-	}
-	return out
+	return catalogModelInfos("google", "google")
 }
 
 // geminiRequest is the Gemini API request format.
@@ -103,9 +95,11 @@ type geminiFunctionCallingConfig struct {
 }
 
 type geminiGenerationConfig struct {
-	Temperature *float64 `json:"temperature,omitempty"`
-	MaxTokens   *int     `json:"maxOutputTokens,omitempty"`
-	TopP        *float64 `json:"topP,omitempty"`
+	Temperature      *float64 `json:"temperature,omitempty"`
+	MaxTokens        *int     `json:"maxOutputTokens,omitempty"`
+	TopP             *float64 `json:"topP,omitempty"`
+	ResponseMimeType string   `json:"responseMimeType,omitempty"`
+	ResponseSchema   any      `json:"responseSchema,omitempty"`
 }
 
 // geminiResponse is the Gemini API response format.
@@ -131,7 +125,11 @@ func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 	start := time.Now()
 	meta := ProviderMeta{Provider: "google", Model: req.Model, Timestamp: start}
 
-	gemReq := toGeminiRequest(req)
+	gemReq, err := toGeminiRequest(req)
+	if err != nil {
+		meta.Error = err.Error()
+		return ChatResponse{}, meta, err
+	}
 
 	body, err := json.Marshal(gemReq)
 	if err != nil {
@@ -223,14 +221,19 @@ func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 		},
 	}
 
-	meta.Cost = geminiPricing(req.Model).Cost(gemResp.UsageMetadata.PromptTokenCount, gemResp.UsageMetadata.CandidatesTokenCount)
+	meta.Cost = pricingFor("google", req.Model).Cost(gemResp.UsageMetadata.PromptTokenCount, gemResp.UsageMetadata.CandidatesTokenCount)
 	return chatResp, meta, nil
 }
 
 func (g *Google) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan ChatResponseChunk, ProviderMeta, error) {
 	start := time.Now()
 	meta := ProviderMeta{Provider: "google", Model: req.Model, Timestamp: start}
-	body, err := json.Marshal(toGeminiRequest(req))
+	gemReq, err := toGeminiRequest(req)
+	if err != nil {
+		meta.Error = err.Error()
+		return nil, meta, err
+	}
+	body, err := json.Marshal(gemReq)
 	if err != nil {
 		return nil, meta, err
 	}
@@ -256,16 +259,61 @@ func (g *Google) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-c
 		return nil, meta, fmt.Errorf("gemini stream error (status %d): %s", resp.StatusCode, string(respBody))
 	}
 	meta.Latency = time.Since(start)
-	return streamGemini(ctx, resp.Body, req.Model), meta, nil
+	return streamGemini(ctx, resp.Body, req.Model, req.StreamOptions != nil && req.StreamOptions.IncludeUsage), meta, nil
 }
 
-func toGeminiRequest(req ChatRequest) geminiRequest {
+func toGeminiRequest(req ChatRequest) (geminiRequest, error) {
+	if req.N != nil && *req.N > 1 {
+		return geminiRequest{}, NewUnsupportedParameterError("google", "n")
+	}
+	if req.Seed != nil {
+		return geminiRequest{}, NewUnsupportedParameterError("google", "seed")
+	}
+	if len(req.LogitBias) > 0 {
+		return geminiRequest{}, NewUnsupportedParameterError("google", "logit_bias")
+	}
+	if req.PresencePenalty != nil {
+		return geminiRequest{}, NewUnsupportedParameterError("google", "presence_penalty")
+	}
+	if req.FrequencyPenalty != nil {
+		return geminiRequest{}, NewUnsupportedParameterError("google", "frequency_penalty")
+	}
+	if req.ReasoningEffort != "" {
+		return geminiRequest{}, NewUnsupportedParameterError("google", "reasoning_effort")
+	}
+	if req.ServiceTier != "" {
+		return geminiRequest{}, NewUnsupportedParameterError("google", "service_tier")
+	}
+	if req.ParallelToolCalls != nil {
+		return geminiRequest{}, NewUnsupportedParameterError("google", "parallel_tool_calls")
+	}
+
+	maxTokens := req.MaxTokens
+	if req.MaxCompletionTokens != nil {
+		maxTokens = req.MaxCompletionTokens
+	}
 	gemReq := geminiRequest{
 		GenerationConfig: &geminiGenerationConfig{
 			Temperature: req.Temperature,
-			MaxTokens:   req.MaxTokens,
+			MaxTokens:   maxTokens,
 			TopP:        req.TopP,
 		},
+	}
+
+	if req.ResponseFormat != nil {
+		switch req.ResponseFormat.Type {
+		case "json_object":
+			gemReq.GenerationConfig.ResponseMimeType = "application/json"
+		case "json_schema":
+			gemReq.GenerationConfig.ResponseMimeType = "application/json"
+			if req.ResponseFormat.JSONSchema != nil {
+				gemReq.GenerationConfig.ResponseSchema = req.ResponseFormat.JSONSchema.Schema
+			}
+		case "", "text":
+			// No structured output requested.
+		default:
+			return geminiRequest{}, NewUnsupportedParameterError("google", "response_format")
+		}
 	}
 
 	if len(req.Tools) > 0 {
@@ -313,7 +361,7 @@ func toGeminiRequest(req ChatRequest) geminiRequest {
 			Parts: parts,
 		})
 	}
-	return gemReq
+	return gemReq, nil
 }
 
 func geminiMessageParts(msg Message, toolCallNames map[string]string) []geminiPart {
@@ -400,19 +448,5 @@ func geminiToolChoice(choice any) *geminiToolConfig {
 	return config
 }
 
-func geminiPricing(model string) ModelPricing {
-	switch model {
-	case "gemini-2.5-pro":
-		return ModelPricing{InputPerMillion: 1.25, OutputPerMillion: 10.00}
-	case "gemini-2.5-flash":
-		return ModelPricing{InputPerMillion: 0.15, OutputPerMillion: 0.60}
-	case "gemini-2.0-flash":
-		return ModelPricing{InputPerMillion: 0.10, OutputPerMillion: 0.40}
-	case "gemini-1.5-pro":
-		return ModelPricing{InputPerMillion: 1.25, OutputPerMillion: 5.00}
-	case "gemini-1.5-flash":
-		return ModelPricing{InputPerMillion: 0.075, OutputPerMillion: 0.30}
-	default:
-		return ModelPricing{InputPerMillion: 0.15, OutputPerMillion: 0.60}
-	}
-}
+// Pricing for Gemini models is resolved from the consolidated catalog
+// (internal/provider/catalog/models.json); see pricingFor in pricing.go.

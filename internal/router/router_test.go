@@ -99,6 +99,91 @@ func TestTransformRequestUsesDefaultOverrideAndDrop(t *testing.T) {
 	}
 }
 
+// TestTransformRequestHandlesPassthroughFields verifies default/override/drop
+// shaping works for the new passthrough-fidelity fields (A6), including
+// fields OmniSwitch does not model by name (forwarded through Extra).
+func TestTransformRequestHandlesPassthroughFields(t *testing.T) {
+	registry := provider.NewRegistry()
+	rtr := New(registry)
+	rtr.SetRoute("logical", Route{
+		DefaultParams: map[string]any{
+			"seed":     42,
+			"metadata": map[string]any{"env": "staging"},
+		},
+		OverrideParams: map[string]any{
+			"max_completion_tokens": 256,
+			"n":                     2,
+			"presence_penalty":      0.3,
+			"frequency_penalty":     0.4,
+			"user":                  "user-42",
+			"parallel_tool_calls":   false,
+			"reasoning_effort":      "low",
+			"service_tier":          "priority",
+			"store":                 true,
+			"logit_bias":            map[string]any{"1234": -100},
+			"stream_options":        map[string]any{"include_usage": true},
+			"response_format":       map[string]any{"type": "json_object"},
+			"prediction":            map[string]any{"type": "content", "content": "hi"},
+		},
+		DropParams: []string{"seed", "unused_field"},
+	})
+
+	got, err := rtr.TransformRequest(provider.ChatRequest{Model: "logical"})
+	if err != nil {
+		t.Fatalf("TransformRequest() error = %v", err)
+	}
+	if got.Seed != nil {
+		t.Fatalf("Seed = %v, want dropped", got.Seed)
+	}
+	if got.Metadata["env"] != "staging" {
+		t.Fatalf("Metadata = %v, want default env=staging", got.Metadata)
+	}
+	if got.MaxCompletionTokens == nil || *got.MaxCompletionTokens != 256 {
+		t.Fatalf("MaxCompletionTokens = %v, want 256", got.MaxCompletionTokens)
+	}
+	if got.N == nil || *got.N != 2 {
+		t.Fatalf("N = %v, want 2", got.N)
+	}
+	if got.PresencePenalty == nil || *got.PresencePenalty != 0.3 {
+		t.Fatalf("PresencePenalty = %v, want 0.3", got.PresencePenalty)
+	}
+	if got.FrequencyPenalty == nil || *got.FrequencyPenalty != 0.4 {
+		t.Fatalf("FrequencyPenalty = %v, want 0.4", got.FrequencyPenalty)
+	}
+	if got.User != "user-42" {
+		t.Fatalf("User = %q, want user-42", got.User)
+	}
+	if got.ParallelToolCalls == nil || *got.ParallelToolCalls {
+		t.Fatalf("ParallelToolCalls = %v, want false", got.ParallelToolCalls)
+	}
+	if got.ReasoningEffort != "low" {
+		t.Fatalf("ReasoningEffort = %q, want low", got.ReasoningEffort)
+	}
+	if got.ServiceTier != "priority" {
+		t.Fatalf("ServiceTier = %q, want priority", got.ServiceTier)
+	}
+	if got.Store == nil || !*got.Store {
+		t.Fatalf("Store = %v, want true", got.Store)
+	}
+	if got.LogitBias["1234"] != -100 {
+		t.Fatalf("LogitBias = %v, want {1234: -100}", got.LogitBias)
+	}
+	if got.StreamOptions == nil || !got.StreamOptions.IncludeUsage {
+		t.Fatalf("StreamOptions = %+v, want include_usage=true", got.StreamOptions)
+	}
+	if got.ResponseFormat == nil || got.ResponseFormat.Type != "json_object" {
+		t.Fatalf("ResponseFormat = %+v, want json_object", got.ResponseFormat)
+	}
+	if raw, ok := got.Extra["prediction"]; !ok || string(raw) != `{"content":"hi","type":"content"}` && string(raw) != `{"type":"content","content":"hi"}` {
+		t.Fatalf("Extra[prediction] = %s, ok=%v, want forwarded prediction object", raw, ok)
+	}
+
+	// dropping an unknown field should be a no-op, not an error.
+	if _, err := rtr.TransformRequest(provider.ChatRequest{Model: "logical"}); err != nil {
+		t.Fatalf("TransformRequest() second call error = %v", err)
+	}
+}
+
 func TestCircuitBreakerSkipsOpenProvider(t *testing.T) {
 	primaryCalls := 0
 	registry := provider.NewRegistry()

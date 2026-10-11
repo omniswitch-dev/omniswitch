@@ -1,0 +1,32 @@
+{{- if .Values.serviceMonitor.enabled }}
+{{- if not .Values.observability.prometheus.enabled }}
+{{- fail "serviceMonitor.enabled requires observability.prometheus.enabled" }}
+{{- end }}
+{{- if and (not .Values.observability.prometheus.public) (not (and .Values.serviceMonitor.bearerTokenSecret.name .Values.serviceMonitor.bearerTokenSecret.key)) }}
+{{- fail "private metrics require serviceMonitor.bearerTokenSecret.name and .key, or observability.prometheus.public=true" }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "omniswitch.fullname" . }}
+  labels:
+    {{- include "omniswitch.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "omniswitch.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: gateway
+  endpoints:
+    - port: {{ .Values.observability.prometheus.port | quote }}
+      path: {{ .Values.observability.prometheus.path | quote }}
+      interval: {{ .Values.serviceMonitor.interval | quote }}
+      {{- with .Values.serviceMonitor.bearerTokenSecret }}
+      bearerTokenSecret:
+        name: {{ required "serviceMonitor.bearerTokenSecret.name must not be empty" .name }}
+        key: {{ required "serviceMonitor.bearerTokenSecret.key must not be empty" .key }}
+      {{- end }}
+{{- end }}

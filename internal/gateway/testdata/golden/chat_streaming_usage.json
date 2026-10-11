@@ -1,0 +1,12 @@
+{
+  "description": "Streaming chat completion with stream_options.include_usage, matching the openai-python SDK's stream=True, stream_options={\"include_usage\": True} (only valid combined with stream=True).",
+  "source": "reference-derived from https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream_options",
+  "verified_on": "2026-09-11",
+  "endpoint": "chat",
+  "request": {
+    "model": "golden-chat-model",
+    "messages": [{"role": "user", "content": "Count to three."}],
+    "stream": true,
+    "stream_options": {"include_usage": true}
+  }
+}

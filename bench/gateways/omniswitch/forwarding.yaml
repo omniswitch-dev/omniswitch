@@ -1,0 +1,43 @@
+# bench/gateways/omniswitch/forwarding.yaml
+#
+# Minimum config that forwards to the mock upstream: no auth, no request
+# logging, no cache, no guardrails. Mirrors how OmniSwitch (and every
+# competitor) benchmarks itself: overhead only, nothing else enabled.
+#
+# Adapted from examples/gateway-config.yaml (repository root).
+apiVersion: omniswitch.dev/v1
+kind: GatewayConfig
+
+gateway:
+  listen: ":8080"
+  data_dir: "/data"
+  auth: false
+  log_payloads: false
+  cache_scope: api_key
+  circuit_breaker_failures: 5
+  circuit_breaker_cooldown: 60s
+  max_request_bytes: 10485760
+  read_header_timeout: 5s
+  read_timeout: 30s
+  write_timeout: 0s
+  idle_timeout: 60s
+
+observability:
+  otel_enabled: false
+  prometheus_enabled: false
+
+providers:
+  - name: bench-mock
+    type: custom
+    base_url: http://mock-upstream:4000/v1
+    api_key_env: MOCK_UPSTREAM_API_KEY
+    models:
+      - bench-model
+
+routes:
+  bench-model:
+    variants:
+      - name: bench-mock
+        provider: bench-mock
+        model: bench-model
+        weight: 100

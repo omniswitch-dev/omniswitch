@@ -1,0 +1,21 @@
+# bench/gateways/litellm-rust/forwarding.yaml
+#
+# Same shape as bench/gateways/litellm/forwarding.yaml, but the model is
+# marked `rust: true` and points at the mock upstream's Anthropic-shaped
+# /v1/messages endpoint, since that is what the Rust path supports at pin
+# date. See NOTES.md and pin.yaml for why.
+model_list:
+  - model_name: bench-model
+    litellm_params:
+      model: anthropic/bench-model
+      api_base: http://mock-upstream:4000
+      api_key: os.environ/MOCK_UPSTREAM_API_KEY
+      rust: true
+
+general_settings:
+  disable_spend_logs: true
+  disable_error_logs: true
+
+litellm_settings:
+  cache: false
+  drop_params: true

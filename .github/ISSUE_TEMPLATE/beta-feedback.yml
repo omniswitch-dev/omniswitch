@@ -1,0 +1,66 @@
+name: Beta feedback
+description: Tell us how the OmniSwitch public beta went for you, good or bad.
+title: "[Beta]: "
+labels: ["beta-blocker"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying the OmniSwitch public beta. This form takes a couple of minutes and directly shapes what we fix next. If something crashed or blocked you entirely, still fill this out — we track "minutes to first success" as a beta success metric.
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      options:
+        - install.sh (curl | sh)
+        - Homebrew
+        - Docker
+        - Kubernetes (Kustomize)
+        - Kubernetes (Helm)
+        - Built from source
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os-arch
+    attributes:
+      label: OS and architecture
+      description: e.g. macOS 15 / arm64, Ubuntu 24.04 / amd64, Windows 11 / amd64
+      placeholder: macOS 15 / arm64
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: "`omniswitch version` output"
+      description: Run `omniswitch version` and paste the output. If the binary would not even start, say so here.
+      placeholder: omniswitch version v0.2.0-beta.1 (commit ..., built ...)
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      description: Steps you followed, starting from install (link the quickstart page/section if you followed one).
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: What worked, what broke, any error output or logs.
+    validations:
+      required: true
+  - type: input
+    id: time-to-success
+    attributes:
+      label: Minutes to first success
+      description: Rough time from starting install to your first successful chat completion through OmniSwitch. Use "did not succeed" if you got stuck.
+      placeholder: "7 minutes"
+    validations:
+      required: true
+  - type: textarea
+    id: missing
+    attributes:
+      label: One thing that would most improve this
+      description: Optional, but very useful for prioritization.

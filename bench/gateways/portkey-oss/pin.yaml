@@ -1,0 +1,16 @@
+gateway: portkey-oss
+image: docker.io/portkeyai/gateway:latest
+digest: sha256:97f094d9c8a764cbfaa2a7138c0017b247ca923bb06db1b4c13b7f8a33b5200d
+resolved_via: "docker buildx imagetools inspect docker.io/portkeyai/gateway:latest"
+version_label: latest (self-hosted OSS gateway; distinct from the managed Portkey Cloud product)
+source_url: https://docs.portkey.ai/docs/product/ai-gateway/configs
+production_guide_url: https://github.com/portkey-ai/gateway
+pinned_on: "2026-09-11"
+notes: |
+  Portkey's OSS gateway is configured per-request via a Config object, sent
+  either as the request body's `config` field or the `x-portkey-config`
+  header, rather than a single gateway-wide file the way LiteLLM/OmniSwitch
+  are configured. This harness applies the Config via the `x-portkey-config`
+  header on every k6 request (see bench/k6/lib/gateways.js), and keeps the
+  two JSON Config documents below under version control as the "config
+  file" for parity with the other gateways' directory layout.

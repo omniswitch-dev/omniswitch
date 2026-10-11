@@ -41,18 +41,24 @@ Install the latest release:
 curl -fsSL https://raw.githubusercontent.com/omniswitch-dev/omniswitch/main/install.sh | sh
 ```
 
-Or via Homebrew (after the first release populates the tap):
+Or via Homebrew:
 
 ```bash
 brew install omniswitch-dev/tap/omniswitch
 ```
 
-Build and run locally:
+Run it:
+
+```bash
+OPENAI_API_KEY=sk-... omniswitch serve
+```
+
+Build and run from source:
 
 ```bash
 git clone https://github.com/omniswitch-dev/omniswitch.git
 cd omniswitch
-OPENAI_API_KEY=your_key_here go run ./cmd/gateway
+OPENAI_API_KEY=sk-... go run ./cmd/gateway serve
 ```
 
 The gateway starts on `http://localhost:8080` and serves the dashboard at
@@ -137,7 +143,7 @@ routes:
 Run with the config file:
 
 ```bash
-OMNISWITCH_CONFIG=examples/gateway-config.yaml go run ./cmd/gateway
+OMNISWITCH_CONFIG=examples/gateway-config.yaml go run ./cmd/gateway serve
 ```
 
 ## Compatibility Snapshot

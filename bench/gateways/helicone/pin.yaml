@@ -1,0 +1,20 @@
+gateway: helicone
+image: docker.io/helicone/ai-gateway:latest
+digest: sha256:bdf1f7c4f3aa177b8a03a02d461c744733c0292afd95d3185337d9fc2c346af6
+resolved_via: "docker buildx imagetools inspect docker.io/helicone/ai-gateway:latest"
+license: GPL-3.0
+license_source: "GitHub API (repository license field), Helicone/ai-gateway"
+license_caveat: >
+  Several third-party articles describe this project as Apache-2.0 or MIT.
+  The primary source (GitHub repository metadata) says GPL-3.0. Trust the
+  primary source; the third-party claim is wrong or describes a different
+  Helicone component.
+repo_staleness_caveat: >
+  GitHub API reported repository pushed_at: 2025-11-21, which is roughly
+  ten months before this pin date (2026-09-11). Verify the repo has not
+  gone unmaintained before including it in a published Tier A benchmark;
+  re-check pushed_at / recent commit activity at run time, not just at
+  pin time.
+source_url: https://github.com/Helicone/ai-gateway
+docs_url: https://docs.helicone.ai/gateway/overview
+pinned_on: "2026-09-11"

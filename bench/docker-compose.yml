@@ -1,0 +1,60 @@
+# bench/docker-compose.yml — wires the mock upstream and OmniSwitch (the
+# only gateway with a runnable build in this worktree today; see
+# bench/gateways/omniswitch/pin.yaml) on fixed cpusets for local smoke
+# testing and single-cell runs. It is deliberately NOT the full ten-gateway
+# campaign compose file: bench/README.md documents how to add one service
+# block per competitor gateway (image + digest from its pin.yaml, config
+# mount from its forwarding.yaml/production-default.yaml, cpuset 4-7 per
+# the topology in the benchmark plan section 3.2) as each is wired up.
+#
+# Quick start: docker compose -f bench/docker-compose.yml up --build
+name: omniswitch-bench
+
+services:
+  mock-upstream:
+    build:
+      context: .
+      dockerfile: cmd/mock-upstream/Dockerfile
+    image: omniswitch-bench/mock-upstream:local
+    ports:
+      - "4000:4000"
+    environment:
+      MOCK_PORT: "4000"
+      MOCK_BASE_DELAY_MS: "0"
+      MOCK_STREAM_CHUNKS: "40"
+      MOCK_STREAM_CHUNK_INTERVAL_MS: "20"
+    cpuset: "2-3"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:4000/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+
+  # OmniSwitch built from this worktree, forwarding cell (see
+  # bench/gateways/omniswitch/forwarding.yaml). Swap the config mount for
+  # production-default.yaml to run the other cell.
+  omniswitch:
+    build:
+      context: .
+      dockerfile: ../Dockerfile
+    image: omniswitch-bench/omniswitch:local
+    depends_on:
+      mock-upstream:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./gateways/omniswitch/forwarding.yaml:/etc/omniswitch/config.yaml:ro
+    environment:
+      OPENAI_API_KEY: "bench-unused"
+      MOCK_UPSTREAM_API_KEY: "bench-mock-key"
+    cpuset: "4-7"
+    mem_limit: "4g"
+
+  # driver:
+  #   Intentionally not containerized: bench/scripts/run-cell.sh runs k6
+  #   (or bench/cmd/sse-probe as a fallback) directly on the host, pinned
+  #   to cpuset 0-1 via `taskset`, per the topology diagram in the
+  #   benchmark plan section 3.2. Containerizing the driver adds a network
+  #   hop that the plan's loopback topology is explicitly designed to
+  #   avoid.

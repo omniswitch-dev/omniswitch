@@ -6,7 +6,11 @@ services:
     environment:
       OMNISWITCH_CONFIG: examples/gateway-config.yaml
       OMNISWITCH_DATA: /data
-      OMNISWITCH_AUTH: "false"
+      OMNISWITCH_AUTH: "true"
+      # Required when OMNISWITCH_AUTH=true: the initial admin API key clients
+      # use as `Authorization: Bearer <key>`. Set this in a .env file or your
+      # shell before running `docker compose up` — do not commit a real key.
+      OMNISWITCH_BOOTSTRAP_API_KEY: ${OMNISWITCH_BOOTSTRAP_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}

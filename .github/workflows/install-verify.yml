@@ -1,0 +1,257 @@
+name: Install verification
+
+# Exercises every documented install path against a real (or manually chosen)
+# release: binaries on 5 platforms, Homebrew, Docker, Kustomize, and Helm.
+# Runs automatically when a release is published, or on demand against any
+# tag via workflow_dispatch.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to verify, e.g. v0.2.0-beta.1"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      is_prerelease: ${{ steps.resolve.outputs.is_prerelease }}
+    steps:
+      - name: Resolve
+        id: resolve
+        shell: bash
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          if [ -z "${TAG}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          fi
+          if [ -z "${TAG}" ]; then
+            echo "::error::No tag available (neither release.tag_name nor workflow_dispatch input.tag)"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          IS_PRERELEASE="false"
+          case "${TAG}" in
+            *-*) IS_PRERELEASE="true" ;;
+          esac
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=${TAG} version=${VERSION} is_prerelease=${IS_PRERELEASE}"
+
+  binaries:
+    name: Binary (${{ matrix.name }})
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-latest
+            mode: native
+          - name: linux-arm64
+            runner: ubuntu-latest
+            mode: qemu
+          - name: darwin-amd64
+            runner: macos-15-intel
+            mode: native
+          - name: darwin-arm64
+            runner: macos-latest
+            mode: native
+          - name: windows-amd64
+            runner: windows-latest
+            mode: windows
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        if: matrix.mode == 'qemu'
+        uses: docker/setup-qemu-action@v4
+
+      - name: Verify (linux/arm64 via QEMU)
+        if: matrix.mode == 'qemu'
+        shell: bash
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -e OMNISWITCH_VERSION="${{ needs.resolve.outputs.tag }}" \
+            -v "${PWD}":/repo -w /repo \
+            debian:bookworm-slim \
+            bash -c "set -e; apt-get update -qq && apt-get install -y -qq curl ca-certificates && ./scripts/verify-install.sh"
+
+      - name: Verify install
+        if: matrix.mode == 'native'
+        shell: bash
+        env:
+          OMNISWITCH_VERSION: ${{ needs.resolve.outputs.tag }}
+        run: scripts/verify-install.sh
+
+      - name: Download release archive (Windows)
+        if: matrix.mode == 'windows'
+        shell: pwsh
+        run: |
+          $tag = "${{ needs.resolve.outputs.tag }}"
+          $version = "${{ needs.resolve.outputs.version }}"
+          $url = "https://github.com/omniswitch-dev/omniswitch/releases/download/$tag/omniswitch_${version}_windows_amd64.zip"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile omniswitch.zip
+          Expand-Archive -Path omniswitch.zip -DestinationPath extracted -Force
+          $binPath = Join-Path (Resolve-Path extracted) "omniswitch.exe"
+          "OMNISWITCH_BIN=$binPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Verify install (Windows)
+        if: matrix.mode == 'windows'
+        shell: pwsh
+        run: pwsh scripts/verify-install.ps1
+
+  homebrew:
+    name: Homebrew
+    needs: resolve
+    runs-on: macos-latest
+    # Prereleases are not published to the tap (latest/Homebrew only track
+    # stable, see docs/RELEASES.md), so this is expected to have nothing to
+    # install for a beta tag; don't fail the whole workflow on that.
+    continue-on-error: ${{ needs.resolve.outputs.is_prerelease == 'true' }}
+    steps:
+      - name: brew install
+        run: brew install omniswitch-dev/tap/omniswitch
+
+      - name: brew test
+        run: brew test omniswitch-dev/tap/omniswitch
+
+  docker:
+    name: Docker (${{ matrix.arch }})
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up QEMU
+        if: matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@v4
+
+      - name: Pull image
+        run: docker pull --platform "linux/${{ matrix.arch }}" "ghcr.io/omniswitch-dev/omniswitch:${{ needs.resolve.outputs.version }}"
+
+      - name: Run and health-check
+        shell: bash
+        run: |
+          set -e
+          CID=$(docker run -d --platform "linux/${{ matrix.arch }}" -p 18080:8080 \
+            -e OPENAI_API_KEY=dummy -e OMNISWITCH_AUTH=false -e OMNISWITCH_MCP_ENABLED=false \
+            "ghcr.io/omniswitch-dev/omniswitch:${{ needs.resolve.outputs.version }}")
+          trap 'docker logs "$CID" || true; docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+
+          up=0
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18080/healthz; then up=1; break; fi
+            sleep 1
+          done
+          if [ "$up" -ne 1 ]; then echo "::error::/healthz never returned 200"; exit 1; fi
+
+          for path in /healthz /readyz /v1/models; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18080${path}")
+            echo "GET ${path} -> ${code}"
+            if [ "$code" != "200" ]; then echo "::error::GET ${path} returned ${code}"; exit 1; fi
+          done
+
+  kind:
+    name: Kubernetes (kind + Kustomize + Helm)
+    needs: [resolve, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: helm lint
+        run: helm lint deploy/helm/omniswitch
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          wait: 120s
+
+      - name: Apply Kustomize manifests with the release image
+        shell: bash
+        run: |
+          set -e
+          OVERLAY=$(mktemp -d)
+          cp -r deploy/kubernetes/. "${OVERLAY}/"
+          sed -i.bak "s|newTag: latest|newTag: ${{ needs.resolve.outputs.version }}|" "${OVERLAY}/kustomization.yaml"
+          rm -f "${OVERLAY}/kustomization.yaml.bak"
+          kubectl apply -k "${OVERLAY}"
+          kubectl -n omniswitch set env deployment/omniswitch-gateway \
+            OPENAI_API_KEY=dummy \
+            OMNISWITCH_VAULT_KEY=dummy-verification-key-not-for-real-use \
+            OMNISWITCH_BOOTSTRAP_API_KEY=dummy-bootstrap-key-not-for-real-use
+          kubectl -n omniswitch rollout status deployment/omniswitch-gateway --timeout=180s
+
+      - name: Health-check via Kustomize deployment
+        shell: bash
+        run: |
+          set -e
+          kubectl -n omniswitch port-forward svc/omniswitch-gateway 18081:8080 &
+          PF_PID=$!
+          trap 'kill ${PF_PID} 2>/dev/null || true' EXIT
+          up=0
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18081/healthz; then up=1; break; fi
+            sleep 1
+          done
+          if [ "$up" -ne 1 ]; then
+            kubectl -n omniswitch logs deployment/omniswitch-gateway --tail=100 || true
+            echo "::error::/healthz never returned 200 on the Kustomize deployment"; exit 1
+          fi
+          for path in /healthz /readyz /v1/models; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18081${path}")
+            echo "GET ${path} -> ${code}"
+            if [ "$code" != "200" ]; then echo "::error::GET ${path} returned ${code}"; exit 1; fi
+          done
+          kill ${PF_PID} 2>/dev/null || true
+
+      - name: helm install with a dummy key
+        shell: bash
+        run: |
+          set -e
+          helm install omniswitch-verify deploy/helm/omniswitch \
+            --namespace omniswitch-helm-verify --create-namespace \
+            --set image.tag="${{ needs.resolve.outputs.version }}" \
+            --set secrets.OPENAI_API_KEY=dummy \
+            --set secrets.OMNISWITCH_VAULT_KEY=dummy-verification-key-not-for-real-use \
+            --set secrets.OMNISWITCH_BOOTSTRAP_API_KEY=dummy-bootstrap-key-not-for-real-use \
+            --wait --timeout 3m
+
+      - name: Health-check via Helm release
+        shell: bash
+        run: |
+          set -e
+          kubectl -n omniswitch-helm-verify port-forward svc/omniswitch-verify 18082:8080 &
+          PF_PID=$!
+          trap 'kill ${PF_PID} 2>/dev/null || true' EXIT
+          up=0
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18082/healthz; then up=1; break; fi
+            sleep 1
+          done
+          if [ "$up" -ne 1 ]; then
+            kubectl -n omniswitch-helm-verify logs deployment/omniswitch-verify --tail=100 || true
+            echo "::error::/healthz never returned 200 on the Helm release"; exit 1
+          fi
+          for path in /healthz /readyz /v1/models; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18082${path}")
+            echo "GET ${path} -> ${code}"
+            if [ "$code" != "200" ]; then echo "::error::GET ${path} returned ${code}"; exit 1; fi
+          done
+          kill ${PF_PID} 2>/dev/null || true

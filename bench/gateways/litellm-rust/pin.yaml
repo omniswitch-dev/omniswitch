@@ -1,0 +1,28 @@
+gateway: litellm-rust
+image: ghcr.io/berriai/litellm:main-stable
+digest: sha256:a3715fa7ad8387941ab697259bd2881d68931657247a41984f90fae6d11c62bf
+resolved_via: "docker buildx imagetools inspect ghcr.io/berriai/litellm:main-stable (same image as litellm; the Rust\n  gateway is an opt-in per-model flag inside the same proxy process, not a separate image)"
+version_label: "main-stable tag, Rust path in early beta as of 2026-09 launch blog"
+source_url: https://docs.litellm.ai/docs/proxy/rust_gateway
+production_guide_url: https://docs.litellm.ai/docs/proxy/prod
+pinned_on: "2026-09-11"
+notes: |
+  At pin date the documented Rust path covers /chat/completions only for the
+  `anthropic` and `bedrock` (Converse) providers, and /v1/messages for
+  `anthropic` and `azure_ai`. It does not cover a generic OpenAI-compatible
+  custom endpoint like the bench mock upstream's /v1/chat/completions route.
+  Two options were considered:
+    1. Run the mock upstream's Anthropic-shaped /v1/messages endpoint and
+       set the model's provider to `anthropic` with `rust: true`, so the
+       Rust path is actually exercised for the S1/S4 scenarios that use
+       Anthropic-shaped payloads.
+    2. Set `rust: true` on an openai-compatible model anyway and record
+       that requests silently fall back to the Python path (LiteLLM's
+       documented fallback behavior for unsupported routes), which would
+       produce a misleading "no overhead" result.
+  This harness uses option 1: litellm-rust's config points the mock
+  upstream's Anthropic-shaped endpoint and is scenario-gated to the
+  Anthropic-payload cells only. Chat-completions cells are marked `n/a` for
+  litellm-rust until LiteLLM's own roadmap (documented ~Sep 2026 in the
+  launch blog) lands `/chat/completions` on the general OpenAI-compatible
+  path.

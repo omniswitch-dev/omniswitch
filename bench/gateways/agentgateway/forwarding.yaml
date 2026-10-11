@@ -1,0 +1,18 @@
+# bench/gateways/agentgateway/forwarding.yaml
+#
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+#
+# Minimum config that forwards to the mock upstream. Adapted from
+# https://agentgateway.dev/docs/standalone/latest/llm/providers/custom/ and
+# https://agentgateway.dev/docs/standalone/main/configuration/overview/.
+binds:
+  - port: 8080
+listeners:
+  - routes:
+      - backends:
+          - ai:
+              provider:
+                openai:
+                  model: bench-model
+                  baseUrl: http://mock-upstream:4000/v1
+                  # No auth policy: forwarding cell has no auth on any gateway.

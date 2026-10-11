@@ -1,0 +1,8 @@
+# CODEOWNERS: request review automatically for the listed paths.
+# See MAINTAINERS.md and GOVERNANCE.md for how area ownership is decided.
+
+/internal/gateway/  @onlychirag
+/internal/proxy/    @onlychirag
+/deploy/            @onlychirag
+/docs/              @onlychirag
+/sdk/               @onlychirag

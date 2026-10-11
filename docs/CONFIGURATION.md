@@ -204,6 +204,27 @@ providers:
     models: [gpt-4o]
 ```
 
+## Model catalog
+
+`/v1/models` and cost-based routing (the `cost-optimal` strategy) for OpenAI,
+Anthropic, Google, and Groq are driven by a single consolidated catalog file,
+embedded at build time via `go:embed`:
+`internal/provider/catalog/models.json`.
+
+Each entry records the model ID, `owned_by`, USD price per 1M input/output
+tokens, a `source_url`, and the `verified_on` date it was last checked against
+the provider's public pricing page. There is no live pricing fetch; updating
+prices/models is a manual edit to this file (add a row, keep `verified_on`
+current) followed by `go test ./internal/provider/...`. Bedrock and Cohere
+also draw their default model lists from the catalog; Bedrock pricing then
+matches by substring against the catalog's canonical Claude model IDs because
+Bedrock model IDs vary by region/cross-region-inference-profile prefix.
+Models not present in the catalog return zero estimated cost rather than a
+guessed default. Mistral, DeepSeek, and xAI are reachable via `type: custom`
+presets (see above) and have reference-only catalog rows under provider
+`custom-preset-reference` for documentation purposes; they are not read by any
+adapter.
+
 ## Observability
 
 OmniSwitch can export gateway and provider spans to any OTLP-compatible backend.
@@ -236,6 +257,33 @@ cross-origin browser access. `max_request_bytes`, `read_header_timeout`,
 `read_timeout`, `write_timeout`, and `idle_timeout` map to request and server
 limits. The write timeout defaults to `0s` so long-running SSE streams are not
 cut off; set a positive value only when streaming is not required.
+
+`gateway.storage` selects the store backend: `sqlite` (default) or `postgres`.
+When set to `postgres`, `gateway.storage_url` (a `postgres://` or
+`postgresql://` DSN) is required and config validation rejects the file
+without it. The `OMNISWITCH_DATABASE_URL` environment variable always takes
+precedence over `gateway.storage_url`, so an operator can override storage
+without editing the config file.
+
+`gateway.alerts` sends threshold-based notifications (for example, elevated
+error rates) to a webhook and/or Slack incoming webhook URL:
+
+```yaml
+gateway:
+  alerts:
+    webhook_url: https://hooks.example.com/omniswitch
+    slack_url: https://hooks.slack.com/services/...
+    thresholds: [0.5, 0.9]
+```
+
+`webhook_url` and `slack_url` must be absolute `http://` or `https://` URLs
+when set; `thresholds` are fractions in `(0, 1]`. Alerts reload alongside
+guardrails when `OMNISWITCH_CONFIG` hot-reload is enabled.
+
+`authorization.external` (an out-of-process HTTP authorization callout) is not
+implemented in this release. Configuring `authorization.external.url` or
+`authorization.external.timeout` fails config validation with a clear error;
+use `authorization.rules` (CEL) instead.
 
 ## Authorization and Rate Limits
 
@@ -276,7 +324,8 @@ CEL `condition` on a variant (`model` and `prompt` variables), retry count and
 backoff, retryable HTTP status codes, per-attempt timeouts, a shadow provider,
 and request shaping. `default_params` fills absent values,
 `override_params` always wins, and `drop_params` is applied last. The current
-and `stop`.
+request-shaping fields are `model`, `temperature`, `max_tokens`, `top_p`,
+`stream`, and `stop`.
 
 ## Guardrails
 
@@ -394,10 +443,20 @@ curl -X POST http://localhost:8080/api/virtual-keys \
 - `OMNISWITCH_OTEL_TIMEOUT`
 - `OMNISWITCH_PROMETHEUS_ENABLED`
 - `OMNISWITCH_VAULT_KEY`
-- `OMNISWITCH_MCP_ENABLED`
+- `OMNISWITCH_MCP_ENABLED` - defaults to `false`. When enabled without `OMNISWITCH_MCP_POLICY` (or `mcp.policy`) set, the gateway falls back to a conservative embedded default policy rather than failing to start.
 - `OMNISWITCH_MCP_POLICY`
 - `OMNISWITCH_MCP_UPSTREAM`
+- `OMNISWITCH_SHUTDOWN_TIMEOUT` - defaults to `30s`. On SIGINT/SIGTERM, `omniswitch serve` stops accepting new connections, waits up to this long for in-flight requests (including SSE streams) to finish, then exits `0`.
+- `OMNISWITCH_ALLOW_NO_PROVIDERS` - defaults to `false`. When `false`, `GET /readyz` reports not-ready if no provider is registered; set to `true` for local smoke-testing without any provider configured.
 - `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`
 - `GOOGLE_API_KEY`
 - `GROQ_API_KEY`
+
+## Command Line and Health Checks
+
+See [`docs/CLI.md`](CLI.md) for `omniswitch serve`, `omniswitch validate-config`,
+and `omniswitch version`. `GET /healthz` (liveness) and `GET /readyz`
+(readiness: store reachability and provider registration) are always
+unauthenticated, independent of `gateway.auth`, and safe to point Kubernetes
+or load-balancer health checks at.

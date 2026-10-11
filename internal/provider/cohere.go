@@ -30,12 +30,7 @@ func NewCohere(apiKey string) *Cohere {
 func (c *Cohere) Name() string { return "cohere" }
 
 func (c *Cohere) Models() []ModelInfo {
-	models := []string{"rerank-v3.5", "rerank-english-v3.0", "rerank-multilingual-v3.0"}
-	out := make([]ModelInfo, len(models))
-	for i, model := range models {
-		out[i] = ModelInfo{ID: model, Object: "model", OwnedBy: "cohere", Provider: "cohere"}
-	}
-	return out
+	return catalogModelInfos("cohere", "cohere")
 }
 
 func (c *Cohere) ChatCompletion(context.Context, ChatRequest) (ChatResponse, ProviderMeta, error) {

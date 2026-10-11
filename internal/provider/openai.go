@@ -31,15 +31,7 @@ func NewOpenAI(apiKey string) *OpenAI {
 func (o *OpenAI) Name() string { return "openai" }
 
 func (o *OpenAI) Models() []ModelInfo {
-	models := []string{
-		"gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4",
-		"gpt-3.5-turbo", "o1", "o1-mini", "o3-mini",
-	}
-	out := make([]ModelInfo, len(models))
-	for i, m := range models {
-		out[i] = ModelInfo{ID: m, Object: "model", OwnedBy: "openai", Provider: "openai"}
-	}
-	return out
+	return catalogModelInfos("openai", "openai")
 }
 
 func (o *OpenAI) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, ProviderMeta, error) {
@@ -88,7 +80,7 @@ func (o *OpenAI) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 		return ChatResponse{}, meta, fmt.Errorf("decode response: %w", err)
 	}
 
-	meta.Cost = openAIPricing(req.Model).Cost(chatResp.Usage.PromptTokens, chatResp.Usage.CompletionTokens)
+	meta.Cost = pricingFor("openai", req.Model).Cost(chatResp.Usage.PromptTokens, chatResp.Usage.CompletionTokens)
 	return chatResp, meta, nil
 }
 
@@ -299,25 +291,5 @@ func estimateOpenAIImageCost(req ImageRequest) float64 {
 	return float64(n) * unit
 }
 
-func openAIPricing(model string) ModelPricing {
-	switch model {
-	case "gpt-4o":
-		return ModelPricing{InputPerMillion: 2.50, OutputPerMillion: 10.00}
-	case "gpt-4o-mini":
-		return ModelPricing{InputPerMillion: 0.15, OutputPerMillion: 0.60}
-	case "gpt-4-turbo":
-		return ModelPricing{InputPerMillion: 10.00, OutputPerMillion: 30.00}
-	case "gpt-4":
-		return ModelPricing{InputPerMillion: 30.00, OutputPerMillion: 60.00}
-	case "gpt-3.5-turbo":
-		return ModelPricing{InputPerMillion: 0.50, OutputPerMillion: 1.50}
-	case "o1":
-		return ModelPricing{InputPerMillion: 15.00, OutputPerMillion: 60.00}
-	case "o1-mini":
-		return ModelPricing{InputPerMillion: 3.00, OutputPerMillion: 12.00}
-	case "o3-mini":
-		return ModelPricing{InputPerMillion: 1.10, OutputPerMillion: 4.40}
-	default:
-		return ModelPricing{InputPerMillion: 5.00, OutputPerMillion: 15.00}
-	}
-}
+// Pricing for OpenAI models is resolved from the consolidated catalog
+// (internal/provider/catalog/models.json); see pricingFor in pricing.go.

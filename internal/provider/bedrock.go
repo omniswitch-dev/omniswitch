@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/omniswitch-dev/omniswitch/internal/provider/catalog"
 )
 
 type Bedrock struct {
@@ -57,10 +59,8 @@ func (b *Bedrock) Name() string { return b.name }
 func (b *Bedrock) Models() []ModelInfo {
 	models := b.models
 	if len(models) == 0 {
-		models = []string{
-			"anthropic.claude-3-5-sonnet-20241022-v2:0",
-			"anthropic.claude-3-5-haiku-20241022-v1:0",
-			"meta.llama3-1-70b-instruct-v1:0",
+		for _, m := range catalog.ForProvider("bedrock") {
+			models = append(models, m.ID)
 		}
 	}
 	out := make([]ModelInfo, len(models))
@@ -172,7 +172,11 @@ type bedrockConverseResponse struct {
 func (b *Bedrock) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, ProviderMeta, error) {
 	start := time.Now()
 	meta := ProviderMeta{Provider: b.name, ProviderType: "bedrock", Model: req.Model, Timestamp: start}
-	bedrockReq := b.toConverseRequest(req)
+	bedrockReq, err := b.toConverseRequest(req)
+	if err != nil {
+		meta.Error = err.Error()
+		return ChatResponse{}, meta, err
+	}
 	body, err := json.Marshal(bedrockReq)
 	if err != nil {
 		meta.Error = err.Error()
@@ -237,10 +241,51 @@ func (b *Bedrock) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResp
 	}, meta, nil
 }
 
-func (b *Bedrock) toConverseRequest(req ChatRequest) bedrockConverseRequest {
+// toConverseRequest maps a ChatRequest onto AWS Bedrock's Converse API
+// shape. Converse has no equivalent for n>1, seed, presence/frequency
+// penalties, logit_bias, parallel_tool_calls, reasoning_effort, or
+// service_tier, so requests using them are rejected with
+// UnsupportedParameterError rather than silently dropping the field.
+// max_completion_tokens maps onto Converse's inferenceConfig.maxTokens,
+// taking priority over max_tokens if both are set. store/metadata are
+// intentionally not rejected (platform bookkeeping only) and not forwarded.
+func (b *Bedrock) toConverseRequest(req ChatRequest) (bedrockConverseRequest, error) {
+	if req.N != nil && *req.N > 1 {
+		return bedrockConverseRequest{}, NewUnsupportedParameterError("bedrock", "n")
+	}
+	if req.Seed != nil {
+		return bedrockConverseRequest{}, NewUnsupportedParameterError("bedrock", "seed")
+	}
+	if len(req.LogitBias) > 0 {
+		return bedrockConverseRequest{}, NewUnsupportedParameterError("bedrock", "logit_bias")
+	}
+	if req.PresencePenalty != nil {
+		return bedrockConverseRequest{}, NewUnsupportedParameterError("bedrock", "presence_penalty")
+	}
+	if req.FrequencyPenalty != nil {
+		return bedrockConverseRequest{}, NewUnsupportedParameterError("bedrock", "frequency_penalty")
+	}
+	if req.ParallelToolCalls != nil {
+		return bedrockConverseRequest{}, NewUnsupportedParameterError("bedrock", "parallel_tool_calls")
+	}
+	if req.ReasoningEffort != "" {
+		return bedrockConverseRequest{}, NewUnsupportedParameterError("bedrock", "reasoning_effort")
+	}
+	if req.ServiceTier != "" {
+		return bedrockConverseRequest{}, NewUnsupportedParameterError("bedrock", "service_tier")
+	}
+	if req.ResponseFormat != nil && req.ResponseFormat.Type != "" && req.ResponseFormat.Type != "text" {
+		return bedrockConverseRequest{}, NewUnsupportedParameterError("bedrock", "response_format")
+	}
+
+	maxTokens := req.MaxTokens
+	if req.MaxCompletionTokens != nil {
+		maxTokens = req.MaxCompletionTokens
+	}
+
 	out := bedrockConverseRequest{
 		InferenceConfig: &bedrockInferenceConfig{
-			MaxTokens:     req.MaxTokens,
+			MaxTokens:     maxTokens,
 			Temperature:   req.Temperature,
 			TopP:          req.TopP,
 			StopSequences: append([]string(nil), req.Stop...),
@@ -294,7 +339,7 @@ func (b *Bedrock) toConverseRequest(req ChatRequest) bedrockConverseRequest {
 		}
 		out.Messages = append(out.Messages, bedrockMessage{Role: role, Content: content})
 	}
-	return out
+	return out, nil
 }
 
 func toBedrockContent(msg Message) []bedrockContentBlock {
@@ -405,14 +450,18 @@ func mapBedrockStopReason(reason string) string {
 	}
 }
 
+// bedrockPricing resolves catalog pricing by substring match against known
+// Claude model families, since Bedrock model IDs vary by cross-region
+// inference-profile prefix (e.g. "us.anthropic.claude-3-5-sonnet...") and
+// don't always exactly match the catalog's canonical "anthropic...." IDs.
 func bedrockPricing(model string) ModelPricing {
 	switch {
 	case strings.Contains(model, "claude-3-5-haiku"):
-		return ModelPricing{InputPerMillion: 0.80, OutputPerMillion: 4.00}
+		return catalogPricingOrZero("bedrock", "anthropic.claude-3-5-haiku-20241022-v1:0")
 	case strings.Contains(model, "claude-3-5-sonnet"):
-		return ModelPricing{InputPerMillion: 3.00, OutputPerMillion: 15.00}
+		return catalogPricingOrZero("bedrock", "anthropic.claude-3-5-sonnet-20241022-v2:0")
 	case strings.Contains(model, "claude-3-opus"):
-		return ModelPricing{InputPerMillion: 15.00, OutputPerMillion: 75.00}
+		return catalogPricingOrZero("bedrock", "anthropic.claude-3-opus-20240229-v1:0")
 	default:
 		return ModelPricing{}
 	}

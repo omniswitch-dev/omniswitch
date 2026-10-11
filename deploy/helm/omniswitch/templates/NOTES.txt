@@ -1,0 +1,24 @@
+OmniSwitch is available inside the cluster at:
+  http://{{ include "omniswitch.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+
+Enable authentication and provide a bootstrap admin key and a persistent vault
+key through secrets or existingSecret before sending production traffic.
+
+{{- if or .Values.database.url .Values.database.existingSecret }}
+Postgres is configured through Secret {{ include "omniswitch.databaseSecretName" . }}.
+Gateway persistence settings are ignored; no SQLite PVC is created or mounted.
+Existing SQLite data is NOT migrated to Postgres. The semantic cache remains
+local and ephemeral; configure shared Redis for cross-replica rate limits.
+{{- else }}
+SQLite is configured. Keep replicaCount=1 and back up the data volume.
+{{- end }}
+
+{{- if and (gt (int .Values.replicaCount) 1) (not (or .Values.redis.enabled .Values.redis.url)) }}
+WARNING: several replicas are running without Redis. Rate limits are per pod,
+not shared across replicas. Set redis.enabled=true or redis.url.
+{{- end }}
+
+{{- if and .Values.observability.prometheus.enabled (not .Values.observability.prometheus.public) }}
+Metrics are private. Annotation-based scraping is disabled; use a ServiceMonitor
+with a viewer-or-higher bearerTokenSecret, or explicitly make metrics public.
+{{- end }}

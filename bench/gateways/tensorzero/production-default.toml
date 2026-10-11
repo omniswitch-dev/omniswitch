@@ -1,0 +1,26 @@
+# production-default cell: retry parity via the provider's `retries`
+# table (documented for TensorZero model providers), ClickHouse
+# observability still disabled to keep S1/S2/S4/S5 comparable across
+# gateways (see pin.yaml observability_note). Gateway-level API-key
+# auth is not a documented TensorZero feature at research time -- marked
+# n/a rather than silently matched.
+
+[models.bench_model]
+routing = ["bench_mock"]
+
+[models.bench_model.providers.bench_mock]
+type = "openai"
+api_base = "http://mock-upstream:4000/v1/"
+api_key_location = "env::MOCK_UPSTREAM_API_KEY"
+model_name = "bench-model"
+
+[models.bench_model.providers.bench_mock.retries]
+num_retries = 2
+max_delay_s = 10
+
+[functions.bench_chat]
+type = "chat"
+
+[functions.bench_chat.variants.default]
+type = "chat_completion"
+model = "bench_model"

@@ -284,6 +284,16 @@ func OpenPostgres(dsn string) (*Store, error) {
 	return store, nil
 }
 
+// Ping verifies the underlying database connection is reachable. It is used
+// by the gateway's readiness probe and should be called with a short,
+// caller-supplied timeout so a stalled database cannot hang the check.
+func (s *Store) Ping(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("store is not initialized")
+	}
+	return s.db.PingContext(ctx)
+}
+
 // rewriteSQL converts SQLite-style ? placeholders into PostgreSQL $n
 // placeholders. Placeholders inside single-quoted strings are preserved.
 func rewriteSQL(query string) string {

@@ -42,3 +42,22 @@ Name of the Secret holding provider credentials.
 {{- include "omniswitch.fullname" . }}-secrets
 {{- end }}
 {{- end }}
+
+{{/* Name of the separate Secret holding the database URL. */}}
+{{- define "omniswitch.databaseSecretName" -}}
+{{- default (printf "%s-database" (include "omniswitch.fullname" .)) .Values.database.existingSecret }}
+{{- end }}
+
+{{/* External Redis URL or the release-specific bundled Redis service. */}}
+{{- define "omniswitch.redisURL" -}}
+{{- default (printf "redis://%s-redis:6379/0" (include "omniswitch.fullname" .)) .Values.redis.url }}
+{{- end }}
+
+{{/* Use the namespace default ServiceAccount when creation is disabled. */}}
+{{- define "omniswitch.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (include "omniswitch.fullname" .) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}

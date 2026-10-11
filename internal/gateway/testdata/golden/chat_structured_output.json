@@ -1,0 +1,28 @@
+{
+  "description": "Chat completion requesting strict Structured Outputs via response_format.json_schema, matching the current OpenAI API shape (response_format.type=\"json_schema\", json_schema.strict=true, json_schema.schema=<JSON Schema>).",
+  "source": "reference-derived from https://platform.openai.com/docs/guides/structured-outputs and https://platform.openai.com/docs/api-reference/chat/create#chat-create-response_format",
+  "verified_on": "2026-09-11",
+  "endpoint": "chat",
+  "request": {
+    "model": "golden-chat-model",
+    "messages": [
+      {"role": "user", "content": "Extract the name and age from: Alice is 30."}
+    ],
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "person",
+        "strict": true,
+        "schema": {
+          "type": "object",
+          "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"}
+          },
+          "required": ["name", "age"],
+          "additionalProperties": false
+        }
+      }
+    }
+  }
+}

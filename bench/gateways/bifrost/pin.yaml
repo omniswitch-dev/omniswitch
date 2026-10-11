@@ -1,0 +1,15 @@
+gateway: bifrost
+image: docker.io/maximhq/bifrost:latest
+digest: sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
+resolved_via: "docker buildx imagetools inspect docker.io/maximhq/bifrost:latest"
+version_label: "~v1.6.x (tag pinned by digest above; LiteLLM's AIGatewayBench tested v1.6.4)"
+source_url: https://docs.getbifrost.ai/deployment-guides/config-json/providers
+production_guide_url: https://docs.getbifrost.ai/quickstart/gateway/setting-up
+pinned_on: "2026-09-11"
+notes: |
+  Bifrost reads provider config from config.json (schema at
+  https://www.getbifrost.ai/schema). This harness uses the documented
+  custom-provider pattern (base_provider_type: openai, network_config.base_url)
+  to point at the mock upstream. Bifrost's fallback-chain, cache, and
+  guardrail config surfaces were not independently confirmed field-by-field
+  in this session; see NOTES.md.

@@ -1,0 +1,24 @@
+gateway: tensorzero
+image: docker.io/tensorzero/gateway:latest
+digest: sha256:c939db4f27e41aa3a37a87909430a0c8f898f9c952f402dcbdc17e1708597bcb
+resolved_via: "docker buildx imagetools inspect docker.io/tensorzero/gateway:latest"
+license: Apache-2.0
+source_url: https://github.com/tensorzero/tensorzero
+docs_url: https://www.tensorzero.com/docs/gateway/configuration-reference/
+pinned_on: "2026-09-11"
+maintenance_caveat: >
+  IMPORTANT: at research time, TensorZero's own website/project statement
+  indicated the project is no longer actively maintained. This must be
+  flagged prominently in any published comparison including TensorZero --
+  do not present its benchmark numbers without this caveat next to them.
+  Re-verify current maintenance status immediately before the first
+  measured run; if it has resumed active development, update or remove
+  this caveat with a fresh source citation and date.
+observability_note: >
+  TensorZero's ClickHouse-backed observability store is optional and is
+  left disabled in both harness cells, matching TensorZero's own published
+  perf-benchmark methodology (disabled for their <1ms p99 @ 10k QPS claim).
+  This keeps the OmniSwitch harness's "apples to apples" comparison
+  consistent with how TensorZero benchmarks itself, but it means
+  TensorZero's observability capability is not exercised by these latency
+  scenarios -- noted separately in S8 conformance, not S1/S2/S4/S5.

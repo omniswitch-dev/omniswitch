@@ -291,9 +291,18 @@ func Validate(cfg Config) error {
 	}
 	if storage := strings.ToLower(strings.TrimSpace(cfg.Gateway.Storage)); storage != "" {
 		switch storage {
-		case "sqlite", "postgres":
+		case "sqlite":
+		case "postgres":
+			if strings.TrimSpace(cfg.Gateway.StorageURL) == "" {
+				return fmt.Errorf("gateway.storage_url is required when gateway.storage is postgres")
+			}
 		default:
 			return fmt.Errorf("gateway.storage must be sqlite or postgres")
+		}
+	}
+	if storageURL := strings.TrimSpace(cfg.Gateway.StorageURL); storageURL != "" {
+		if !strings.HasPrefix(storageURL, "postgres://") && !strings.HasPrefix(storageURL, "postgresql://") {
+			return fmt.Errorf("gateway.storage_url must be a postgres:// or postgresql:// DSN")
 		}
 	}
 	if cfg.Gateway.Alerts != nil {
@@ -351,14 +360,8 @@ func Validate(cfg Config) error {
 			return fmt.Errorf("authorization.rules[%d].effect must be allow or deny", index)
 		}
 	}
-	if cfg.Authorization.External.URL != "" {
-		parsed, err := url.Parse(cfg.Authorization.External.URL)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-			return fmt.Errorf("authorization.external.url must be an absolute HTTP(S) URL")
-		}
-	}
-	if cfg.Authorization.External.Timeout != nil && cfg.Authorization.External.Timeout.Duration <= 0 {
-		return fmt.Errorf("authorization.external.timeout must be positive")
+	if cfg.Authorization.External.URL != "" || cfg.Authorization.External.Timeout != nil {
+		return fmt.Errorf("authorization.external is not implemented in this release; remove it from the config and use authorization.rules (CEL) instead")
 	}
 	if cfg.RateLimit.Requests != nil && *cfg.RateLimit.Requests < 1 {
 		return fmt.Errorf("rate_limit.requests must be positive")

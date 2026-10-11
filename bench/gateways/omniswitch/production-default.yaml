@@ -1,0 +1,55 @@
+# bench/gateways/omniswitch/production-default.yaml
+#
+# The project's own documented production posture: auth on with a bootstrap
+# key, payload logging off (the documented safe default -- see
+# examples/gateway-config.yaml comment), circuit breaker, retries/timeouts,
+# and Prometheus on. Cache and guardrails are enabled only in the scenarios
+# that specifically target them (S6, S8), per bench/README.md 3.7 parity
+# rules, so they are left present-but-inert here (cache_scope set, no
+# guardrail rules configured) to match "documented production defaults"
+# without pre-empting the cache/guardrail scenario cells.
+apiVersion: omniswitch.dev/v1
+kind: GatewayConfig
+
+gateway:
+  listen: ":8080"
+  data_dir: "/data"
+  auth: true # requires OMNISWITCH_BOOTSTRAP_API_KEY on first run
+  log_payloads: false
+  cache_scope: api_key
+  circuit_breaker_failures: 5
+  circuit_breaker_cooldown: 60s
+  max_request_bytes: 10485760
+  read_header_timeout: 5s
+  read_timeout: 30s
+  write_timeout: 0s
+  idle_timeout: 60s
+
+rate_limit:
+  requests: 100000
+  window: 1m
+  fail_open: false
+
+observability:
+  otel_enabled: false
+  prometheus_enabled: true
+
+providers:
+  - name: bench-mock
+    type: custom
+    base_url: http://mock-upstream:4000/v1
+    api_key_env: MOCK_UPSTREAM_API_KEY
+    models:
+      - bench-model
+
+routes:
+  bench-model:
+    timeout: 10s
+    max_retries: 2
+    retry_backoff: 500ms
+    retry_codes: [429, 500, 502, 503, 504]
+    variants:
+      - name: bench-mock
+        provider: bench-mock
+        model: bench-model
+        weight: 100

@@ -1,0 +1,14 @@
+gateway: litellm
+image: ghcr.io/berriai/litellm:main-stable
+digest: sha256:a3715fa7ad8387941ab697259bd2881d68931657247a41984f90fae6d11c62bf
+resolved_via: "docker buildx imagetools inspect ghcr.io/berriai/litellm:main-stable"
+version_label: "main-stable tag, resolved 2026-09-11 (BerriAI/litellm releases ~v1.100.x as of this date; the\n  main-stable floating tag is what LiteLLM's own quick-start docs recommend, so\n  it is pinned by digest above rather than by a version number that will not\n  match the tag by the time this is re-run)"
+source_url: https://docs.litellm.ai/docs/proxy/deploy
+production_guide_url: https://docs.litellm.ai/docs/proxy/prod
+pinned_on: "2026-09-11"
+notes: |
+  LiteLLM's own production guide (docs/proxy/prod) recommends `--num_workers`
+  sized to CPU count and a Postgres-backed database URL for spend tracking
+  and virtual keys; both are reflected in production-default.yaml. The
+  forwarding cell drops the database entirely (no persistence, no virtual
+  keys) to match the "minimum config that forwards" rule in bench/README.md.

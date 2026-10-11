@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question (Discussions Q&A)
+    url: https://github.com/omniswitch-dev/omniswitch/discussions/categories/q-a
+    about: Usage questions, configuration help, and "is this expected?" belong in Discussions, not Issues.
+  - name: Report a security vulnerability
+    url: https://github.com/omniswitch-dev/omniswitch/security/policy
+    about: Please do not open a public issue for suspected vulnerabilities. See SECURITY.md.
+  - name: Share feedback or ideas
+    url: https://github.com/omniswitch-dev/omniswitch/discussions/categories/ideas
+    about: Feature ideas and roadmap discussion that are not yet a concrete, actionable request.

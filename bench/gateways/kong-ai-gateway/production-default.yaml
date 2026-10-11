@@ -1,0 +1,35 @@
+# production-default cell: key-auth plugin in front of the route (OSS
+# `key-auth` plugin, not an AI-specific feature) approximates "auth on"
+# parity with the other gateways' production cell. Retry/backoff and
+# rate limiting on this path use Kong's OSS core plugins (`ai-proxy`
+# itself has no retry config in OSS; retries here rely on Kong's core
+# upstream retry behavior, which is coarser than the harness's
+# per-status-code parity rule -- see NOTES.md).
+_format_version: "3.0"
+
+services:
+  - name: bench-mock-service
+    url: http://mock-upstream:4000
+    retries: 2
+    routes:
+      - name: bench-mock-route
+        paths:
+          - /bench
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              model:
+                provider: openai
+                name: bench-model
+                options:
+                  upstream_url: http://mock-upstream:4000/v1/chat/completions
+          - name: key-auth
+            config:
+              key_names:
+                - apikey
+
+consumers:
+  - username: bench-consumer
+    keyauth_credentials:
+      - key: bench-key

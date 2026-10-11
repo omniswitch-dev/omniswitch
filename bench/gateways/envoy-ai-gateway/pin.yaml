@@ -1,0 +1,40 @@
+gateway: envoy-ai-gateway
+tier: harness-deferred
+images:
+  cli:
+    image: docker.io/envoyproxy/ai-gateway-cli:latest
+    digest: sha256:ad0d4ffe2924dd3f46414687e9331f5fa947b9f2c9db735accaad9f2275aff56
+  controller:
+    image: docker.io/envoyproxy/ai-gateway-controller:latest
+    digest: sha256:49a6e32a54f37844bfae83294ed821540fe871a8e2113a69b3452aba79e7ffdf
+  extproc:
+    image: docker.io/envoyproxy/ai-gateway-extproc:latest
+    digest: sha256:db420a5feeb2837ee957ba75a8ca1bccb6676b9024f82f17a5f7df34b07ec7c8
+resolved_via: "docker buildx imagetools inspect <image>:latest, per image"
+license: Apache-2.0
+pinned_on: "2026-09-11"
+rename_caveat: >
+  The GitHub repo envoyproxy/ai-gateway now HTTP 301-redirects (confirmed via
+  `curl -sI` and the GitHub API's `Location: https://api.github.com/
+  repositories/875880554`) to theagentrouter/agent-router. The project
+  renamed itself "Agent Router" in 2026, described as an "Agentic AI
+  Foundation" project. Per the project's own statement, codebase,
+  maintainers, release cadence, license, CRDs, API group, CLI (`aigw`),
+  namespace, container images, Helm charts, and Go module path are
+  unchanged despite the rename. Use "Envoy AI Gateway (now Agent Router)"
+  in any published materials, and re-verify this is still accurate before
+  publishing -- renamed projects sometimes diverge further afterward.
+deferral_decision: >
+  Per plan section 8 risk table ("Envoy AI Gateway cannot run on loopback
+  tier -> Defer to K8s tier (S11) or drop from beta with explicit note")
+  and section 2.1's own tier note ("Kubernetes (kind) tier, or standalone
+  `aigw run` CLI"), this gateway is tier=harness-deferred: no
+  forwarding.yaml/production-default.yaml is provided in this pass. S11
+  (Kubernetes tier, optional/time-permits per section 3.8) is the
+  documented path to include it later; a human must decide whether to
+  build the kind-based K8s tier for beta or drop this gateway with an
+  explicit note (see plan section 10 decision points). Do not add loopback
+  configs for this gateway without first re-confirming whether `aigw run`
+  standalone mode is genuinely equivalent to the other gateways' single-
+  process deployment model, or whether it still requires a control-plane
+  component that breaks loopback-tier comparability.

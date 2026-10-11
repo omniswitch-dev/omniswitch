@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest an improvement for Sentinel
+description: Suggest an improvement for OmniSwitch
 title: "[Feature]: "
 labels: ["enhancement"]
 body:
@@ -14,7 +14,7 @@ body:
     id: proposal
     attributes:
       label: Proposal
-      description: What would you like Sentinel to do?
+      description: What would you like OmniSwitch to do?
     validations:
       required: true
   - type: textarea

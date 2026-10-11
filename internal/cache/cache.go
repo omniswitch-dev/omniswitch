@@ -26,26 +26,26 @@ func Key(providerName string, req provider.ChatRequest) (string, error) {
 // KeyWithScope derives an exact-cache key that is isolated to the supplied
 // tenant scope. Keeping scope in the key prevents identical prompts from
 // different workspaces or API keys sharing a cached completion.
+//
+// The key covers the request's full JSON encoding (via ChatRequest's own
+// MarshalJSON, including passthrough fields captured in Extra) rather than a
+// hand-picked subset of fields. Requests that differ only in, say,
+// response_format, seed, or an unmodeled beta parameter must never collide
+// on the same cached response.
 func KeyWithScope(scope, providerName string, req provider.ChatRequest) (string, error) {
 	req.Stream = false
+	reqJSON, err := json.Marshal(req)
+	if err != nil {
+		return "", err
+	}
 	payload := struct {
-		Scope       string             `json:"scope,omitempty"`
-		Provider    string             `json:"provider"`
-		Model       string             `json:"model"`
-		Messages    []provider.Message `json:"messages"`
-		Temperature *float64           `json:"temperature,omitempty"`
-		MaxTokens   *int               `json:"max_tokens,omitempty"`
-		TopP        *float64           `json:"top_p,omitempty"`
-		Stop        []string           `json:"stop,omitempty"`
+		Scope    string          `json:"scope,omitempty"`
+		Provider string          `json:"provider"`
+		Request  json.RawMessage `json:"request"`
 	}{
-		Scope:       scope,
-		Provider:    providerName,
-		Model:       req.Model,
-		Messages:    req.Messages,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-		TopP:        req.TopP,
-		Stop:        req.Stop,
+		Scope:    scope,
+		Provider: providerName,
+		Request:  reqJSON,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

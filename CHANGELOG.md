@@ -6,6 +6,33 @@ The format is based on Keep a Changelog, and this project follows semantic versi
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0-beta.1] - Unreleased
+
+First public beta. Focused on making the install and first-run path trustworthy, filling in agent-protocol and storage gaps from 0.1.0, and standing up community/security scaffolding ahead of the public announcement.
+
+### Added
+
+- PostgreSQL shared-state storage driver, provider presets, MCP trace context propagation, and a Helm chart for Kubernetes deployments.
+- OpenAPI-to-MCP conversion so any OpenAPI-described service can be exposed as MCP tools, a `bench` tool, and a proxy-overhead benchmark.
+- A2A v1 task lifecycle (create, poll, cancel) with SSE streaming for task updates.
+- Guardrail fallback reroute action and automatic retries for guardrail webhook calls.
+- MCP OAuth token exchange (RFC 8693) with RFC 7523 JWT Bearer Grant support, for delegating identity into federated MCP targets.
+- Evals/experiments framework with dataset management on top of the existing policy replay endpoint.
+- First-run reliability, CLI, and health-check fixes so a freshly downloaded binary starts with only `OPENAI_API_KEY` set: MCP is disabled by default, an embedded default policy is used as a fallback when MCP is enabled without an explicit policy path, `omniswitch version`/`validate-config`/`--help` subcommands, and `/healthz`/`/readyz` HTTP endpoints for liveness/readiness probes (tracked in the sibling first-run workstream; see `ROADMAP.md`).
+- Community, governance, and security scaffolding: `SECURITY.md` with supported-versions table and private vulnerability reporting, `SUPPORT.md`, `GOVERNANCE.md`, `MAINTAINERS.md`, `CODEOWNERS`, `.github/dependabot.yml`, a beta-feedback issue form, and an install-verification GitHub Actions workflow.
+
+### Fixed
+
+- Resolved an `err` redeclaration bug in `ChatCompletions` that had broken the streaming response flow.
+
+### Changed
+
+- `gofmt` formatting cleanup across the eval, store, and gateway packages (no behavior change).
+
+## [0.1.0] - 2026-08-24
+
 ### Added
 
 - OpenAI-compatible AI gateway with streaming chat completions.

@@ -57,7 +57,7 @@ func TestAnthropicStreamNormalization(t *testing.T) {
 		``,
 	}, "\n")
 
-	got := collectChunks(streamAnthropic(context.Background(), io.NopCloser(strings.NewReader(body)), "fallback-model"))
+	got := collectChunks(streamAnthropic(context.Background(), io.NopCloser(strings.NewReader(body)), "fallback-model", false))
 	if len(got) != 3 {
 		t.Fatalf("chunks = %+v, want two text chunks and final chunk", got)
 	}
@@ -83,7 +83,7 @@ func TestGeminiStreamNormalization(t *testing.T) {
 		``,
 	}, "\n")
 
-	got := collectChunks(streamGemini(context.Background(), io.NopCloser(strings.NewReader(body)), "gemini-2.5-flash"))
+	got := collectChunks(streamGemini(context.Background(), io.NopCloser(strings.NewReader(body)), "gemini-2.5-flash", false))
 	if len(got) != 2 {
 		t.Fatalf("chunks = %+v, want two Gemini chunks", got)
 	}
@@ -95,6 +95,54 @@ func TestGeminiStreamNormalization(t *testing.T) {
 	}
 	if got[1].Usage == nil || got[1].Usage.PromptTokens != 3 || got[1].Usage.CompletionTokens != 2 || got[1].Usage.TotalTokens != 5 {
 		t.Fatalf("usage = %+v, want 3/2/5", got[1].Usage)
+	}
+}
+
+func TestAnthropicStreamIncludeUsageSynthesizesFinalChunk(t *testing.T) {
+	body := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-3-5-haiku-20241022","usage":{"input_tokens":4}}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	got := collectChunks(streamAnthropic(context.Background(), io.NopCloser(strings.NewReader(body)), "fallback-model", true))
+	if len(got) != 3 {
+		t.Fatalf("chunks = %+v, want text chunk, finish chunk, and synthesized usage chunk", got)
+	}
+	last := got[len(got)-1]
+	if len(last.Choices) != 0 {
+		t.Fatalf("final chunk choices = %+v, want empty (OpenAI include_usage shape)", last.Choices)
+	}
+	if last.Usage == nil || last.Usage.PromptTokens != 4 || last.Usage.CompletionTokens != 2 {
+		t.Fatalf("final chunk usage = %+v, want 4/2", last.Usage)
+	}
+}
+
+func TestGeminiStreamIncludeUsageSynthesizesFinalChunk(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}`,
+		``,
+	}, "\n")
+
+	got := collectChunks(streamGemini(context.Background(), io.NopCloser(strings.NewReader(body)), "gemini-2.5-flash", true))
+	if len(got) != 2 {
+		t.Fatalf("chunks = %+v, want content/finish chunk plus synthesized usage chunk", got)
+	}
+	last := got[len(got)-1]
+	if len(last.Choices) != 0 {
+		t.Fatalf("final chunk choices = %+v, want empty (OpenAI include_usage shape)", last.Choices)
+	}
+	if last.Usage == nil || last.Usage.PromptTokens != 3 || last.Usage.CompletionTokens != 2 {
+		t.Fatalf("final chunk usage = %+v, want 3/2", last.Usage)
 	}
 }
 

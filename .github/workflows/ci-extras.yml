@@ -1,0 +1,164 @@
+name: CI extras (release, secrets, deployment)
+
+# Keep the test/lint/build/bench matrix in ci.yml unchanged.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+  schedule:
+    - cron: "41 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  docker-smoke:
+    name: Docker build + probes + authenticated models
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build image
+        run: docker build -t omniswitch:ci -f Dockerfile .
+
+      - name: Check the image with and without a data volume
+        run: scripts/verify-docker.sh omniswitch:ci
+
+  release-snapshot:
+    name: GoReleaser snapshot + archive SBOMs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+        with:
+          syft-version: v1.54.1
+
+      - name: Check GoReleaser configuration
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: v2.15.4
+          args: check
+
+      - name: Build a snapshot without publishing or signing
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: v2.15.4
+          args: release --snapshot --clean --skip=publish,sign,docker --parallelism=2
+
+      - name: Check archive names and one SPDX SBOM per archive
+        run: scripts/verify-release-artifacts.sh dist
+
+  gitleaks:
+    name: Scan secrets with the pinned gitleaks CLI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # The organization-repository gitleaks action requires a paid license.
+      # Use the CLI and pin the release archive's SHA-256 instead.
+      - name: Install checksum-verified gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="${RUNNER_TEMP}/gitleaks"
+          mkdir -p "$directory"
+          cd "$directory"
+          archive=gitleaks_8.30.1_linux_x64.tar.gz
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/${archive}"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  ${archive}" | sha256sum --check
+          tar -xzf "$archive" gitleaks
+          echo "$directory" >> "$GITHUB_PATH"
+          ./gitleaks version
+
+      - name: Test both OmniSwitch API key formats
+        run: scripts/verify-gitleaks.sh
+
+      - name: Scan complete repository history
+        run: gitleaks git . --config .gitleaks.toml --redact --no-banner
+
+  helm-lint:
+    name: Helm lint + SQLite/Postgres rendering
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.19.4
+
+      - name: Lint and check Helm templates
+        run: scripts/verify-helm.sh
+
+  kustomize-build:
+    name: Kustomize SQLite and Postgres examples
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Render Kustomize examples
+        run: |
+          kubectl kustomize deploy/kubernetes > "$RUNNER_TEMP/kubernetes-default.yaml"
+          kubectl kustomize deploy/kubernetes-postgres > "$RUNNER_TEMP/kubernetes-postgres.yaml"
+          # Redis keeps its own PVC; only the gateway's SQLite PVC is removed.
+          if grep -q 'name: omniswitch-data$' "$RUNNER_TEMP/kubernetes-postgres.yaml"; then
+            echo "Postgres overlay must not render the gateway SQLite PVC" >&2
+            exit 1
+          fi
+          grep -q 'mountPath: /config' "$RUNNER_TEMP/kubernetes-postgres.yaml"
+          grep -A 5 'name: OMNISWITCH_DATABASE_URL' "$RUNNER_TEMP/kubernetes-postgres.yaml" | grep -q 'secretKeyRef:'
+
+  helm-postgres-smoke:
+    name: kind + Postgres 16 + /readyz smoke
+    # This cluster test is deliberately NOT run on pushes or pull requests.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.19.4
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: omniswitch-deploy
+          wait: 120s
+
+      - name: Build and load gateway image
+        run: |
+          docker build -t omniswitch:kind -f Dockerfile .
+          kind load docker-image omniswitch:kind --name omniswitch-deploy
+
+      - name: Wait for three Postgres-backed gateways to become ready
+        run: scripts/smoke-helm-postgres.sh
+
+      - name: Remove kind cluster
+        if: always()
+        run: kind delete cluster --name omniswitch-deploy

@@ -1,0 +1,18 @@
+gateway: agentgateway
+image: ghcr.io/agentgateway/agentgateway:latest
+digest: sha256:bf2f339ef326d32def2aaeb44b1b4549801293c19b89e764a4228667d97d9896
+resolved_via: "docker buildx imagetools inspect ghcr.io/agentgateway/agentgateway:latest"
+version_label: v1.5.0
+source_url: https://agentgateway.dev/docs/standalone/latest/llm/providers/custom/
+production_guide_url: https://agentgateway.dev/docs/standalone/latest/configuration/overview/
+pinned_on: "2026-09-11"
+notes: |
+  agentgateway (Solo.io) is the same "agentgateway" competitor referenced
+  throughout docs/PORTKEY_COMPARISON.md. Config format adapted from the
+  standalone binds/listeners/routes/backends model and the documented
+  custom-OpenAI-provider baseUrl override. Retry/circuit-breaker field names
+  were not independently confirmed against the current agentgateway policy
+  schema (agentgateway.dev/schema/config) in this session; treat the retry
+  policy block in production-default.yaml as best-effort and validate
+  against `agentgateway -f config.yaml --validate` (if such a flag exists)
+  before the first measured run.

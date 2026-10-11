@@ -1,0 +1,29 @@
+{
+  "$schema": "https://www.getbifrost.ai/schema",
+  "_comment": "forwarding cell: no auth, no logging/governance. Adapted from https://docs.getbifrost.ai/deployment-guides/config-json/providers",
+  "providers": {
+    "bench-mock": {
+      "keys": [
+        {
+          "name": "bench-key",
+          "value": "env.MOCK_UPSTREAM_API_KEY",
+          "models": ["bench-model"],
+          "weight": 1.0
+        }
+      ],
+      "custom_provider_config": {
+        "base_provider_type": "openai",
+        "allowed_requests": {
+          "chat_completion": true,
+          "chat_completion_stream": true,
+          "text_completion": false,
+          "embedding": true,
+          "list_models": false
+        }
+      },
+      "network_config": {
+        "base_url": "http://mock-upstream:4000/v1"
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "_comment": "production-default cell: retry matching the harness parity matrix (2 retries, status codes 429/500/502/503/504). Portkey's per-target retry object per https://docs.portkey.ai/docs/product/ai-gateway/configs.",
+  "targets": [
+    {
+      "provider": "openai",
+      "custom_host": "http://mock-upstream:4000/v1",
+      "api_key": "mock-upstream-key",
+      "retry": {
+        "attempts": 2,
+        "on_status_codes": [429, 500, 502, 503, 504]
+      }
+    }
+  ]
+}

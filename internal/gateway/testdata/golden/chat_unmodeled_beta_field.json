@@ -1,0 +1,12 @@
+{
+  "description": "Chat completion including beta/unmodeled top-level fields (Predicted Outputs 'prediction' hint and 'modalities') that OmniSwitch does not model by name but must still forward byte-for-byte to OpenAI-compatible upstreams via ChatRequest.Extra.",
+  "source": "reference-derived from https://platform.openai.com/docs/guides/predicted-outputs and https://platform.openai.com/docs/api-reference/chat/create#chat-create-modalities (beta fields, subject to change upstream)",
+  "verified_on": "2026-09-11",
+  "endpoint": "chat",
+  "request": {
+    "model": "golden-chat-model",
+    "messages": [{"role": "user", "content": "Rewrite this function to add a comment."}],
+    "prediction": {"type": "content", "content": "function foo() { return 1; }"},
+    "modalities": ["text"]
+  }
+}

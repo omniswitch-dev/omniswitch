@@ -1,0 +1,17 @@
+{
+  "description": "Basic single-turn chat completion, matching the shape sent by openai-python's client.chat.completions.create(model=..., messages=..., temperature=..., max_tokens=..., top_p=..., user=...).",
+  "source": "reference-derived from https://platform.openai.com/docs/api-reference/chat/create (no live OpenAI API call was made to produce this fixture)",
+  "verified_on": "2026-09-11",
+  "endpoint": "chat",
+  "request": {
+    "model": "golden-chat-model",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "What is the capital of France?"}
+    ],
+    "temperature": 0.7,
+    "max_tokens": 256,
+    "top_p": 1,
+    "user": "user-golden-1"
+  }
+}

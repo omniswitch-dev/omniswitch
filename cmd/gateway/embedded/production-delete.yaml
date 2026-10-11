@@ -1,0 +1,12 @@
+apiVersion: omniswitch.dev/v1
+kind: Policy
+metadata:
+  name: production-delete
+  version: v1
+spec:
+  match:
+    tool: github
+    action: delete
+    environment: production
+  effect: deny
+  reason: Repository {{resource.name}} is protected.

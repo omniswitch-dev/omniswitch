@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omniswitch-gateway
+  namespace: omniswitch
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: OMNISWITCH_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: omniswitch-database
+                  key: database-url
+          volumeMounts:
+            - name: data
+              mountPath: /data
+              $patch: delete
+      volumes:
+        - name: data
+          $patch: delete

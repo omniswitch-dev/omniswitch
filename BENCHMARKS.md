@@ -64,3 +64,25 @@ rate, not just mean throughput.
 3. Run each scenario for >= 30s and discard the first 5s as warm-up.
 4. Disable payload logging (`gateway.log_payloads: false`) for overhead tests;
    measure it separately as a feature cost.
+
+## Competitive benchmark harness (in progress)
+
+The guidance above is a quick manual checklist. A full, pre-registered,
+reproducible competitive benchmark harness against ten other AI gateways
+(LiteLLM, LiteLLM Rust mode, Solo.io agentgateway, Bifrost, Portkey OSS,
+Helicone AI Gateway, Kong AI Gateway, TensorZero, Envoy AI Gateway/Agent
+Router, plus OmniSwitch itself) is being built under
+[`bench/`](bench/README.md): a deterministic mock upstream, k6 scenario
+scripts, cgroup CPU/RSS sampling, and an anti-bias/statistical protocol.
+Capability claims for every gateway (including OmniSwitch) live in a single
+source of truth register, [`docs/comparison/claims.yaml`](docs/comparison/claims.yaml),
+rendered to [`docs/comparison/COMPARISON.md`](docs/comparison/COMPARISON.md).
+
+As of this writing the harness itself is built and locally smoke-tested
+(see `bench/README.md` "Harness self-test" and "Status / TODO"), but no
+measurement campaign has been run yet — treat any number from `bench/` as
+unverified until it ships with a `results/<run-id>/` artifact directory and
+a pre-registration tag. `bench/README.md` is the canonical source for
+methodology, current status, and open decisions; this section will be
+replaced with a results summary once a campaign is published.
+

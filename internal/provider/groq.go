@@ -28,15 +28,7 @@ func NewGroq(apiKey string) *Groq {
 func (g *Groq) Name() string { return "groq" }
 
 func (g *Groq) Models() []ModelInfo {
-	models := []string{
-		"llama-3.3-70b-versatile", "llama-3.1-8b-instant",
-		"mixtral-8x7b-32768", "gemma2-9b-it",
-	}
-	out := make([]ModelInfo, len(models))
-	for i, m := range models {
-		out[i] = ModelInfo{ID: m, Object: "model", OwnedBy: "groq", Provider: "groq"}
-	}
-	return out
+	return catalogModelInfos("groq", "groq")
 }
 
 func (g *Groq) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, ProviderMeta, error) {
@@ -85,7 +77,7 @@ func (g *Groq) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespons
 		return ChatResponse{}, meta, err
 	}
 
-	meta.Cost = groqPricing(req.Model).Cost(chatResp.Usage.PromptTokens, chatResp.Usage.CompletionTokens)
+	meta.Cost = pricingFor("groq", req.Model).Cost(chatResp.Usage.PromptTokens, chatResp.Usage.CompletionTokens)
 	return chatResp, meta, nil
 }
 
@@ -93,17 +85,5 @@ func (g *Groq) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-cha
 	return streamOpenAICompatible(ctx, g.client, "https://api.groq.com/openai/v1/chat/completions", g.apiKey, req, "groq", nil)
 }
 
-func groqPricing(model string) ModelPricing {
-	switch model {
-	case "llama-3.3-70b-versatile":
-		return ModelPricing{InputPerMillion: 0.59, OutputPerMillion: 0.79}
-	case "llama-3.1-8b-instant":
-		return ModelPricing{InputPerMillion: 0.05, OutputPerMillion: 0.08}
-	case "mixtral-8x7b-32768":
-		return ModelPricing{InputPerMillion: 0.24, OutputPerMillion: 0.24}
-	case "gemma2-9b-it":
-		return ModelPricing{InputPerMillion: 0.20, OutputPerMillion: 0.20}
-	default:
-		return ModelPricing{InputPerMillion: 0.10, OutputPerMillion: 0.10}
-	}
-}
+// Pricing for Groq models is resolved from the consolidated catalog
+// (internal/provider/catalog/models.json); see pricingFor in pricing.go.

@@ -1,0 +1,20 @@
+# forwarding cell: single model/provider pointing at the mock upstream via
+# api_base override, ClickHouse observability disabled (gateway runs
+# without --clickhouse-url). No auth, no retry beyond TensorZero defaults.
+# Format per https://www.tensorzero.com/docs/gateway/configuration-reference/
+
+[models.bench_model]
+routing = ["bench_mock"]
+
+[models.bench_model.providers.bench_mock]
+type = "openai"
+api_base = "http://mock-upstream:4000/v1/"
+api_key_location = "env::MOCK_UPSTREAM_API_KEY"
+model_name = "bench-model"
+
+[functions.bench_chat]
+type = "chat"
+
+[functions.bench_chat.variants.default]
+type = "chat_completion"
+model = "bench_model"

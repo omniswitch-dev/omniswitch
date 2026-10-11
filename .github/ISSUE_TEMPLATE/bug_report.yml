@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible problem in Sentinel
+description: Report a reproducible problem in OmniSwitch
 title: "[Bug]: "
 labels: ["bug"]
 body:

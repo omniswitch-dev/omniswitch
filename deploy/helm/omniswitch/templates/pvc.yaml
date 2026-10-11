@@ -1,4 +1,4 @@
-{{- if .Values.persistence.enabled }}
+{{- if and .Values.persistence.enabled (not (or .Values.database.url .Values.database.existingSecret)) }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

@@ -29,27 +29,30 @@ func NewAnthropic(apiKey string) *Anthropic {
 func (a *Anthropic) Name() string { return "anthropic" }
 
 func (a *Anthropic) Models() []ModelInfo {
-	models := []string{
-		"claude-sonnet-4-20250514", "claude-opus-4-20250514",
-		"claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022",
-		"claude-3-opus-20240229",
-	}
-	out := make([]ModelInfo, len(models))
-	for i, m := range models {
-		out[i] = ModelInfo{ID: m, Object: "model", OwnedBy: "anthropic", Provider: "anthropic"}
-	}
-	return out
+	return catalogModelInfos("anthropic", "anthropic")
 }
 
 // anthropicRequest is the Anthropic API request format.
 type anthropicRequest struct {
-	Model      string               `json:"model"`
-	Messages   []anthropicMessage   `json:"messages"`
-	MaxTokens  int                  `json:"max_tokens"`
-	System     string               `json:"system,omitempty"`
-	Stream     bool                 `json:"stream,omitempty"`
-	Tools      []anthropicTool      `json:"tools,omitempty"`
-	ToolChoice *anthropicToolChoice `json:"tool_choice,omitempty"`
+	Model        string                 `json:"model"`
+	Messages     []anthropicMessage     `json:"messages"`
+	MaxTokens    int                    `json:"max_tokens"`
+	System       string                 `json:"system,omitempty"`
+	Stream       bool                   `json:"stream,omitempty"`
+	Tools        []anthropicTool        `json:"tools,omitempty"`
+	ToolChoice   *anthropicToolChoice   `json:"tool_choice,omitempty"`
+	OutputConfig *anthropicOutputConfig `json:"output_config,omitempty"`
+}
+
+type anthropicOutputConfig struct {
+	Format anthropicOutputFormat `json:"format"`
+}
+
+// anthropicOutputFormat mirrors Claude's native structured-output mechanism
+// (output_config.format), which OpenAI's response_format is translated to.
+type anthropicOutputFormat struct {
+	Type   string `json:"type"`
+	Schema any    `json:"schema,omitempty"`
 }
 
 type anthropicTool struct {
@@ -59,8 +62,9 @@ type anthropicTool struct {
 }
 
 type anthropicToolChoice struct {
-	Type string `json:"type"`
-	Name string `json:"name,omitempty"`
+	Type                   string `json:"type"`
+	Name                   string `json:"name,omitempty"`
+	DisableParallelToolUse *bool  `json:"disable_parallel_tool_use,omitempty"`
 }
 
 type anthropicMessage struct {
@@ -91,7 +95,12 @@ func (a *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 	start := time.Now()
 	meta := ProviderMeta{Provider: "anthropic", Model: req.Model, Timestamp: start}
 
-	body, err := json.Marshal(toAnthropicRequest(req, false))
+	anthReq, err := toAnthropicRequest(req, false)
+	if err != nil {
+		meta.Error = err.Error()
+		return ChatResponse{}, meta, err
+	}
+	body, err := json.Marshal(anthReq)
 	if err != nil {
 		meta.Error = err.Error()
 		return ChatResponse{}, meta, err
@@ -180,7 +189,7 @@ func (a *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 		},
 	}
 
-	meta.Cost = anthropicPricing(req.Model).Cost(anthResp.Usage.InputTokens, anthResp.Usage.OutputTokens)
+	meta.Cost = pricingFor("anthropic", req.Model).Cost(anthResp.Usage.InputTokens, anthResp.Usage.OutputTokens)
 	return chatResp, meta, nil
 }
 
@@ -188,7 +197,12 @@ func (a *Anthropic) ChatCompletionStream(ctx context.Context, req ChatRequest) (
 	start := time.Now()
 	meta := ProviderMeta{Provider: "anthropic", Model: req.Model, Timestamp: start}
 
-	body, err := json.Marshal(toAnthropicRequest(req, true))
+	anthReq, err := toAnthropicRequest(req, true)
+	if err != nil {
+		meta.Error = err.Error()
+		return nil, meta, err
+	}
+	body, err := json.Marshal(anthReq)
 	if err != nil {
 		return nil, meta, err
 	}
@@ -215,10 +229,52 @@ func (a *Anthropic) ChatCompletionStream(ctx context.Context, req ChatRequest) (
 		return nil, meta, fmt.Errorf("anthropic stream error (status %d): %s", resp.StatusCode, string(respBody))
 	}
 	meta.Latency = time.Since(start)
-	return streamAnthropic(ctx, resp.Body, req.Model), meta, nil
+	return streamAnthropic(ctx, resp.Body, req.Model, req.StreamOptions != nil && req.StreamOptions.IncludeUsage), meta, nil
 }
 
-func toAnthropicRequest(req ChatRequest, stream bool) anthropicRequest {
+// toAnthropicRequest translates an OpenAI-compatible ChatRequest into
+// Anthropic's native Messages API shape. It returns an
+// UnsupportedParameterError for fields Anthropic cannot honour instead of
+// silently dropping them:
+//
+//   - n > 1 (Anthropic returns a single completion per request)
+//   - seed (no deterministic sampling seed)
+//   - logit_bias (no per-token logit adjustment)
+//   - presence_penalty / frequency_penalty (no repetition-penalty knobs)
+//   - reasoning_effort (Claude's "thinking" budget is a different mechanism
+//     and cannot be faithfully mapped from OpenAI's low/medium/high enum)
+//   - service_tier (no equivalent request-level serving tier)
+//
+// response_format is translated to Claude's native output_config.format
+// (json_schema, GA as of the Claude API), max_completion_tokens is
+// translated to max_tokens (winning over max_tokens if both are set), and
+// parallel_tool_calls is translated to tool_choice.disable_parallel_tool_use.
+// store and metadata are OpenAI-platform bookkeeping only (they do not
+// affect generation) so they are intentionally not forwarded and not
+// rejected.
+func toAnthropicRequest(req ChatRequest, stream bool) (anthropicRequest, error) {
+	if req.N != nil && *req.N > 1 {
+		return anthropicRequest{}, NewUnsupportedParameterError("anthropic", "n")
+	}
+	if req.Seed != nil {
+		return anthropicRequest{}, NewUnsupportedParameterError("anthropic", "seed")
+	}
+	if len(req.LogitBias) > 0 {
+		return anthropicRequest{}, NewUnsupportedParameterError("anthropic", "logit_bias")
+	}
+	if req.PresencePenalty != nil {
+		return anthropicRequest{}, NewUnsupportedParameterError("anthropic", "presence_penalty")
+	}
+	if req.FrequencyPenalty != nil {
+		return anthropicRequest{}, NewUnsupportedParameterError("anthropic", "frequency_penalty")
+	}
+	if req.ReasoningEffort != "" {
+		return anthropicRequest{}, NewUnsupportedParameterError("anthropic", "reasoning_effort")
+	}
+	if req.ServiceTier != "" {
+		return anthropicRequest{}, NewUnsupportedParameterError("anthropic", "service_tier")
+	}
+
 	anthReq := anthropicRequest{
 		Model:     req.Model,
 		MaxTokens: 4096,
@@ -226,6 +282,30 @@ func toAnthropicRequest(req ChatRequest, stream bool) anthropicRequest {
 	}
 	if req.MaxTokens != nil {
 		anthReq.MaxTokens = *req.MaxTokens
+	}
+	if req.MaxCompletionTokens != nil {
+		anthReq.MaxTokens = *req.MaxCompletionTokens
+	}
+
+	if req.ResponseFormat != nil {
+		switch req.ResponseFormat.Type {
+		case "json_object":
+			anthReq.OutputConfig = &anthropicOutputConfig{
+				Format: anthropicOutputFormat{Type: "json_schema", Schema: map[string]any{"type": "object"}},
+			}
+		case "json_schema":
+			var schema any
+			if req.ResponseFormat.JSONSchema != nil {
+				schema = req.ResponseFormat.JSONSchema.Schema
+			}
+			anthReq.OutputConfig = &anthropicOutputConfig{
+				Format: anthropicOutputFormat{Type: "json_schema", Schema: schema},
+			}
+		case "", "text":
+			// No structured output requested.
+		default:
+			return anthropicRequest{}, NewUnsupportedParameterError("anthropic", "response_format")
+		}
 	}
 
 	// Convert tools
@@ -257,6 +337,13 @@ func toAnthropicRequest(req ChatRequest, stream bool) anthropicRequest {
 				}
 			}
 		}
+	}
+	if req.ParallelToolCalls != nil {
+		disable := !*req.ParallelToolCalls
+		if anthReq.ToolChoice == nil {
+			anthReq.ToolChoice = &anthropicToolChoice{Type: "auto"}
+		}
+		anthReq.ToolChoice.DisableParallelToolUse = &disable
 	}
 
 	for _, msg := range req.Messages {
@@ -322,7 +409,7 @@ func toAnthropicRequest(req ChatRequest, stream bool) anthropicRequest {
 			Content: content,
 		})
 	}
-	return anthReq
+	return anthReq, nil
 }
 
 func mapAnthropicStopReason(reason string) string {
@@ -336,19 +423,5 @@ func mapAnthropicStopReason(reason string) string {
 	}
 }
 
-func anthropicPricing(model string) ModelPricing {
-	switch model {
-	case "claude-opus-4-20250514":
-		return ModelPricing{InputPerMillion: 15.00, OutputPerMillion: 75.00}
-	case "claude-sonnet-4-20250514":
-		return ModelPricing{InputPerMillion: 3.00, OutputPerMillion: 15.00}
-	case "claude-3-5-sonnet-20241022":
-		return ModelPricing{InputPerMillion: 3.00, OutputPerMillion: 15.00}
-	case "claude-3-5-haiku-20241022":
-		return ModelPricing{InputPerMillion: 0.80, OutputPerMillion: 4.00}
-	case "claude-3-opus-20240229":
-		return ModelPricing{InputPerMillion: 15.00, OutputPerMillion: 75.00}
-	default:
-		return ModelPricing{InputPerMillion: 3.00, OutputPerMillion: 15.00}
-	}
-}
+// Pricing for Anthropic models is resolved from the consolidated catalog
+// (internal/provider/catalog/models.json); see pricingFor in pricing.go.

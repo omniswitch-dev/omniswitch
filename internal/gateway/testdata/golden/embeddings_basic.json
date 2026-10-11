@@ -1,0 +1,11 @@
+{
+  "description": "Basic embeddings request, matching openai-python's client.embeddings.create(model=..., input=[...], encoding_format=...).",
+  "source": "reference-derived from https://platform.openai.com/docs/api-reference/embeddings/create",
+  "verified_on": "2026-09-11",
+  "endpoint": "embeddings",
+  "request": {
+    "model": "golden-embedding-model",
+    "input": ["hello world", "second string"],
+    "encoding_format": "float"
+  }
+}

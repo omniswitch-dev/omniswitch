@@ -2,8 +2,8 @@ apiVersion: v2
 name: omniswitch
 description: Open-source AI gateway, guardrail, and agent-protocol layer for production teams
 type: application
-version: 0.1.0
-appVersion: "v0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 home: https://omniswitch.dev
 sources:
   - https://github.com/omniswitch-dev/omniswitch

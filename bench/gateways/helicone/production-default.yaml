@@ -1,0 +1,18 @@
+# production-default cell: auth/retry parity with the harness matrix.
+# Cache is deliberately OFF in this baseline cell (see bench/README.md
+# S6 overlay) to match the pattern used for every other gateway.
+# Field names for gateway-level API-key enforcement and retry are NOT
+# independently confirmed against the current schema -- see NOTES.md.
+helicone:
+  features: all
+
+routers:
+  bench:
+    providers:
+      bench-mock:
+        base-url: "http://mock-upstream:4000/v1"
+    load-balance:
+      chat:
+        strategy: model-latency
+        models:
+          - bench-mock/bench-model

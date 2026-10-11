@@ -1,0 +1,19 @@
+{
+  "description": "Chat completion with an image_url content part, matching the openai-python SDK's multimodal message content array shape for vision-capable models.",
+  "source": "reference-derived from https://platform.openai.com/docs/guides/vision and https://platform.openai.com/docs/api-reference/chat/create#chat-create-messages",
+  "verified_on": "2026-09-11",
+  "endpoint": "chat",
+  "request": {
+    "model": "golden-chat-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "What is in this image?"},
+          {"type": "image_url", "image_url": {"url": "https://example.com/cat.png", "detail": "high"}}
+        ]
+      }
+    ],
+    "max_tokens": 300
+  }
+}

@@ -15,10 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -36,7 +36,7 @@ jobs:
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: coverage.out
@@ -46,10 +46,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: false
@@ -59,6 +59,38 @@ jobs:
         with:
           version: v1.64.8
           args: --timeout=5m
+
+  bench:
+    name: Bench harness and claims register
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: bench/go.mod
+          cache: false
+
+      - name: Verify formatting
+        working-directory: bench
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        working-directory: bench
+        run: go vet ./...
+
+      - name: Test
+        working-directory: bench
+        run: go test -race ./...
+
+      - name: Build harness binaries
+        working-directory: bench
+        run: go build -trimpath ./...
+
+      - name: Check COMPARISON.md matches claims.yaml
+        run: python3 bench/tools/render-comparison --check
 
   build:
     name: Build binaries
@@ -77,10 +109,10 @@ jobs:
       CGO_ENABLED: "0"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true

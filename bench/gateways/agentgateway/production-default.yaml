@@ -1,0 +1,34 @@
+# bench/gateways/agentgateway/production-default.yaml
+#
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+#
+# agentgateway's own docs recommend JWT/key auth policies and CEL RBAC for
+# production; retry/timeout numbers below are set to match the harness
+# parity matrix (bench/README.md 3.7) as closely as the schema allows and
+# are NOT independently confirmed field names -- see NOTES.md.
+binds:
+  - port: 8080
+listeners:
+  - routes:
+      - policies:
+          auth:
+            key:
+              secretRef:
+                name: bench-api-key
+          # CEL RBAC left permissive (allow all authenticated callers) to
+          # match "auth on, no extra restrictions" in every other gateway's
+          # production cell.
+          authorization:
+            rules:
+              - "true"
+          retry:
+            attempts: 2
+            perTryTimeout: 10s
+            backoff: 500ms
+            retryOn: [429, 500, 502, 503, 504]
+        backends:
+          - ai:
+              provider:
+                openai:
+                  model: bench-model
+                  baseUrl: http://mock-upstream:4000/v1

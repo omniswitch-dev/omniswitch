@@ -143,7 +143,7 @@ func StreamFromResponse(ctx context.Context, resp ChatResponse) <-chan ChatRespo
 	return chunks
 }
 
-func streamAnthropic(ctx context.Context, body io.ReadCloser, fallbackModel string) <-chan ChatResponseChunk {
+func streamAnthropic(ctx context.Context, body io.ReadCloser, fallbackModel string, includeUsage bool) <-chan ChatResponseChunk {
 	chunks := make(chan ChatResponseChunk)
 	go func() {
 		defer close(chunks)
@@ -270,6 +270,16 @@ func streamAnthropic(ctx context.Context, body io.ReadCloser, fallbackModel stri
 					Usage:   &usage,
 				}
 			case "message_stop":
+				if includeUsage {
+					chunks <- ChatResponseChunk{
+						ID:      id,
+						Object:  "chat.completion.chunk",
+						Created: time.Now().Unix(),
+						Model:   model,
+						Choices: []ChunkChoice{},
+						Usage:   &usage,
+					}
+				}
 				return
 			}
 		}
@@ -277,7 +287,7 @@ func streamAnthropic(ctx context.Context, body io.ReadCloser, fallbackModel stri
 	return chunks
 }
 
-func streamGemini(ctx context.Context, body io.ReadCloser, model string) <-chan ChatResponseChunk {
+func streamGemini(ctx context.Context, body io.ReadCloser, model string, includeUsage bool) <-chan ChatResponseChunk {
 	chunks := make(chan ChatResponseChunk)
 	go func() {
 		defer close(chunks)
@@ -285,6 +295,7 @@ func streamGemini(ctx context.Context, body io.ReadCloser, model string) <-chan 
 		scanner := bufio.NewScanner(body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		id := fmt.Sprintf("gemini-%d", time.Now().UnixNano())
+		var lastUsage *Usage
 		for scanner.Scan() {
 			select {
 			case <-ctx.Done():
@@ -350,8 +361,19 @@ func streamGemini(ctx context.Context, body io.ReadCloser, model string) <-chan 
 			}
 			if usage.TotalTokens > 0 {
 				chunk.Usage = &usage
+				lastUsage = &usage
 			}
 			chunks <- chunk
+		}
+		if includeUsage && lastUsage != nil {
+			chunks <- ChatResponseChunk{
+				ID:      id,
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   model,
+				Choices: []ChunkChoice{},
+				Usage:   lastUsage,
+			}
 		}
 	}()
 	return chunks

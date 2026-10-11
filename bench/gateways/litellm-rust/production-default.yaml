@@ -1,0 +1,22 @@
+# bench/gateways/litellm-rust/production-default.yaml
+model_list:
+  - model_name: bench-model
+    litellm_params:
+      model: anthropic/bench-model
+      api_base: http://mock-upstream:4000
+      api_key: os.environ/MOCK_UPSTREAM_API_KEY
+      rust: true
+      num_retries: 2
+      timeout: 10
+      retry_after: 0.5
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  disable_spend_logs: false
+
+litellm_settings:
+  cache: false
+  drop_params: true
+
+# Run with: litellm --config production-default.yaml --num_workers 4

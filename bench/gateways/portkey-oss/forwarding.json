@@ -1,0 +1,10 @@
+{
+  "_comment": "forwarding cell: sent as the x-portkey-config header on every request. No fallback/retry, no cache, no guardrails.",
+  "targets": [
+    {
+      "provider": "openai",
+      "custom_host": "http://mock-upstream:4000/v1",
+      "api_key": "mock-upstream-key"
+    }
+  ]
+}

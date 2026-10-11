@@ -5,6 +5,9 @@ WORKDIR /app
 COPY omniswitch /usr/local/bin/omniswitch
 COPY policies ./policies
 COPY examples ./examples
+# Distroless has no shell; copy the empty nonroot home as /data so the
+# gateway (uid 65532) can create its database there.
+COPY --from=gcr.io/distroless/static-debian12:nonroot --chown=65532:65532 /home/nonroot /data
 
 EXPOSE 8080
 ENV OMNISWITCH_LISTEN=:8080

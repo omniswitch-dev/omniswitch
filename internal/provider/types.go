@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -10,6 +11,13 @@ import (
 
 // ChatRequest is the OpenAI-compatible chat completion request format.
 // All providers must accept this canonical format.
+//
+// Beyond the fields modeled explicitly, ChatRequest captures every other
+// top-level key an OpenAI SDK sends in Extra and forwards it verbatim to
+// OpenAI-compatible upstreams (openai, azure, groq, custom, and presets built
+// on Custom). This keeps passthrough fidelity for parameters OmniSwitch does
+// not (yet) model by name, instead of silently dropping them. See
+// UnmarshalJSON/MarshalJSON below.
 type ChatRequest struct {
 	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
@@ -20,6 +28,131 @@ type ChatRequest struct {
 	Stop        []string  `json:"stop,omitempty"`
 	Tools       []Tool    `json:"tools,omitempty"`
 	ToolChoice  any       `json:"tool_choice,omitempty"`
+
+	// ResponseFormat requests structured output (text, json_object, or
+	// json_schema). Adapters that cannot honour a schema natively must
+	// translate it or reject with UnsupportedParameterError.
+	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	// MaxCompletionTokens is the modern replacement for MaxTokens used by
+	// reasoning models. When both are set, MaxCompletionTokens wins.
+	MaxCompletionTokens *int `json:"max_completion_tokens,omitempty"`
+	// N requests multiple independent completions. Only OpenAI-compatible
+	// upstreams can honour N>1; other adapters must reject.
+	N                 *int              `json:"n,omitempty"`
+	Seed              *int              `json:"seed,omitempty"`
+	PresencePenalty   *float64          `json:"presence_penalty,omitempty"`
+	FrequencyPenalty  *float64          `json:"frequency_penalty,omitempty"`
+	LogitBias         map[string]int    `json:"logit_bias,omitempty"`
+	User              string            `json:"user,omitempty"`
+	StreamOptions     *StreamOptions    `json:"stream_options,omitempty"`
+	ParallelToolCalls *bool             `json:"parallel_tool_calls,omitempty"`
+	ReasoningEffort   string            `json:"reasoning_effort,omitempty"`
+	ServiceTier       string            `json:"service_tier,omitempty"`
+	Store             *bool             `json:"store,omitempty"`
+	Metadata          map[string]string `json:"metadata,omitempty"`
+
+	// Extra holds any top-level request keys not modeled above (future or
+	// provider-beta OpenAI parameters). It round-trips through
+	// UnmarshalJSON/MarshalJSON and is forwarded byte-for-byte to
+	// OpenAI-compatible upstreams.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// ResponseFormat mirrors the OpenAI response_format request field used to
+// request plain text, a generic JSON object, or a JSON-Schema-validated
+// structured output.
+type ResponseFormat struct {
+	Type       string          `json:"type"`
+	JSONSchema *JSONSchemaSpec `json:"json_schema,omitempty"`
+}
+
+// JSONSchemaSpec is the json_schema payload nested under response_format.
+type JSONSchemaSpec struct {
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Schema      any    `json:"schema,omitempty"`
+	Strict      *bool  `json:"strict,omitempty"`
+}
+
+// StreamOptions mirrors the OpenAI stream_options request field.
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
+}
+
+// chatRequestKnownFields lists every JSON key modeled explicitly by
+// ChatRequest. Anything outside this set is preserved in Extra.
+var chatRequestKnownFields = map[string]struct{}{
+	"model":                 {},
+	"messages":              {},
+	"temperature":           {},
+	"max_tokens":            {},
+	"top_p":                 {},
+	"stream":                {},
+	"stop":                  {},
+	"tools":                 {},
+	"tool_choice":           {},
+	"response_format":       {},
+	"max_completion_tokens": {},
+	"n":                     {},
+	"seed":                  {},
+	"presence_penalty":      {},
+	"frequency_penalty":     {},
+	"logit_bias":            {},
+	"user":                  {},
+	"stream_options":        {},
+	"parallel_tool_calls":   {},
+	"reasoning_effort":      {},
+	"service_tier":          {},
+	"store":                 {},
+	"metadata":              {},
+}
+
+// UnmarshalJSON decodes the known ChatRequest fields normally and stashes
+// every other top-level key in Extra so it can be forwarded verbatim later.
+func (c *ChatRequest) UnmarshalJSON(data []byte) error {
+	type wire ChatRequest
+	var w wire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	*c = ChatRequest(w)
+	c.Extra = nil
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for key := range chatRequestKnownFields {
+		delete(raw, key)
+	}
+	if len(raw) > 0 {
+		c.Extra = raw
+	}
+	return nil
+}
+
+// MarshalJSON encodes the known ChatRequest fields and merges in any Extra
+// keys that were captured on decode, so unmodeled OpenAI parameters survive
+// a full round trip to OpenAI-compatible upstreams.
+func (c ChatRequest) MarshalJSON() ([]byte, error) {
+	type wire ChatRequest
+	base, err := json.Marshal(wire(c))
+	if err != nil {
+		return nil, err
+	}
+	if len(c.Extra) == 0 {
+		return base, nil
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(base, &merged); err != nil {
+		return nil, err
+	}
+	for key, value := range c.Extra {
+		if _, exists := merged[key]; !exists {
+			merged[key] = value
+		}
+	}
+	return json.Marshal(merged)
 }
 
 // Tool represents an OpenAI-compatible tool definition.
@@ -52,6 +185,7 @@ type FunctionCall struct {
 // Message represents a single message in the chat conversation.
 type Message struct {
 	Role         string        `json:"role"`
+	Name         string        `json:"name,omitempty"`
 	Content      string        `json:"content"`
 	ContentParts []ContentPart `json:"-"`
 	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
@@ -78,6 +212,7 @@ type InputAudio struct {
 func (m *Message) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Role       string          `json:"role"`
+		Name       string          `json:"name,omitempty"`
 		Content    json.RawMessage `json:"content"`
 		ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
 		ToolCallID string          `json:"tool_call_id,omitempty"`
@@ -86,6 +221,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	m.Role = raw.Role
+	m.Name = raw.Name
 	m.ToolCalls = raw.ToolCalls
 	m.ToolCallID = raw.ToolCallID
 	if len(raw.Content) == 0 || string(raw.Content) == "null" {
@@ -111,12 +247,14 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 func (m Message) MarshalJSON() ([]byte, error) {
 	type wire struct {
 		Role       string     `json:"role"`
+		Name       string     `json:"name,omitempty"`
 		Content    any        `json:"content"`
 		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 		ToolCallID string     `json:"tool_call_id,omitempty"`
 	}
 	w := wire{
 		Role:       m.Role,
+		Name:       m.Name,
 		Content:    m.Content,
 		ToolCalls:  m.ToolCalls,
 		ToolCallID: m.ToolCallID,
@@ -320,6 +458,33 @@ type ChunkChoice struct {
 	Index        int     `json:"index"`
 	Delta        Message `json:"delta"`
 	FinishReason string  `json:"finish_reason,omitempty"`
+}
+
+// UnsupportedParameterError signals that an adapter received a request field
+// it has no faithful way to honour (e.g. Anthropic given seed or n>1).
+// Handlers must surface this as an HTTP 400 with an OpenAI-style
+// unsupported_parameter error body instead of silently dropping the field.
+type UnsupportedParameterError struct {
+	Provider string
+	Param    string
+	Message  string
+}
+
+func (e *UnsupportedParameterError) Error() string {
+	if e.Message != "" {
+		return e.Message
+	}
+	return fmt.Sprintf("%s does not support the %q parameter", e.Provider, e.Param)
+}
+
+// NewUnsupportedParameterError builds an UnsupportedParameterError with a
+// default, descriptive message.
+func NewUnsupportedParameterError(providerName, param string) *UnsupportedParameterError {
+	return &UnsupportedParameterError{
+		Provider: providerName,
+		Param:    param,
+		Message:  fmt.Sprintf("%s does not support the %q parameter; remove it or use an OpenAI-compatible provider", providerName, param),
+	}
 }
 
 // ModelPricing holds cost per token for a specific model.
