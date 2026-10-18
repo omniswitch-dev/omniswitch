@@ -166,11 +166,13 @@ claims:
 - capability: native-providers
   gateway: omniswitch
   status: partial
-  detail: 4 native adapters (OpenAI, Anthropic, Google, Groq); no native Bedrock/Vertex/Cohere. Everything
-    else goes through the generic OpenAI-compatible custom adapter with 15+ documented presets.
-  source_url: docs/PORTKEY_COMPARISON.md
-  verified_on: '2026-09-11'
-  version: v0.2.0-beta (commit 88a27c0)
+  detail: '7 native adapters: OpenAI, Anthropic, Google Gemini API, Groq, Cohere (v2 chat), Azure OpenAI,
+    and AWS Bedrock (Converse API with SigV4 signing). No native Vertex AI adapter. Other providers go
+    through the generic OpenAI-compatible custom adapter, with 8 built-in env-var presets (Mistral, xAI,
+    DeepSeek, Together, Fireworks, Perplexity, Cerebras, OpenRouter).'
+  source_url: cmd/gateway/providers.go
+  verified_on: '2026-10-18'
+  version: v0.2.0-beta (commit f726990)
 - capability: custom-openai-endpoint
   gateway: omniswitch
   status: 'yes'
@@ -603,16 +605,21 @@ claims:
   version: ghcr.io/berriai/litellm:main-stable @ sha256:a3715fa7ad8387941ab697259bd2881d68931657247a41984f90fae6d11c62bf
 - capability: openapi-to-mcp
   gateway: litellm
-  status: 'no'
-  detail: Per the project's own internal comparison notes (comparison_iter7.md), LiteLLM has no OpenAPI-to-MCP
-    conversion. Not independently re-verified against current LiteLLM docs.
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: LiteLLM has no OpenAPI-to-MCP conversion. Not independently re-verified against current LiteLLM
+    docs. Re-verify against the vendor''s docs or repository before relying on it.'
   source_url: https://docs.litellm.ai/docs/mcp
   verified_on: '2026-09-11'
   version: ghcr.io/berriai/litellm:main-stable @ sha256:a3715fa7ad8387941ab697259bd2881d68931657247a41984f90fae6d11c62bf
 - capability: mcp-oauth-token-exchange
   gateway: litellm
-  status: 'no'
-  detail: Per this project's internal comparison notes (comparison_iter7.md); not independently re-verified.
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: not independently re-verified. Re-verify against the vendor''s docs or repository before relying
+    on it.'
   source_url: ''
   verified_on: '2026-09-11'
   version: ghcr.io/berriai/litellm:main-stable @ sha256:a3715fa7ad8387941ab697259bd2881d68931657247a41984f90fae6d11c62bf
@@ -1236,9 +1243,12 @@ claims:
   version: v1.5.0 @ ghcr.io/agentgateway/agentgateway:latest sha256:bf2f339ef326d32def2aaeb44b1b4549801293c19b89e764a4228667d97d9896
 - capability: sqlite-postgres
   gateway: agentgateway
-  status: 'no'
-  detail: No embedded SQLite/Postgres storage documented; state is primarily Kubernetes CRDs / xDS config.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: No embedded SQLite/Postgres storage documented; state is primarily Kubernetes CRDs / xDS config.
+    Re-verify against the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: v1.5.0 @ ghcr.io/agentgateway/agentgateway:latest sha256:bf2f339ef326d32def2aaeb44b1b4549801293c19b89e764a4228667d97d9896
 - capability: kubernetes-manifests-helm
@@ -1293,9 +1303,12 @@ claims:
   version: ~v1.6.x @ docker.io/maximhq/bifrost:latest sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
 - capability: native-providers
   gateway: bifrost
-  status: 'yes'
-  detail: '"12+" native provider integrations per this project''s internal comparison notes.'
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''Yes'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: "12+" native provider integrations per this project''s internal comparison notes. Re-verify
+    against the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: ~v1.6.x @ docker.io/maximhq/bifrost:latest sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
 - capability: custom-openai-endpoint
@@ -1377,10 +1390,13 @@ claims:
   version: ~v1.6.x @ docker.io/maximhq/bifrost:latest sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
 - capability: mtls
   gateway: bifrost
-  status: 'no'
-  detail: This project's internal comparison table lists Bifrost as 'No' for a combined SSO/SAML/SCIM/mTLS
-    row; not independently re-verified against Bifrost's current docs.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Bifrost as ''No'' for a combined SSO/SAML/SCIM/mTLS
+    row; not independently re-verified against Bifrost''s current docs. Re-verify against the vendor''s
+    docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: ~v1.6.x @ docker.io/maximhq/bifrost:latest sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
 - capability: rbac-policy-cel
@@ -1441,31 +1457,42 @@ claims:
   version: ~v1.6.x @ docker.io/maximhq/bifrost:latest sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
 - capability: openapi-to-mcp
   gateway: bifrost
-  status: 'no'
-  detail: This project's internal comparison table lists Bifrost as 'No' for OpenAPI-to-MCP conversion.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Bifrost as ''No'' for OpenAPI-to-MCP conversion.
+    Re-verify against the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: ~v1.6.x @ docker.io/maximhq/bifrost:latest sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
 - capability: mcp-oauth-token-exchange
   gateway: bifrost
-  status: 'no'
-  detail: This project's internal comparison table lists Bifrost as 'No' for MCP OAuth/token exchange.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Bifrost as ''No'' for MCP OAuth/token exchange.
+    Re-verify against the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: ~v1.6.x @ docker.io/maximhq/bifrost:latest sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
 - capability: a2a-agent-card
   gateway: bifrost
-  status: 'no'
-  detail: This project's internal comparison table lists Bifrost as 'No' for A2A task lifecycle; no agent-card
-    discovery found either.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Bifrost as ''No'' for A2A task lifecycle; no
+    agent-card discovery found either. Re-verify against the vendor''s docs or repository before relying
+    on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: ~v1.6.x @ docker.io/maximhq/bifrost:latest sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
 - capability: a2a-tasks
   gateway: bifrost
-  status: 'no'
-  detail: Same as above.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: Same as above. Re-verify against the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: ~v1.6.x @ docker.io/maximhq/bifrost:latest sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
 - capability: prompt-management
@@ -1477,9 +1504,12 @@ claims:
   version: ~v1.6.x @ docker.io/maximhq/bifrost:latest sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
 - capability: evals
   gateway: bifrost
-  status: 'no'
-  detail: This project's internal comparison table lists Bifrost as 'No' for evals/experiments.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Bifrost as ''No'' for evals/experiments. Re-verify
+    against the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: ~v1.6.x @ docker.io/maximhq/bifrost:latest sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
 - capability: otlp-export
@@ -1513,17 +1543,22 @@ claims:
   version: ~v1.6.x @ docker.io/maximhq/bifrost:latest sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
 - capability: sqlite-postgres
   gateway: bifrost
-  status: 'no'
-  detail: This project's internal comparison table lists Bifrost as having no shared-state/HA store ("No").
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Bifrost as having no shared-state/HA store ("No").
+    Re-verify against the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: ~v1.6.x @ docker.io/maximhq/bifrost:latest sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
 - capability: kubernetes-manifests-helm
   gateway: bifrost
-  status: 'no'
-  detail: This project's internal comparison table lists Bifrost's release engineering as "Binary" with
-    no Helm chart.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Bifrost''s release engineering as "Binary" with
+    no Helm chart. Re-verify against the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: ~v1.6.x @ docker.io/maximhq/bifrost:latest sha256:9e65eb4d0b292c25aaf46d194c705344f19c833a29e30155038bbe551eac7245
 - capability: published-benchmarks
@@ -1659,11 +1694,14 @@ claims:
   version: latest @ docker.io/portkeyai/gateway:latest sha256:97f094d9c8a764cbfaa2a7138c0017b247ca923bb06db1b4c13b7f8a33b5200d
 - capability: mtls
   gateway: portkey-oss
-  status: 'no'
-  detail: This project's internal comparison table lists a combined SSO/SAML/SCIM/mTLS row as "Yes" for
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists a combined SSO/SAML/SCIM/mTLS row as "Yes" for
     Portkey, but that appears to describe the hosted platform, not the OSS gateway; not independently
-    verified for the OSS gateway container used here.
-  source_url: comparison_iter7.md
+    verified for the OSS gateway container used here. Re-verify against the vendor''s docs or repository
+    before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: latest @ docker.io/portkeyai/gateway:latest sha256:97f094d9c8a764cbfaa2a7138c0017b247ca923bb06db1b4c13b7f8a33b5200d
 - capability: rbac-policy-cel
@@ -1724,17 +1762,23 @@ claims:
   version: latest @ docker.io/portkeyai/gateway:latest sha256:97f094d9c8a764cbfaa2a7138c0017b247ca923bb06db1b4c13b7f8a33b5200d
 - capability: openapi-to-mcp
   gateway: portkey-oss
-  status: 'no'
-  detail: This project's internal comparison table lists Portkey as "Partial" for OpenAPI conversion;
-    not independently re-verified, kept as no/unconfirmed here to avoid overclaiming.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Portkey as "Partial" for OpenAPI conversion;
+    not independently re-verified, kept as no/unconfirmed here to avoid overclaiming. Re-verify against
+    the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: latest @ docker.io/portkeyai/gateway:latest sha256:97f094d9c8a764cbfaa2a7138c0017b247ca923bb06db1b4c13b7f8a33b5200d
 - capability: mcp-oauth-token-exchange
   gateway: portkey-oss
-  status: 'no'
-  detail: This project's internal comparison table lists Portkey as "No" for MCP OAuth/token exchange.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Portkey as "No" for MCP OAuth/token exchange.
+    Re-verify against the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: latest @ docker.io/portkeyai/gateway:latest sha256:97f094d9c8a764cbfaa2a7138c0017b247ca923bb06db1b4c13b7f8a33b5200d
 - capability: a2a-agent-card
@@ -1746,9 +1790,12 @@ claims:
   version: latest @ docker.io/portkeyai/gateway:latest sha256:97f094d9c8a764cbfaa2a7138c0017b247ca923bb06db1b4c13b7f8a33b5200d
 - capability: a2a-tasks
   gateway: portkey-oss
-  status: 'no'
-  detail: This project's internal comparison table lists Portkey as "No" for A2A task lifecycle.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Portkey as "No" for A2A task lifecycle. Re-verify
+    against the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: latest @ docker.io/portkeyai/gateway:latest sha256:97f094d9c8a764cbfaa2a7138c0017b247ca923bb06db1b4c13b7f8a33b5200d
 - capability: prompt-management
@@ -1760,9 +1807,12 @@ claims:
   version: latest @ docker.io/portkeyai/gateway:latest sha256:97f094d9c8a764cbfaa2a7138c0017b247ca923bb06db1b4c13b7f8a33b5200d
 - capability: evals
   gateway: portkey-oss
-  status: 'yes'
-  detail: Full evals/experiments documented at the platform level.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''Yes'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: Full evals/experiments documented at the platform level. Re-verify against the vendor''s docs
+    or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: latest @ docker.io/portkeyai/gateway:latest sha256:97f094d9c8a764cbfaa2a7138c0017b247ca923bb06db1b4c13b7f8a33b5200d
 - capability: otlp-export
@@ -2134,9 +2184,12 @@ claims:
   version: Kong Gateway 3.9 (OSS) + ai-proxy plugin @ docker.io/library/kong:3.9 sha256:ca71c5591eabaf18de96d26b7eed5e2fdb590dac141e467a779c38017e5bdf81
 - capability: native-providers
   gateway: kong-ai-gateway
-  status: partial
-  detail: '"Major providers only" per this project''s internal comparison notes.'
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''Partial'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: "Major providers only" per this project''s internal comparison notes. Re-verify against the
+    vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: Kong Gateway 3.9 (OSS) + ai-proxy plugin @ docker.io/library/kong:3.9 sha256:ca71c5591eabaf18de96d26b7eed5e2fdb590dac141e467a779c38017e5bdf81
 - capability: custom-openai-endpoint
@@ -2220,11 +2273,14 @@ claims:
   version: Kong Gateway 3.9 (OSS) + ai-proxy plugin @ docker.io/library/kong:3.9 sha256:ca71c5591eabaf18de96d26b7eed5e2fdb590dac141e467a779c38017e5bdf81
 - capability: mtls
   gateway: kong-ai-gateway
-  status: 'yes'
-  detail: This project's internal comparison table lists Kong as "Yes" for a combined SSO/SAML/SCIM/mTLS
-    row; Kong Gateway's mtls-auth plugin is documented separately. Enterprise-vs-OSS boundary for the
-    specific plugin was not independently re-verified.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''Yes'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Kong as "Yes" for a combined SSO/SAML/SCIM/mTLS
+    row; Kong Gateway''s mtls-auth plugin is documented separately. Enterprise-vs-OSS boundary for the
+    specific plugin was not independently re-verified. Re-verify against the vendor''s docs or repository
+    before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: Kong Gateway 3.9 (OSS) + ai-proxy plugin @ docker.io/library/kong:3.9 sha256:ca71c5591eabaf18de96d26b7eed5e2fdb590dac141e467a779c38017e5bdf81
 - capability: rbac-policy-cel
@@ -2289,17 +2345,22 @@ claims:
   version: Kong Gateway 3.9 (OSS) + ai-proxy plugin @ docker.io/library/kong:3.9 sha256:ca71c5591eabaf18de96d26b7eed5e2fdb590dac141e467a779c38017e5bdf81
 - capability: openapi-to-mcp
   gateway: kong-ai-gateway
-  status: 'no'
-  detail: This project's internal comparison table lists Kong as "No" for OpenAPI-to-MCP conversion.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Kong as "No" for OpenAPI-to-MCP conversion.
+    Re-verify against the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: Kong Gateway 3.9 (OSS) + ai-proxy plugin @ docker.io/library/kong:3.9 sha256:ca71c5591eabaf18de96d26b7eed5e2fdb590dac141e467a779c38017e5bdf81
 - capability: mcp-oauth-token-exchange
   gateway: kong-ai-gateway
-  status: 'no'
-  detail: This project's internal comparison table lists Kong as "No" for MCP OAuth client flows/token
-    exchange.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Kong as "No" for MCP OAuth client flows/token
+    exchange. Re-verify against the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: Kong Gateway 3.9 (OSS) + ai-proxy plugin @ docker.io/library/kong:3.9 sha256:ca71c5591eabaf18de96d26b7eed5e2fdb590dac141e467a779c38017e5bdf81
 - capability: a2a-agent-card
@@ -2311,9 +2372,12 @@ claims:
   version: Kong Gateway 3.9 (OSS) + ai-proxy plugin @ docker.io/library/kong:3.9 sha256:ca71c5591eabaf18de96d26b7eed5e2fdb590dac141e467a779c38017e5bdf81
 - capability: a2a-tasks
   gateway: kong-ai-gateway
-  status: 'no'
-  detail: This project's internal comparison table lists Kong as "No" for A2A task lifecycle.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Kong as "No" for A2A task lifecycle. Re-verify
+    against the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: Kong Gateway 3.9 (OSS) + ai-proxy plugin @ docker.io/library/kong:3.9 sha256:ca71c5591eabaf18de96d26b7eed5e2fdb590dac141e467a779c38017e5bdf81
 - capability: prompt-management
@@ -2325,9 +2389,12 @@ claims:
   version: Kong Gateway 3.9 (OSS) + ai-proxy plugin @ docker.io/library/kong:3.9 sha256:ca71c5591eabaf18de96d26b7eed5e2fdb590dac141e467a779c38017e5bdf81
 - capability: evals
   gateway: kong-ai-gateway
-  status: 'no'
-  detail: This project's internal comparison table lists Kong as "No" for evals/experiments.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Kong as "No" for evals/experiments. Re-verify
+    against the vendor''s docs or repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: Kong Gateway 3.9 (OSS) + ai-proxy plugin @ docker.io/library/kong:3.9 sha256:ca71c5591eabaf18de96d26b7eed5e2fdb590dac141e467a779c38017e5bdf81
 - capability: otlp-export
@@ -2347,10 +2414,13 @@ claims:
   version: Kong Gateway 3.9 (OSS) + ai-proxy plugin @ docker.io/library/kong:3.9 sha256:ca71c5591eabaf18de96d26b7eed5e2fdb590dac141e467a779c38017e5bdf81
 - capability: dashboard
   gateway: kong-ai-gateway
-  status: 'no'
-  detail: This project's internal comparison table lists Kong's control plane as "Kong" (i.e. Konnect,
-    a separate managed product), not a bundled OSS dashboard.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists Kong''s control plane as "Kong" (i.e. Konnect,
+    a separate managed product), not a bundled OSS dashboard. Re-verify against the vendor''s docs or
+    repository before relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: Kong Gateway 3.9 (OSS) + ai-proxy plugin @ docker.io/library/kong:3.9 sha256:ca71c5591eabaf18de96d26b7eed5e2fdb590dac141e467a779c38017e5bdf81
 - capability: hot-reload
@@ -2760,11 +2830,14 @@ claims:
     sha256:ad0d4ffe2924dd3f46414687e9331f5fa947b9f2c9db735accaad9f2275aff56
 - capability: semantic-cache
   gateway: envoy-ai-gateway
-  status: 'no'
-  detail: This project's own homepage previously claimed 'no built-in semantic caching' for this gateway
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''No'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s own homepage previously claimed ''no built-in semantic caching'' for this gateway
     ("Semantic Caching" false in the earlier comparison), matching the absence of any caching claim in
-    this gateway's own capability docs.
-  source_url: comparison_iter7.md
+    this gateway''s own capability docs. Re-verify against the vendor''s docs or repository before relying
+    on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: Agent Router (formerly Envoy AI Gateway); aigw CLI image docker.io/envoyproxy/ai-gateway-cli:latest
     sha256:ad0d4ffe2924dd3f46414687e9331f5fa947b9f2c9db735accaad9f2275aff56
@@ -2878,11 +2951,14 @@ claims:
     sha256:ad0d4ffe2924dd3f46414687e9331f5fa947b9f2c9db735accaad9f2275aff56
 - capability: openapi-to-mcp
   gateway: envoy-ai-gateway
-  status: 'yes'
-  detail: This project's internal comparison table lists this gateway (as agentgateway's sibling ecosystem
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''Yes'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: This project''s internal comparison table lists this gateway (as agentgateway''s sibling ecosystem
     entry / envoy-ai-gateway) as "Yes" for OpenAPI-to-MCP conversion; not independently re-verified against
-    this project's current docs.
-  source_url: comparison_iter7.md
+    this project''s current docs. Re-verify against the vendor''s docs or repository before relying on
+    it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: Agent Router (formerly Envoy AI Gateway); aigw CLI image docker.io/envoyproxy/ai-gateway-cli:latest
     sha256:ad0d4ffe2924dd3f46414687e9331f5fa947b9f2c9db735accaad9f2275aff56
@@ -4135,9 +4211,12 @@ claims:
   version: hosted service, n/a
 - capability: evals
   gateway: portkey-cloud
-  status: 'yes'
-  detail: Full evals/experiments documented.
-  source_url: comparison_iter7.md
+  status: unknown
+  detail: 'Not independently verified. This row was previously ''Yes'', sourced only from this project''s
+    internal iteration notes (removed from the repo because they were stale and self-contradictory). Earlier
+    note: Full evals/experiments documented. Re-verify against the vendor''s docs or repository before
+    relying on it.'
+  source_url: ''
   verified_on: '2026-09-11'
   version: hosted service, n/a
 - capability: otlp-export
