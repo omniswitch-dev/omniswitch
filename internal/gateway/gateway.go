@@ -83,6 +83,8 @@ type Handler struct {
 
 	shadowSlots   chan struct{}
 	shadowBreaker *router.CircuitBreaker
+
+	budget *budgetState
 }
 
 // New creates a new gateway handler.
@@ -93,6 +95,7 @@ func New(registry *provider.Registry, rtr *router.Router, st *store.Store, gr *g
 		store:         st,
 		shadowSlots:   make(chan struct{}, maxConcurrentShadowRequests),
 		shadowBreaker: router.NewCircuitBreaker(5, 60*time.Second),
+		budget:        &budgetState{ledger: newBudgetLedger(storeBudgetLoader(st))},
 	}
 	h.settings.Store(&handlerSettings{
 		cacheThreshold: 0.95,
@@ -311,7 +314,9 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	)
 
 	stageStart := time.Now()
-	if denied, reason := h.budgetExceeded(ctx, apiKeyID); denied {
+	reservation, verdict := h.reserveBudget(ctx, apiKeyID, h.estimateChatBudget(req, providerHint))
+	if verdict.rejected() {
+		reason := verdict.Reason
 		recordTraceSpan(ctx, "budget", "", "denied", stageStart, map[string]any{"reason": reason})
 		span.SetAttributes(
 			attribute.String("sentinel.decision", "DENY"),
@@ -323,11 +328,13 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		})
 		w.Header().Set("x-omniswitch-trace-id", traceID)
 		w.Header().Set("x-omniswitch-session-id", sessionID)
-		writeJSON(w, http.StatusPaymentRequired, map[string]any{
-			"error": map[string]string{"message": reason, "type": "budget_exceeded", "code": "budget_exceeded"},
-		})
+		writeBudgetVerdict(w, verdict)
 		return
 	}
+	// The reservation is settled with the actual cost by logRequest; the
+	// deferred release covers every path that ends without a charge.
+	defer reservation.release()
+	ctx = withBudgetReservation(ctx, reservation)
 	recordTraceSpan(ctx, "budget", "", "ok", stageStart, nil)
 
 	// Input guardrails.
@@ -740,17 +747,23 @@ func (h *Handler) logRequest(ctx context.Context, logCtx logContext) {
 
 	writeCtx, cancel := persistContext(ctx)
 	defer cancel()
-	if err := h.store.InsertLog(writeCtx, entry); err != nil {
-		log.Printf("failed to log request: %v", err)
+	// The budget ledger counts the charge before it is written, so a
+	// concurrent admission check never misses it.
+	charge := h.beginBudgetCharge(ctx, entry)
+	logErr := h.store.InsertLog(writeCtx, entry)
+	if logErr != nil {
+		log.Printf("failed to log request: %v", logErr)
 	}
 	// Charge every upstream cost that was actually incurred, including
 	// responses that were later denied by an output guardrail or cut short
 	// by a stream error or client disconnect. Cache hits cost nothing.
+	var spendErr error
 	if entry.APIKeyID != "" && entry.Cost > 0 && !entry.Cached {
-		if err := h.store.IncrementAPIKeySpend(writeCtx, entry.APIKeyID, entry.Cost); err != nil {
-			log.Printf("failed to increment API key spend: %v", err)
+		if spendErr = h.store.IncrementAPIKeySpend(writeCtx, entry.APIKeyID, entry.Cost); spendErr != nil {
+			log.Printf("failed to increment API key spend: %v", spendErr)
 		}
 	}
+	h.finishBudgetCharge(ctx, entry.APIKeyID, charge, logErr, spendErr)
 }
 
 func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Context, sc streamContext) {
@@ -1286,40 +1299,6 @@ func (h *Handler) recordGuardrailResults(ctx context.Context, requestID string, 
 			log.Printf("failed to store guardrail event: %v", err)
 		}
 	}
-}
-
-// budgetExceeded checks a key's budgets. budget_usd is a lifetime cap on
-// spend_usd. monthly_cost_budget and monthly_token_budget cap the usage
-// since the start of the current UTC month. Each budget is compared only to
-// its own measure, so a monthly budget resets every month.
-func (h *Handler) budgetExceeded(ctx context.Context, apiKeyID string) (bool, string) {
-	if h.store == nil || apiKeyID == "" {
-		return false, ""
-	}
-	apiKey, err := h.store.GetAPIKeyByID(ctx, apiKeyID)
-	if err != nil {
-		return false, ""
-	}
-	if apiKey.BudgetUSD > 0 && apiKey.SpendUSD >= apiKey.BudgetUSD {
-		return true, fmt.Sprintf("cost budget exceeded: %.4f of %.4f USD used", apiKey.SpendUSD, apiKey.BudgetUSD)
-	}
-	if apiKey.MonthlyCostBudget <= 0 && apiKey.MonthlyTokenBudget <= 0 {
-		return false, ""
-	}
-	now := time.Now().UTC()
-	since := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	usage, err := h.store.GetBudgetUsage(ctx, apiKeyID, since)
-	if err != nil {
-		log.Printf("failed to check budget: %v", err)
-		return false, ""
-	}
-	if apiKey.MonthlyCostBudget > 0 && usage.Cost >= apiKey.MonthlyCostBudget {
-		return true, fmt.Sprintf("monthly cost budget exceeded: %.4f of %.4f USD used", usage.Cost, apiKey.MonthlyCostBudget)
-	}
-	if apiKey.MonthlyTokenBudget > 0 && usage.Tokens >= apiKey.MonthlyTokenBudget {
-		return true, fmt.Sprintf("monthly token budget exceeded: %d of %d used", usage.Tokens, apiKey.MonthlyTokenBudget)
-	}
-	return false, ""
 }
 
 func (h *Handler) cachedResponse(ctx context.Context, cfg *handlerSettings, tenantScope, providerName string, req provider.ChatRequest) (provider.ChatResponse, bool) {

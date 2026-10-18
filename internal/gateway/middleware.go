@@ -130,6 +130,9 @@ func (a *AuthMiddleware) Wrap(next http.Handler) http.Handler {
 					organizationID = workspace.OrganizationID
 				}
 			}
+			// Hand the key's budgets to the gateway so budget admission
+			// needs no second key lookup.
+			r = r.WithContext(withAPIKeyBudget(r.Context(), apiKey))
 			a.serveIdentity(w, r, next, Identity{
 				APIKeyID:       apiKey.ID,
 				RateLimit:      apiKey.RateLimit,

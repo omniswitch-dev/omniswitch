@@ -34,11 +34,14 @@ func (h *Handler) Rerank(w http.ResponseWriter, r *http.Request) {
 	traceID := requestHeaderOrNew(r, "x-omniswitch-trace-id", "trace")
 	sessionID := r.Header.Get("x-omniswitch-session-id")
 	keyID := r.Header.Get("x-omniswitch-key-id")
-	if denied, reason := h.budgetExceeded(r.Context(), keyID); denied {
+	reservation, verdict := h.reserveBudget(r.Context(), keyID, h.estimateInputBudget(request.Model, r.Header.Get("x-omniswitch-provider"), request.Query, request.Documents))
+	if verdict.rejected() {
 		w.Header().Set("x-omniswitch-trace-id", traceID)
-		writeJSON(w, http.StatusPaymentRequired, map[string]any{"error": map[string]string{"message": reason, "type": "budget_exceeded", "code": "budget_exceeded"}})
+		writeBudgetVerdict(w, verdict)
 		return
 	}
+	defer reservation.release()
+	r = r.WithContext(withBudgetReservation(r.Context(), reservation))
 
 	logRequest := provider.ChatRequest{Model: request.Model, Messages: []provider.Message{{Role: "user", Content: rerankGuardrailText(request)}}}
 	if gr := h.guardrails.Load(); gr != nil {
