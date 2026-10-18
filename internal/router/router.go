@@ -138,9 +138,6 @@ func (r *Router) SetRoute(model string, route Route) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.routes[model] = route
-	if r.conditions == nil {
-		r.conditions = make(map[string]compiledCondition)
-	}
 	compileRouteConditions(r.conditions, map[string]Route{model: route})
 }
 
@@ -191,12 +188,10 @@ func (r *Router) CloneWithRoutes(overrides map[string]Route) *Router {
 // calls can neither open circuits nor skew least-latency routing for
 // production traffic.
 func (r *Router) CloneForShadow(breaker *CircuitBreaker) *Router {
+	// The clone is not shared with any other goroutine yet, so its fields
+	// can be set without taking its lock.
 	cloned := r.CloneWithRoutes(nil)
-	cloned.mu.Lock()
-	defer cloned.mu.Unlock()
-	if breaker != nil {
-		cloned.breakers = breaker
-	}
+	cloned.breakers = breaker
 	cloned.latency = newLatencyTracker()
 	return cloned
 }
@@ -1085,9 +1080,6 @@ func withRouteTimeout(ctx context.Context, timeout string) (context.Context, con
 
 // routeTimeout parses a route timeout; zero means no timeout.
 func routeTimeout(timeout string) time.Duration {
-	if strings.TrimSpace(timeout) == "" {
-		return 0
-	}
 	duration, err := time.ParseDuration(strings.TrimSpace(timeout))
 	if err != nil || duration <= 0 {
 		return 0
@@ -1169,29 +1161,13 @@ func compileRouteConditions(cache map[string]compiledCondition, routes map[strin
 	}
 }
 
-// condition returns the compiled program for a conditional variant,
-// compiling (and caching) it on first use if the route table did not
-// already contain it.
-func (r *Router) condition(expression string) compiledCondition {
-	expression = strings.TrimSpace(expression)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if compiled, ok := r.conditions[expression]; ok {
-		return compiled
-	}
-	compiled := compileCondition(expression)
-	if compiled.err != nil {
-		log.Printf("router: invalid route condition %q; the variant will never be selected: %v", expression, compiled.err)
-	}
-	if r.conditions == nil {
-		r.conditions = map[string]compiledCondition{}
-	}
-	r.conditions[expression] = compiled
-	return compiled
-}
-
+// matchesCondition evaluates a conditional variant. Every route is stored
+// through SetRoute, ReplaceRoutes or CloneWithRoutes, which compile all of
+// its conditions, so a missing entry cannot happen and means no match.
 func (r *Router) matchesCondition(expression string, req provider.ChatRequest) bool {
-	compiled := r.condition(expression)
+	r.mu.Lock()
+	compiled := r.conditions[strings.TrimSpace(expression)]
+	r.mu.Unlock()
 	if compiled.program == nil {
 		return false
 	}

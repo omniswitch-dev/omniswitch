@@ -440,3 +440,13 @@ func TestCountsAsProviderFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestRouteTimeoutParsing(t *testing.T) {
+	for value, want := range map[string]time.Duration{
+		"": 0, "   ": 0, "bogus": 0, "-1s": 0, "0s": 0, "250ms": 250 * time.Millisecond, " 2s ": 2 * time.Second,
+	} {
+		if got := routeTimeout(value); got != want {
+			t.Errorf("routeTimeout(%q) = %v, want %v", value, got, want)
+		}
+	}
+}
