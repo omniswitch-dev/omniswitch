@@ -245,7 +245,7 @@ func registerEvalRoutes(mux *http.ServeMux, evalHandler *eval.Handler) {
 func wrapGatewayMiddleware(settings runtimeSettings, st *store.Store, mux http.Handler) (http.Handler, func(), error) {
 	auth := gateway.NewAuthMiddleware(st, settings.authEnabled)
 	if settings.oidcJWKSURL != "" {
-		oidcAuthenticator, err := gateway.NewJWTAuthenticator(gateway.JWTAuthenticatorConfig{
+		oidcConfig := gateway.JWTAuthenticatorConfig{
 			JWKSURL:           settings.oidcJWKSURL,
 			Issuer:            settings.oidcIssuer,
 			Audience:          settings.oidcAudience,
@@ -253,7 +253,11 @@ func wrapGatewayMiddleware(settings runtimeSettings, st *store.Store, mux http.H
 			WorkspaceClaim:    settings.oidcWorkspaceClaim,
 			OrganizationClaim: settings.oidcOrganizationClaim,
 			CacheTTL:          settings.oidcCacheTTL,
-		})
+		}
+		for _, warning := range oidcConfig.MissingBindingWarnings() {
+			log.Printf("WARNING: %s", warning)
+		}
+		oidcAuthenticator, err := gateway.NewJWTAuthenticator(oidcConfig)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to initialize OIDC identity: %w", err)
 		}

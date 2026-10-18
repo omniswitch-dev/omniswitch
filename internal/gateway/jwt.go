@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -23,8 +24,9 @@ import (
 var errJWTKeyNotFound = errors.New("JWT signing key not found")
 
 // JWTAuthenticatorConfig configures OIDC-compatible JWT validation against a
-// JSON Web Key Set. Issuer and audience are optional, but recommended for
-// production workload identity.
+// JSON Web Key Set. Tokens must carry exp. Issuer and audience are optional,
+// but without them any token signed by the JWKS keys is accepted, including
+// tokens minted for other applications; see MissingBindingWarnings.
 type JWTAuthenticatorConfig struct {
 	JWKSURL           string
 	Issuer            string
@@ -37,15 +39,18 @@ type JWTAuthenticatorConfig struct {
 }
 
 // JWTAuthenticator validates signed JWTs fetched from a configured JWKS URL.
-// It caches public keys and performs one forced refresh when an IdP rotates a
-// signing key that is not in the current cache.
+// It caches public keys and refreshes them when a token names a kid that is
+// not cached (an IdP key rotation). Forced refreshes are shared between
+// concurrent callers and happen at most once per minForcedRefreshInterval.
 type JWTAuthenticator struct {
 	config JWTAuthenticatorConfig
 	client *http.Client
 
-	mu        sync.Mutex
-	keys      map[string]any
-	fetchedAt time.Time
+	mu                sync.Mutex
+	keys              map[string]any
+	fetchedAt         time.Time
+	lastForcedRefresh time.Time
+	inflight          *jwksFetch
 }
 
 func NewJWTAuthenticator(config JWTAuthenticatorConfig) (*JWTAuthenticator, error) {
@@ -76,6 +81,19 @@ func NewJWTAuthenticator(config JWTAuthenticatorConfig) (*JWTAuthenticator, erro
 	return &JWTAuthenticator{config: config, client: client}, nil
 }
 
+// MissingBindingWarnings describes issuer or audience checks that are not
+// configured, so startup can log them.
+func (config JWTAuthenticatorConfig) MissingBindingWarnings() []string {
+	var warnings []string
+	if strings.TrimSpace(config.Issuer) == "" {
+		warnings = append(warnings, "OIDC issuer is not configured; JWTs from any issuer using these signing keys are accepted")
+	}
+	if strings.TrimSpace(config.Audience) == "" {
+		warnings = append(warnings, "OIDC audience is not configured; JWTs minted for other applications are accepted")
+	}
+	return warnings
+}
+
 // Authenticate implements TokenAuthenticator.
 func (authenticator *JWTAuthenticator) Authenticate(ctx context.Context, rawToken string) (Identity, error) {
 	claims, err := authenticator.parse(ctx, rawToken, false)
@@ -101,9 +119,16 @@ func (authenticator *JWTAuthenticator) Authenticate(ctx context.Context, rawToke
 	}, nil
 }
 
+// jwtClockLeeway tolerates small clock differences with the IdP on exp, nbf
+// and iat.
+const jwtClockLeeway = 30 * time.Second
+
 func (authenticator *JWTAuthenticator) parse(ctx context.Context, rawToken string, forceRefresh bool) (jwt.MapClaims, error) {
 	options := []jwt.ParserOption{
 		jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "EdDSA"}),
+		// Tokens without exp would be valid forever.
+		jwt.WithExpirationRequired(),
+		jwt.WithLeeway(jwtClockLeeway),
 	}
 	if issuer := strings.TrimSpace(authenticator.config.Issuer); issuer != "" {
 		options = append(options, jwt.WithIssuer(issuer))
@@ -142,12 +167,70 @@ func (authenticator *JWTAuthenticator) keyForToken(ctx context.Context, token *j
 	return nil, errJWTKeyNotFound
 }
 
+// minForcedRefreshInterval bounds how often a token with an unknown kid can
+// trigger a JWKS refetch. Without it any unauthenticated caller could force
+// one outbound IdP request per inbound request.
+const minForcedRefreshInterval = 30 * time.Second
+
+// maxJWKSBytes caps the JWKS document size.
+const maxJWKSBytes = 1 << 20
+
+// jwksFetch is one in-flight JWKS request shared by every caller that needs
+// fresh keys at the same time.
+type jwksFetch struct {
+	done chan struct{}
+	keys map[string]any
+	err  error
+}
+
 func (authenticator *JWTAuthenticator) currentKeys(ctx context.Context, forceRefresh bool) (map[string]any, error) {
 	authenticator.mu.Lock()
-	defer authenticator.mu.Unlock()
-	if !forceRefresh && len(authenticator.keys) > 0 && time.Since(authenticator.fetchedAt) < authenticator.config.CacheTTL {
-		return authenticator.keys, nil
+	now := time.Now()
+	if len(authenticator.keys) > 0 {
+		fresh := now.Sub(authenticator.fetchedAt) < authenticator.config.CacheTTL
+		if !forceRefresh && fresh {
+			keys := authenticator.keys
+			authenticator.mu.Unlock()
+			return keys, nil
+		}
+		if forceRefresh && fresh && now.Sub(authenticator.lastForcedRefresh) < minForcedRefreshInterval {
+			keys := authenticator.keys
+			authenticator.mu.Unlock()
+			return keys, nil
+		}
 	}
+	if forceRefresh {
+		authenticator.lastForcedRefresh = now
+	}
+	call := authenticator.inflight
+	if call == nil {
+		call = &jwksFetch{done: make(chan struct{})}
+		authenticator.inflight = call
+		authenticator.mu.Unlock()
+		// The fetch is shared, so one caller's cancellation must not fail the
+		// others; the HTTP client timeout still bounds it.
+		keys, err := authenticator.fetchKeys(context.WithoutCancel(ctx))
+		authenticator.mu.Lock()
+		if err == nil {
+			authenticator.keys = keys
+			authenticator.fetchedAt = time.Now()
+		}
+		call.keys, call.err = keys, err
+		authenticator.inflight = nil
+		authenticator.mu.Unlock()
+		close(call.done)
+	} else {
+		authenticator.mu.Unlock()
+	}
+	select {
+	case <-call.done:
+		return call.keys, call.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (authenticator *JWTAuthenticator) fetchKeys(ctx context.Context) (map[string]any, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, authenticator.config.JWKSURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create JWKS request: %w", err)
@@ -163,7 +246,7 @@ func (authenticator *JWTAuthenticator) currentKeys(ctx context.Context, forceRef
 	var document struct {
 		Keys []json.RawMessage `json:"keys"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&document); err != nil {
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxJWKSBytes)).Decode(&document); err != nil {
 		return nil, fmt.Errorf("decode JWKS: %w", err)
 	}
 	keys := make(map[string]any, len(document.Keys))
@@ -180,8 +263,6 @@ func (authenticator *JWTAuthenticator) currentKeys(ctx context.Context, forceRef
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("JWKS contains no supported public keys")
 	}
-	authenticator.keys = keys
-	authenticator.fetchedAt = time.Now()
 	return keys, nil
 }
 
