@@ -218,15 +218,11 @@ func parseJWK(raw json.RawMessage) (string, any, error) {
 		if curve == nil {
 			return "", nil, fmt.Errorf("unsupported EC JWK curve %q", key.CRV)
 		}
-		x, err := decodeJWKInteger(key.X)
+		publicKey, err := parseECJWK(curve, key.X, key.Y)
 		if err != nil {
-			return "", nil, fmt.Errorf("decode EC JWK %q x: %w", key.KID, err)
+			return "", nil, fmt.Errorf("decode EC JWK %q: %w", key.KID, err)
 		}
-		y, err := decodeJWKInteger(key.Y)
-		if err != nil || !curve.IsOnCurve(x, y) {
-			return "", nil, fmt.Errorf("decode EC JWK %q y", key.KID)
-		}
-		return key.KID, &ecdsa.PublicKey{Curve: curve, X: x, Y: y}, nil
+		return key.KID, publicKey, nil
 	case "OKP":
 		if key.CRV != "Ed25519" {
 			return "", nil, fmt.Errorf("unsupported OKP JWK curve %q", key.CRV)
@@ -239,6 +235,48 @@ func parseJWK(raw json.RawMessage) (string, any, error) {
 	default:
 		return "", nil, fmt.Errorf("unsupported JWK key type %q", key.KTY)
 	}
+}
+
+// parseECJWK decodes the base64url x/y coordinates of an EC JWK into an ECDSA
+// public key. ecdsa.ParseUncompressedPublicKey rejects points that are not on
+// the curve, so a malicious or corrupt JWKS cannot smuggle in an invalid key.
+// RFC 7518 section 6.2.1 requires full-length coordinates, but some issuers
+// strip leading zero bytes, so shorter values are left-padded.
+func parseECJWK(curve elliptic.Curve, encodedX, encodedY string) (*ecdsa.PublicKey, error) {
+	size := (curve.Params().BitSize + 7) / 8
+	x, err := decodeJWKCoordinate(encodedX, size)
+	if err != nil {
+		return nil, fmt.Errorf("x: %w", err)
+	}
+	y, err := decodeJWKCoordinate(encodedY, size)
+	if err != nil {
+		return nil, fmt.Errorf("y: %w", err)
+	}
+	point := make([]byte, 0, 1+2*size)
+	point = append(point, 0x04)
+	point = append(point, x...)
+	point = append(point, y...)
+	publicKey, err := ecdsa.ParseUncompressedPublicKey(curve, point)
+	if err != nil {
+		return nil, fmt.Errorf("invalid curve point: %w", err)
+	}
+	return publicKey, nil
+}
+
+func decodeJWKCoordinate(encoded string, size int) ([]byte, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(decoded) == 0 {
+		return nil, fmt.Errorf("invalid base64url coordinate")
+	}
+	if len(decoded) > size {
+		return nil, fmt.Errorf("coordinate is %d bytes, want at most %d", len(decoded), size)
+	}
+	if len(decoded) < size {
+		padded := make([]byte, size)
+		copy(padded[size-len(decoded):], decoded)
+		decoded = padded
+	}
+	return decoded, nil
 }
 
 func decodeJWKInteger(encoded string) (*big.Int, error) {
