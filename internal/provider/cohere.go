@@ -39,8 +39,13 @@ func (c *Cohere) ChatCompletion(context.Context, ChatRequest) (ChatResponse, Pro
 func (c *Cohere) Rerank(ctx context.Context, req RerankRequest) (RerankResponse, ProviderMeta, error) {
 	start := time.Now()
 	meta := ProviderMeta{Provider: "cohere", Model: req.Model, Timestamp: start}
-	req.Documents = cohereRerankDocuments(req.Documents)
-	body, err := json.Marshal(req)
+	body, err := json.Marshal(cohereRerankRequest{
+		Model:           req.Model,
+		Query:           req.Query,
+		Documents:       cohereRerankDocuments(req.Documents),
+		TopN:            req.TopN,
+		MaxTokensPerDoc: req.MaxTokensPerDoc,
+	})
 	if err != nil {
 		return RerankResponse{}, meta, fmt.Errorf("marshal cohere rerank request: %w", err)
 	}
@@ -68,9 +73,26 @@ func (c *Cohere) Rerank(ctx context.Context, req RerankRequest) (RerankResponse,
 		return RerankResponse{}, meta, fmt.Errorf("read cohere rerank response: %w", err)
 	}
 	meta.Latency = time.Since(start)
-	var response RerankResponse
-	if err := json.Unmarshal(payload, &response); err != nil {
+	var upstream cohereRerankResponse
+	if err := json.Unmarshal(payload, &upstream); err != nil {
 		return RerankResponse{}, meta, fmt.Errorf("decode cohere rerank response: %w", err)
+	}
+	response := RerankResponse{ID: upstream.ID, Results: upstream.Results}
+	if response.Results == nil {
+		response.Results = []RerankResult{}
+	}
+	if req.ReturnDocuments {
+		// v2 no longer echoes documents; attach the caller's originals.
+		for i := range response.Results {
+			if idx := response.Results[i].Index; idx >= 0 && idx < len(req.Documents) {
+				response.Results[i].Document = req.Documents[idx]
+			}
+		}
+	}
+	if upstream.Meta.BilledUnits != nil {
+		units := int(upstream.Meta.BilledUnits.SearchUnits)
+		response.Usage.SearchUnits = units
+		meta.Cost = float64(units) * cohereRerankPricePerSearchUnit
 	}
 	if response.Model == "" {
 		response.Model = req.Model
@@ -79,6 +101,31 @@ func (c *Cohere) Rerank(ctx context.Context, req RerankRequest) (RerankResponse,
 		response.Object = "list"
 	}
 	return response, meta, nil
+}
+
+// cohereRerankPricePerSearchUnit is Cohere's rerank price ($2.00 per 1,000
+// search units, https://cohere.com/pricing, verified 2026-10-18).
+const cohereRerankPricePerSearchUnit = 0.002
+
+// cohereRerankRequest is the Cohere v2 /rerank payload. v2 dropped
+// return_documents and max_chunks_per_doc (replaced by max_tokens_per_doc)
+// and has no user field, so those are not forwarded.
+type cohereRerankRequest struct {
+	Model           string `json:"model"`
+	Query           string `json:"query"`
+	Documents       []any  `json:"documents"`
+	TopN            *int   `json:"top_n,omitempty"`
+	MaxTokensPerDoc *int   `json:"max_tokens_per_doc,omitempty"`
+}
+
+type cohereRerankResponse struct {
+	ID      string         `json:"id"`
+	Results []RerankResult `json:"results"`
+	Meta    struct {
+		BilledUnits *struct {
+			SearchUnits float64 `json:"search_units"`
+		} `json:"billed_units"`
+	} `json:"meta"`
 }
 
 func cohereRerankDocuments(documents []any) []any {

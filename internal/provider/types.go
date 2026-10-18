@@ -401,6 +401,8 @@ type Usage struct {
 	TotalTokens             int                      `json:"total_tokens"`
 	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+	// SearchUnits is set by search-unit-billed endpoints (Cohere rerank).
+	SearchUnits int `json:"search_units,omitempty"`
 }
 
 // PromptTokensDetails breaks down prompt tokens (OpenAI usage format).
@@ -559,6 +561,8 @@ type RerankRequest struct {
 	TopN            *int   `json:"top_n,omitempty"`
 	ReturnDocuments bool   `json:"return_documents,omitempty"`
 	MaxChunksPerDoc *int   `json:"max_chunks_per_doc,omitempty"`
+	// MaxTokensPerDoc is Cohere v2's per-document truncation limit.
+	MaxTokensPerDoc *int   `json:"max_tokens_per_doc,omitempty"`
 	User            string `json:"user,omitempty"`
 }
 
