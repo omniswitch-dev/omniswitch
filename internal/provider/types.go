@@ -452,6 +452,14 @@ type ChatResponseChunk struct {
 	Model   string        `json:"model"`
 	Choices []ChunkChoice `json:"choices"`
 	Usage   *Usage        `json:"usage,omitempty"`
+
+	// Err reports that the stream ended abnormally: a transport or read
+	// error, an idle or route timeout, an oversized event, or an error
+	// event sent by the upstream. Producers set it only on the last chunk
+	// before they close the channel, and that chunk carries no choices.
+	// Consumers must treat the response as failed (no caching, no success
+	// log) and tell the client. Err is never serialized.
+	Err error `json:"-"`
 }
 
 type ChunkChoice struct {
