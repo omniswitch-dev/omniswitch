@@ -163,9 +163,6 @@ func (a *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 	}
 
 	finishReason := mapAnthropicStopReason(anthResp.StopReason)
-	if len(toolCalls) > 0 && anthResp.StopReason == "tool_use" {
-		finishReason = "tool_calls"
-	}
 
 	chatResp := ChatResponse{
 		ID:      anthResp.ID,
@@ -230,7 +227,7 @@ func (a *Anthropic) ChatCompletionStream(ctx context.Context, req ChatRequest) (
 		return nil, meta, upstreamErr
 	}
 	meta.Latency = time.Since(start)
-	return streamAnthropic(ctx, resp.Body, req.Model, req.StreamOptions != nil && req.StreamOptions.IncludeUsage), meta, nil
+	return streamAnthropic(ctx, resp.Body, req.Model), meta, nil
 }
 
 // toAnthropicRequest translates an OpenAI-compatible ChatRequest into
@@ -412,17 +409,6 @@ func toAnthropicRequest(req ChatRequest, stream bool) (anthropicRequest, error) 
 		})
 	}
 	return anthReq, nil
-}
-
-func mapAnthropicStopReason(reason string) string {
-	switch reason {
-	case "end_turn":
-		return "stop"
-	case "max_tokens":
-		return "length"
-	default:
-		return reason
-	}
 }
 
 // Pricing for Anthropic models is resolved from the consolidated catalog

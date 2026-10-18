@@ -101,6 +101,10 @@ func (a *AzureOpenAI) ChatCompletion(ctx context.Context, req ChatRequest) (Chat
 func (a *AzureOpenAI) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan ChatResponseChunk, ProviderMeta, error) {
 	start := time.Now()
 	req.Stream = true
+	// "On Your Data" (data_sources) requests reject stream_options.
+	if _, onYourData := req.Extra["data_sources"]; !onYourData {
+		req = withStreamUsage(req)
+	}
 	body, err := azureRequestBody(req)
 	if err != nil {
 		return nil, ProviderMeta{Provider: a.name, ProviderType: "azure", Model: req.Model, Timestamp: start, Error: err.Error()}, err

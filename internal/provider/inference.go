@@ -118,7 +118,7 @@ func (b *InferenceBackend) ChatCompletionStream(ctx context.Context, req ChatReq
 		meta.Latency = time.Since(start)
 		return StreamFromResponse(ctx, resp), meta, nil
 	}
-	chunks, meta, err := streamOpenAICompatible(ctx, streamingClient(b.client), strings.TrimRight(replica.URL, "/")+"/chat/completions", "", req, b.name, nil)
+	chunks, meta, err := streamOpenAICompatible(ctx, streamingClient(b.client), strings.TrimRight(replica.URL, "/")+"/chat/completions", "", withStreamUsage(req), b.name, nil)
 	meta.ProviderType = "inference"
 	if err == nil {
 		b.health.record(replica.URL, meta.Latency, 0)

@@ -82,7 +82,7 @@ func (g *Groq) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespons
 }
 
 func (g *Groq) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan ChatResponseChunk, ProviderMeta, error) {
-	return streamOpenAICompatible(ctx, streamingClient(g.client), "https://api.groq.com/openai/v1/chat/completions", g.apiKey, req, "groq", nil)
+	return streamOpenAICompatible(ctx, streamingClient(g.client), "https://api.groq.com/openai/v1/chat/completions", g.apiKey, withStreamUsage(req), "groq", nil)
 }
 
 // Pricing for Groq models is resolved from the consolidated catalog

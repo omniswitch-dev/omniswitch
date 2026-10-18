@@ -20,6 +20,10 @@ type Custom struct {
 	client       *http.Client
 	models       []string
 	extraHeaders map[string]string
+	// streamUsage adds stream_options.include_usage to streaming requests
+	// so streamed calls can be priced. Disable it for upstreams that
+	// reject the field (Mistral answers 422 extra_forbidden).
+	streamUsage bool
 }
 
 // CustomOption configures a Custom provider.
@@ -33,6 +37,20 @@ func WithCustomModels(models []string) CustomOption {
 // WithCustomHeaders sets extra HTTP headers sent with every request.
 func WithCustomHeaders(headers map[string]string) CustomOption {
 	return func(c *Custom) { c.extraHeaders = headers }
+}
+
+// WithCustomStreamUsage controls whether streaming requests ask the upstream
+// for a final usage chunk (stream_options.include_usage). It is on by
+// default except for hosts known to reject the field.
+func WithCustomStreamUsage(enabled bool) CustomOption {
+	return func(c *Custom) { c.streamUsage = enabled }
+}
+
+// customStreamUsageDefault reports whether include_usage is safe to send to
+// baseURL. Mistral's OpenAI-compatible API rejects unknown fields,
+// including stream_options, with 422.
+func customStreamUsageDefault(baseURL string) bool {
+	return !strings.Contains(strings.ToLower(baseURL), "api.mistral.ai")
 }
 
 // WithCustomTimeout bounds non-streaming requests and the wait for response
@@ -61,6 +79,8 @@ func NewCustom(name, baseURL, apiKey string, opts ...CustomOption) *Custom {
 		baseURL: baseURL,
 		apiKey:  apiKey,
 		client:  newProviderClient(defaultRequestTimeout),
+
+		streamUsage: customStreamUsageDefault(baseURL),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -142,6 +162,9 @@ func (c *Custom) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 }
 
 func (c *Custom) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan ChatResponseChunk, ProviderMeta, error) {
+	if c.streamUsage {
+		req = withStreamUsage(req)
+	}
 	return streamOpenAICompatible(ctx, streamingClient(c.client), c.chatURL(), c.bearerAPIKey(), req, c.name, c.extraHeaders)
 }
 

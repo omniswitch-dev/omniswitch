@@ -446,19 +446,6 @@ func mapBedrockToolChoice(choice any) *bedrockToolChoice {
 	return &bedrockToolChoice{Auto: &struct{}{}}
 }
 
-func mapBedrockStopReason(reason string) string {
-	switch reason {
-	case "end_turn", "stop_sequence":
-		return "stop"
-	case "max_tokens":
-		return "length"
-	case "tool_use":
-		return "tool_calls"
-	default:
-		return strings.ToLower(reason)
-	}
-}
-
 // bedrockPricing resolves catalog pricing by substring match against known
 // Claude model families, since Bedrock model IDs vary by cross-region
 // inference-profile prefix (e.g. "us.anthropic.claude-3-5-sonnet...") and

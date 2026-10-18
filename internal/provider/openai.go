@@ -86,7 +86,7 @@ func (o *OpenAI) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 }
 
 func (o *OpenAI) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan ChatResponseChunk, ProviderMeta, error) {
-	return streamOpenAICompatible(ctx, streamingClient(o.client), o.baseURL+"/chat/completions", o.apiKey, req, "openai", nil)
+	return streamOpenAICompatible(ctx, streamingClient(o.client), o.baseURL+"/chat/completions", o.apiKey, withStreamUsage(req), "openai", nil)
 }
 
 func (o *OpenAI) Embeddings(ctx context.Context, req EmbeddingRequest) (EmbeddingResponse, ProviderMeta, error) {

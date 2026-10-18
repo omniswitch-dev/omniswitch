@@ -65,6 +65,7 @@ type geminiFileData struct {
 }
 
 type geminiFunctionCall struct {
+	ID   string         `json:"id,omitempty"`
 	Name string         `json:"name"`
 	Args map[string]any `json:"args,omitempty"`
 }
@@ -107,17 +108,64 @@ type geminiResponse struct {
 		Content struct {
 			Parts []struct {
 				Text         string              `json:"text"`
+				Thought      bool                `json:"thought,omitempty"`
 				FunctionCall *geminiFunctionCall `json:"functionCall,omitempty"`
 			} `json:"parts"`
 			Role string `json:"role"`
 		} `json:"content"`
 		FinishReason string `json:"finishReason"`
 	} `json:"candidates"`
-	UsageMetadata struct {
-		PromptTokenCount     int `json:"promptTokenCount"`
-		CandidatesTokenCount int `json:"candidatesTokenCount"`
-		TotalTokenCount      int `json:"totalTokenCount"`
-	} `json:"usageMetadata"`
+	PromptFeedback struct {
+		BlockReason string `json:"blockReason"`
+	} `json:"promptFeedback"`
+	UsageMetadata geminiUsageMetadata `json:"usageMetadata"`
+	// Error is set when the API reports a failure inside a 200 stream.
+	Error *geminiError `json:"error,omitempty"`
+}
+
+type geminiUsageMetadata struct {
+	PromptTokenCount        int `json:"promptTokenCount"`
+	CandidatesTokenCount    int `json:"candidatesTokenCount"`
+	ThoughtsTokenCount      int `json:"thoughtsTokenCount"`
+	CachedContentTokenCount int `json:"cachedContentTokenCount"`
+	TotalTokenCount         int `json:"totalTokenCount"`
+}
+
+type geminiError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Status  string `json:"status"`
+}
+
+// usage converts Gemini usage metadata to OpenAI usage. Thinking tokens are
+// billed as output tokens, so they count as completion tokens (and are
+// reported as reasoning_tokens), like OpenAI reasoning models.
+func (u geminiUsageMetadata) usage() Usage {
+	out := Usage{
+		PromptTokens:     u.PromptTokenCount,
+		CompletionTokens: u.CandidatesTokenCount + u.ThoughtsTokenCount,
+	}
+	out.TotalTokens = out.PromptTokens + out.CompletionTokens
+	if u.TotalTokenCount > out.TotalTokens {
+		out.TotalTokens = u.TotalTokenCount
+	}
+	if u.ThoughtsTokenCount > 0 {
+		out.CompletionTokensDetails = &CompletionTokensDetails{ReasoningTokens: u.ThoughtsTokenCount}
+	}
+	if u.CachedContentTokenCount > 0 {
+		out.PromptTokensDetails = &PromptTokensDetails{CachedTokens: u.CachedContentTokenCount}
+	}
+	return out
+}
+
+// geminiToolCallID returns the upstream function call ID when present, or a
+// unique synthetic one. Plain "call_<n>" IDs collide across turns and
+// confuse clients that key tool results by ID.
+func geminiToolCallID(call *geminiFunctionCall, prefix string, ordinal int) string {
+	if call != nil && call.ID != "" {
+		return call.ID
+	}
+	return fmt.Sprintf("call_%s_%d", prefix, ordinal)
 }
 
 func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, ProviderMeta, error) {
@@ -173,19 +221,25 @@ func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 		return ChatResponse{}, meta, err
 	}
 
+	id := fmt.Sprintf("gemini-%d", time.Now().UnixNano())
 	content := ""
-	finishReason := "stop"
+	reasoning := ""
+	finishReason := finishStop
 	var toolCalls []ToolCall
 	if len(gemResp.Candidates) > 0 {
 		candidate := gemResp.Candidates[0]
-		for index, part := range candidate.Content.Parts {
-			content += part.Text
+		for _, part := range candidate.Content.Parts {
+			if part.Thought {
+				reasoning += part.Text
+			} else {
+				content += part.Text
+			}
 			if part.FunctionCall != nil {
 				args, _ := json.Marshal(part.FunctionCall.Args)
-				i := index
+				ordinal := len(toolCalls)
 				toolCalls = append(toolCalls, ToolCall{
-					Index: &i,
-					ID:    fmt.Sprintf("call_%d", index),
+					Index: &ordinal,
+					ID:    geminiToolCallID(part.FunctionCall, id[len("gemini-"):], ordinal),
 					Type:  "function",
 					Function: FunctionCall{
 						Name:      part.FunctionCall.Name,
@@ -194,34 +248,33 @@ func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 				})
 			}
 		}
-		if candidate.FinishReason == "MAX_TOKENS" {
-			finishReason = "length"
+		if mapped := mapGeminiFinishReason(candidate.FinishReason); mapped != "" {
+			finishReason = mapped
 		}
-		if len(toolCalls) > 0 {
-			finishReason = "tool_calls"
+		if len(toolCalls) > 0 && finishReason == finishStop {
+			finishReason = finishToolCalls
 		}
+	} else if gemResp.PromptFeedback.BlockReason != "" {
+		finishReason = finishContentFilter
 	}
 
+	usage := gemResp.UsageMetadata.usage()
 	chatResp := ChatResponse{
-		ID:      fmt.Sprintf("gemini-%d", time.Now().UnixNano()),
+		ID:      id,
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
 		Model:   req.Model,
 		Choices: []Choice{
 			{
 				Index:        0,
-				Message:      Message{Role: "assistant", Content: content, ToolCalls: toolCalls},
+				Message:      Message{Role: "assistant", Content: content, ReasoningContent: reasoning, ToolCalls: toolCalls},
 				FinishReason: finishReason,
 			},
 		},
-		Usage: Usage{
-			PromptTokens:     gemResp.UsageMetadata.PromptTokenCount,
-			CompletionTokens: gemResp.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:      gemResp.UsageMetadata.TotalTokenCount,
-		},
+		Usage: usage,
 	}
 
-	meta.Cost = pricingFor("google", req.Model).Cost(gemResp.UsageMetadata.PromptTokenCount, gemResp.UsageMetadata.CandidatesTokenCount)
+	meta.Cost = pricingFor("google", req.Model).Cost(usage.PromptTokens, usage.CompletionTokens)
 	return chatResp, meta, nil
 }
 
@@ -259,7 +312,7 @@ func (g *Google) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-c
 		return nil, meta, upstreamErr
 	}
 	meta.Latency = time.Since(start)
-	return streamGemini(ctx, resp.Body, req.Model, req.StreamOptions != nil && req.StreamOptions.IncludeUsage), meta, nil
+	return streamGemini(ctx, resp.Body, req.Model), meta, nil
 }
 
 func toGeminiRequest(req ChatRequest) (geminiRequest, error) {
