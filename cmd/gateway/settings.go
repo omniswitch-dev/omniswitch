@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +46,7 @@ type runtimeSettings struct {
 	mcpPolicyExplicit      bool
 	mcpUpstreamURL         string
 	mcpTargets             []gatewayconfig.MCPTarget
+	policyDir              string
 	routes                 map[string]router.Route
 	providerAccounts       []gatewayconfig.ProviderAccount
 	oidcJWKSURL            string
@@ -140,6 +142,10 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 		settings.mcpPolicyExplicit = true
 	}
 	settings.mcpUpstreamURL = env("OMNISWITCH_MCP_UPSTREAM", settings.mcpUpstreamURL)
+	// Policy replay (/api/evals/policy) only reads policy files from this
+	// operator-trusted directory. It defaults to the directory holding the
+	// MCP policy file.
+	settings.policyDir = env("OMNISWITCH_POLICY_DIR", filepath.Dir(settings.mcpPolicyPath))
 	settings.oidcJWKSURL = env("OMNISWITCH_OIDC_JWKS_URL", settings.oidcJWKSURL)
 	settings.oidcIssuer = env("OMNISWITCH_OIDC_ISSUER", settings.oidcIssuer)
 	settings.oidcAudience = env("OMNISWITCH_OIDC_AUDIENCE", settings.oidcAudience)

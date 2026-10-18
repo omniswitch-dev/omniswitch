@@ -17,6 +17,9 @@ import (
 // Handler manages evaluation operations
 type Handler struct {
 	store *store.Store
+	// policyRoot is the operator-trusted directory that policy replay
+	// resolves policy_paths against (see SetPolicyRoot).
+	policyRoot string
 }
 
 func NewHandler(st *store.Store) *Handler {
@@ -403,7 +406,16 @@ func (h *Handler) ReplayPolicies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	engine, err := policy.NewEngineFromFiles(req.PolicyPaths...)
+	// Never hand caller-supplied paths to the filesystem: resolve each name
+	// against the trusted policy directory first (SEC-1).
+	paths, err := resolveReplayPolicyPaths(h.policyRoot, req.PolicyPaths)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Compile errors may quote policy source, which is acceptable only
+	// because every path is now inside the operator's policy directory.
+	engine, err := policy.NewEngineFromFiles(paths...)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
