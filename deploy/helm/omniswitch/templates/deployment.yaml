@@ -91,7 +91,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ . }}
-                  key: {{ if $.Values.observability.otel.headersSecret.name }}{{ required "observability.otel.headersSecret.key must not be empty" $.Values.observability.otel.headersSecret.key }}{{ else }}headers{{ end }}
+                  key: {{ if $.Values.observability.otel.headersSecret.name }}{{ $.Values.observability.otel.headersSecret.key | default "headers" }}{{ else }}headers{{ end }}
             {{- end }}
             {{- end }}
             {{- if or .Values.redis.enabled .Values.redis.url }}

@@ -109,7 +109,7 @@ observability:
     headers: {}       # e.g. authorization: "Bearer <token>"
     # Existing Secret whose key holds the full OMNISWITCH_OTEL_HEADERS value,
     # e.g. "authorization=Bearer <token>,x-scope=prod". Takes precedence over
-    # headers.
+    # headers. key defaults to "headers".
     headersSecret: {}  # { name: otel-headers, key: headers }
 
 # Requires Prometheus Operator CRDs. Private metrics require a viewer-or-higher

@@ -54,7 +54,7 @@ observability:
     endpoint: otel-collector.observability:4317
     headersSecret:
       name: otel-headers     # stringData: { headers: "authorization=Bearer <token>" }
-      key: headers
+      key: headers           # optional; defaults to "headers"
 ```
 
 `headersSecret` takes precedence over `headers`.
@@ -89,8 +89,8 @@ separate top-level `secrets` or `existingSecret` settings.
 
 In Postgres mode the gateway PVC and its `/data` mount are omitted, even when
 `persistence.enabled=true`. **Existing SQLite data is not migrated to Postgres.**
-The local semantic cache remains ephemeral. Redis is needed for shared rate
-limits; set `redis.enabled=true` for the bundled instance or `redis.url` for an
+Exact and semantic cache entries are stored in Postgres and shared by all
+replicas. Redis is needed for shared rate limits; set `redis.enabled=true` for the bundled instance or `redis.url` for an
 external one. With neither configured, NOTES warns that multi-replica limits
 are per pod. The bundled Redis hostname follows the Helm release name.
 
