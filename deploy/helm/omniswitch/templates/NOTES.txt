@@ -1,8 +1,21 @@
 OmniSwitch is available inside the cluster at:
   http://{{ include "omniswitch.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
 
-Enable authentication and provide a bootstrap admin key and a persistent vault
-key through secrets or existingSecret before sending production traffic.
+{{ if .Values.config.gateway.auth -}}
+Authentication is enabled.
+{{- if eq (include "omniswitch.generateBootstrapKey" .) "true" }}
+No bootstrap API key was supplied, so the chart generated one. Read it with:
+  kubectl get secret -n {{ .Release.Namespace }} {{ include "omniswitch.secretName" . }} \
+    -o jsonpath='{.data.OMNISWITCH_BOOTSTRAP_API_KEY}' | base64 -d
+Use it to create named keys, then treat it like any other owner key.
+{{- end }}
+{{- else -}}
+WARNING: authentication is disabled (config.gateway.auth=false). Anyone who can
+reach the Service can use the provider keys and the management API.
+{{- end }}
+
+Provide a persistent OMNISWITCH_VAULT_KEY through secrets or existingSecret
+before sending production traffic.
 
 {{- if or .Values.database.url .Values.database.existingSecret }}
 Postgres is configured through Secret {{ include "omniswitch.databaseSecretName" . }}.

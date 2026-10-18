@@ -61,3 +61,22 @@ Name of the Secret holding provider credentials.
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/* True when the gateway needs a chart-generated bootstrap API key. */}}
+{{- define "omniswitch.generateBootstrapKey" -}}
+{{- if and .Values.config.gateway.auth (not .Values.existingSecret) (not (hasKey .Values.secrets "OMNISWITCH_BOOTSTRAP_API_KEY")) -}}
+{{- if not .Values.bootstrap.generate -}}
+{{- fail "config.gateway.auth is true but no bootstrap API key is configured: set secrets.OMNISWITCH_BOOTSTRAP_API_KEY, set existingSecret (with an OMNISWITCH_BOOTSTRAP_API_KEY key), or set bootstrap.generate=true" -}}
+{{- end -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/* Name of the Secret holding OMNISWITCH_OTEL_HEADERS, if any. */}}
+{{- define "omniswitch.otelHeadersSecretName" -}}
+{{- if .Values.observability.otel.headersSecret.name -}}
+{{- .Values.observability.otel.headersSecret.name -}}
+{{- else if .Values.observability.otel.headers -}}
+{{- printf "%s-otel" (include "omniswitch.fullname" .) -}}
+{{- end -}}
+{{- end }}

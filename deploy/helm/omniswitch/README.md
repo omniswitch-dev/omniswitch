@@ -1,5 +1,47 @@
 # OmniSwitch Helm chart
 
+## Authentication and the bootstrap key
+
+`config.gateway.auth` defaults to `true`. With auth on, the gateway refuses to
+start until at least one API key exists, so the first start needs
+`OMNISWITCH_BOOTSTRAP_API_KEY`. Provide it in one of these ways:
+
+- `secrets.OMNISWITCH_BOOTSTRAP_API_KEY` (rendered into the chart Secret), or
+- `existingSecret`, a Secret you manage that contains an
+  `OMNISWITCH_BOOTSTRAP_API_KEY` key (the chart cannot check its contents).
+
+If you set neither, the chart generates a random key in the chart Secret
+(`bootstrap.generate: true`, the default). On upgrades it reuses the key it
+finds in the cluster. `helm template` cannot read the cluster, so every
+`helm template | kubectl apply` render gets a new value; supply the key
+yourself in that workflow. The install NOTES print the command that reads the
+generated key. Set `bootstrap.generate: false` to make rendering fail instead
+when no key is supplied.
+
+The chart sets `config.gateway.listen: ":8080"`. Keep an explicit listen
+address: without one, the gateway binds `127.0.0.1` when auth is off, and the
+Service cannot reach it.
+
+## OpenTelemetry export headers
+
+`observability.otel.headers` is a map of OTLP export headers. The chart joins it
+into one comma-separated `key=value` value, stores it in a dedicated
+`<release>-otel` Secret, and passes it to the gateway as
+`OMNISWITCH_OTEL_HEADERS`. Header values must not contain commas. Because Helm
+keeps supplied values in its release history, prefer an existing Secret:
+
+```yaml
+observability:
+  otel:
+    enabled: true
+    endpoint: otel-collector.observability:4317
+    headersSecret:
+      name: otel-headers     # stringData: { headers: "authorization=Bearer <token>" }
+      key: headers
+```
+
+`headersSecret` takes precedence over `headers`.
+
 ## Database and replicas
 
 Defaults run one gateway replica with SQLite on a 10 GiB PVC. More than one

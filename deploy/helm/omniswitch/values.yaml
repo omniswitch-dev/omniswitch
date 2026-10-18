@@ -29,6 +29,15 @@ service:
 secrets: {}
 existingSecret: ""    # use an existing Secret instead of creating one
 
+# First-start bootstrap admin key. When config.gateway.auth is true, the gateway
+# refuses to start until at least one API key exists, so it needs
+# OMNISWITCH_BOOTSTRAP_API_KEY on first start. Supply it in secrets or in
+# existingSecret. If neither is set, the chart generates a random key in the
+# chart Secret (kept across upgrades) when bootstrap.generate is true, and fails
+# rendering when it is false.
+bootstrap:
+  generate: true
+
 # Shared Postgres control-plane store. Set ONE of url or existingSecret.
 # url creates a separate Secret; prefer existingSecret in production.
 # In Postgres mode persistence is ignored and no gateway PVC is rendered.
@@ -42,6 +51,9 @@ config:
   apiVersion: omniswitch.dev/v1
   kind: GatewayConfig
   gateway:
+    # Listen on all interfaces inside the pod. Without an explicit address the
+    # gateway binds 127.0.0.1 when auth is off, which a Service cannot reach.
+    listen: ":8080"
     auth: true
     cache_scope: api_key
     log_payloads: false
@@ -81,7 +93,15 @@ observability:
     endpoint: ""
     serviceName: omniswitch
     insecure: false
-    headers: {}       # e.g. authorization: "Bearer ${OTEL_TOKEN}"
+    # OTLP export headers, rendered as one comma-separated key=value
+    # OMNISWITCH_OTEL_HEADERS value in a dedicated Secret. Values must not
+    # contain commas. Helm keeps supplied values in its release history, so
+    # prefer headersSecret in production.
+    headers: {}       # e.g. authorization: "Bearer <token>"
+    # Existing Secret whose key holds the full OMNISWITCH_OTEL_HEADERS value,
+    # e.g. "authorization=Bearer <token>,x-scope=prod". Takes precedence over
+    # headers.
+    headersSecret: {}  # { name: otel-headers, key: headers }
 
 # Requires Prometheus Operator CRDs. Private metrics require a viewer-or-higher
 # API key in this Secret (in the chart's namespace), not annotation-based scraping.
