@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/omniswitch-dev/omniswitch/internal/gateway"
 	"github.com/omniswitch-dev/omniswitch/internal/model"
 	"github.com/omniswitch-dev/omniswitch/internal/policy"
 	"github.com/omniswitch-dev/omniswitch/internal/store"
@@ -24,6 +25,19 @@ type Handler struct {
 
 func NewHandler(st *store.Store) *Handler {
 	return &Handler{store: st}
+}
+
+// requireGlobal rejects tenant-scoped callers. Datasets and experiments
+// have no workspace yet, so only global callers (no workspace and no
+// organization) may read or change them (finding SEC-3). These handlers
+// are not routed today; the check keeps them safe if they are wired up
+// before the records gain a workspace.
+func requireGlobal(w http.ResponseWriter, r *http.Request) bool {
+	if gateway.ScopeFromContext(r.Context()).Global() {
+		return true
+	}
+	writeError(w, http.StatusForbidden, "datasets and experiments are not workspace-scoped; only global callers without a workspace or organization can use them")
+	return false
 }
 
 // Dataset management
@@ -48,6 +62,9 @@ type AddExamplesRequest struct {
 }
 
 func (h *Handler) CreateDataset(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	var req CreateDatasetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -74,6 +91,9 @@ func (h *Handler) CreateDataset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetDataset(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
@@ -94,6 +114,9 @@ func (h *Handler) GetDataset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListDatasets(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	limit, offset := store.ClampPage(parseInt(r.URL.Query().Get("limit"), store.DefaultPageSize), parseInt(r.URL.Query().Get("offset"), 0))
 
 	datasets, total, err := h.store.ListDatasets(r.Context(), limit, offset)
@@ -111,6 +134,9 @@ func (h *Handler) ListDatasets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) UpdateDataset(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	var req UpdateDatasetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -146,6 +172,9 @@ func (h *Handler) UpdateDataset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) DeleteDataset(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
@@ -165,6 +194,9 @@ func (h *Handler) DeleteDataset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) AddExamples(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	var req AddExamplesRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -193,6 +225,9 @@ type CreateExperimentRequest struct {
 }
 
 func (h *Handler) CreateExperiment(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	var req CreateExperimentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -234,6 +269,9 @@ func (h *Handler) CreateExperiment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetExperiment(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
@@ -254,6 +292,9 @@ func (h *Handler) GetExperiment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListExperiments(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	limit, offset := store.ClampPage(parseInt(r.URL.Query().Get("limit"), store.DefaultPageSize), parseInt(r.URL.Query().Get("offset"), 0))
 	status := r.URL.Query().Get("status")
 
@@ -272,6 +313,9 @@ func (h *Handler) ListExperiments(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetExperimentResults(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
