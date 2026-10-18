@@ -168,7 +168,7 @@ func (o *OpenAI) ImageGeneration(ctx context.Context, req ImageRequest) (ImageRe
 		meta.Error = err.Error()
 		return ImageResponse{}, meta, fmt.Errorf("decode image response: %w", err)
 	}
-	meta.Cost = estimateOpenAIImageCost(req)
+	meta.Cost = estimateOpenAIImageCost(req, response.Usage)
 	return response, meta, nil
 }
 
@@ -279,24 +279,81 @@ func (o *OpenAI) Speech(ctx context.Context, req SpeechRequest) (io.ReadCloser, 
 	return resp.Body, contentType, meta, nil
 }
 
-func estimateOpenAIImageCost(req ImageRequest) float64 {
+// OpenAI image prices, verified 2026-10-18 against
+// https://cdn.openai.com/API/docs/txt/llms-models-pricing.txt.
+var (
+	// dall-e-3 per-image price by quality, then by size class.
+	dallE3Prices = map[string]map[string]float64{
+		"standard": {"square": 0.04, "wide": 0.08},
+		"hd":       {"square": 0.08, "wide": 0.12},
+	}
+	// dall-e-2 per-image price by size.
+	dallE2Prices = map[string]float64{"256x256": 0.016, "512x512": 0.018, "1024x1024": 0.02}
+	// gpt-image-1 per-image price by quality, then by size class, used
+	// only when the response carries no token usage.
+	gptImage1Prices = map[string]map[string]float64{
+		"low":    {"square": 0.011, "wide": 0.016},
+		"medium": {"square": 0.042, "wide": 0.063},
+		"high":   {"square": 0.167, "wide": 0.25},
+	}
+)
+
+// gpt-image-1 token prices per million tokens.
+const (
+	gptImage1TextInputPerMillion  = 5.0
+	gptImage1ImageInputPerMillion = 10.0
+	gptImage1OutputPerMillion     = 40.0
+	// unknownImageModelPrice keeps the previous flat estimate for image
+	// models that are not in the tables above.
+	unknownImageModelPrice = 0.04
+)
+
+// estimateOpenAIImageCost returns the cost of an image generation call from
+// OpenAI's published per-image (DALL-E) or per-token (gpt-image-1) prices.
+func estimateOpenAIImageCost(req ImageRequest, usage *ImageUsage) float64 {
 	n := req.N
 	if n <= 0 {
 		n = 1
 	}
-	model := strings.ToLower(req.Model)
-	quality := strings.ToLower(req.Quality)
-	size := strings.ToLower(req.Size)
-	unit := 0.04
-	if strings.Contains(model, "dall-e-2") {
-		unit = 0.02
-	} else if strings.Contains(model, "gpt-image") {
-		unit = 0.04
+	model := strings.ToLower(strings.TrimSpace(req.Model))
+	quality := strings.ToLower(strings.TrimSpace(req.Quality))
+	size := strings.ToLower(strings.TrimSpace(req.Size))
+	sizeClass := "square"
+	if size != "" && size != "auto" && size != "1024x1024" {
+		sizeClass = "wide"
 	}
-	if quality == "hd" || strings.Contains(size, "1792") {
-		unit *= 2
+	switch {
+	case model == "gpt-image-1" || strings.HasPrefix(model, "gpt-image-1-2"):
+		if usage != nil && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+			textIn, imageIn := usage.InputTokens, 0
+			if d := usage.InputTokensDetails; d != nil {
+				textIn, imageIn = d.TextTokens, d.ImageTokens
+			}
+			return (float64(textIn)*gptImage1TextInputPerMillion +
+				float64(imageIn)*gptImage1ImageInputPerMillion +
+				float64(usage.OutputTokens)*gptImage1OutputPerMillion) / 1_000_000
+		}
+		tier, ok := gptImage1Prices[quality]
+		if !ok {
+			// "auto" or unset: estimate at the medium tier.
+			tier = gptImage1Prices["medium"]
+		}
+		return float64(n) * tier[sizeClass]
+	case strings.HasPrefix(model, "dall-e-3"):
+		tier, ok := dallE3Prices[quality]
+		if !ok {
+			tier = dallE3Prices["standard"]
+		}
+		return float64(n) * tier[sizeClass]
+	case strings.HasPrefix(model, "dall-e-2"):
+		price, ok := dallE2Prices[size]
+		if !ok {
+			price = dallE2Prices["1024x1024"]
+		}
+		return float64(n) * price
+	default:
+		return float64(n) * unknownImageModelPrice
 	}
-	return float64(n) * unit
 }
 
 // Pricing for OpenAI models is resolved from the consolidated catalog
