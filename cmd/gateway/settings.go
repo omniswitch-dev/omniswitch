@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,7 +19,12 @@ import (
 )
 
 type runtimeSettings struct {
-	listenAddr             string
+	listenAddr string
+	// listenExplicit is true when OMNISWITCH_LISTEN or gateway.listen set
+	// listenAddr. Without it, an unauthenticated gateway binds to loopback.
+	listenExplicit bool
+	// metricsPublic serves /metrics without authentication.
+	metricsPublic          bool
 	dataDir                string
 	authEnabled            bool
 	cacheThreshold         float64
@@ -75,6 +81,46 @@ type runtimeSettings struct {
 	allowNoProviders       bool
 }
 
+// defaultInsecureListenAddr is the listen address used when authentication is
+// disabled and no address was configured.
+const defaultInsecureListenAddr = "127.0.0.1:8080"
+
+// insecureListenWarning returns a startup warning when the gateway runs
+// without authentication on an address reachable from other hosts.
+func insecureListenWarning(settings runtimeSettings) string {
+	if settings.authEnabled {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(settings.listenAddr)
+	if err == nil && isLoopbackHost(host) {
+		return ""
+	}
+	return fmt.Sprintf("WARNING: authentication is disabled and the gateway listens on %s. Anyone who can reach it can create owner API keys, read logs and rewrite config. Set OMNISWITCH_AUTH=true or listen on 127.0.0.1.", settings.listenAddr)
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// displayBaseURL returns an http:// base URL for startup logs. An empty or
+// unspecified host (":8080", "0.0.0.0:8080") is shown as localhost.
+func displayBaseURL(listenAddr string) string {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return "http://" + listenAddr
+	}
+	if host == "" {
+		host = "localhost"
+	} else if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
 func loadRuntimeSettings() (runtimeSettings, error) {
 	settings := runtimeSettings{
 		listenAddr:             ":8080",
@@ -116,7 +162,10 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 	}
 
 	e := &envReader{}
-	settings.listenAddr = env("OMNISWITCH_LISTEN", settings.listenAddr)
+	if value := strings.TrimSpace(os.Getenv("OMNISWITCH_LISTEN")); value != "" {
+		settings.listenAddr = value
+		settings.listenExplicit = true
+	}
 	settings.dataDir = env("OMNISWITCH_DATA", settings.dataDir)
 	settings.authEnabled = e.bool("OMNISWITCH_AUTH", settings.authEnabled)
 	settings.cacheThreshold = e.float("OMNISWITCH_CACHE_THRESHOLD", settings.cacheThreshold)
@@ -178,6 +227,12 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 	if settings.oidcJWKSURL != "" {
 		settings.authEnabled = true
 	}
+	settings.metricsPublic = e.bool("OMNISWITCH_METRICS_PUBLIC", settings.metricsPublic)
+	if !settings.authEnabled && !settings.listenExplicit {
+		// Without authentication anyone who reaches the port controls the
+		// gateway, so the implicit default only listens on loopback.
+		settings.listenAddr = defaultInsecureListenAddr
+	}
 	for model, route := range parseABConfig(os.Getenv("OMNISWITCH_AB_TEST")) {
 		settings.routes[model] = mergeRoute(settings.routes[model], route)
 	}
@@ -190,6 +245,7 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 	if cfg.Gateway.Listen != "" {
 		settings.listenAddr = cfg.Gateway.Listen
+		settings.listenExplicit = true
 	}
 	if cfg.Gateway.DataDir != "" {
 		settings.dataDir = cfg.Gateway.DataDir

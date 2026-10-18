@@ -410,6 +410,8 @@ func clearGatewayEnv(t *testing.T) {
 	for _, key := range []string{
 		"OMNISWITCH_CONFIG",
 		"OMNISWITCH_LISTEN",
+		"OMNISWITCH_METRICS_PUBLIC",
+		"OMNISWITCH_POLICY_DIR",
 		"OMNISWITCH_DATA",
 		"OMNISWITCH_AUTH",
 		"OMNISWITCH_CACHE_THRESHOLD",

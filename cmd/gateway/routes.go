@@ -290,6 +290,16 @@ func newTopMux(health *healthState, handler http.Handler) *http.ServeMux {
 	return topMux
 }
 
+// registerPublicMetrics serves /metrics on the top mux, ahead of the
+// authenticated chain, when OMNISWITCH_METRICS_PUBLIC is set. The metrics are
+// aggregate counters with no per-key data, and most Prometheus scrapers
+// cannot send an API key.
+func registerPublicMetrics(topMux *http.ServeMux, settings runtimeSettings, dash *dashboard.Handler) {
+	if settings.metricsPublic && settings.prometheusEnabled && dash != nil {
+		dash.RegisterPrometheus(topMux)
+	}
+}
+
 func buildRateLimiter(settings runtimeSettings) (*gateway.RateLimiter, func(), error) {
 	if strings.TrimSpace(settings.rateLimitRedisURL) == "" {
 		return gateway.NewRateLimiter(settings.rateLimitRequests, settings.rateLimitWindow), func() {}, nil

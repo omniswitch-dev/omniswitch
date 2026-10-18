@@ -54,7 +54,9 @@ func newSecurityTestServer(t *testing.T, modify func(*runtimeSettings)) http.Han
 		t.Fatalf("wrapGatewayMiddleware() error = %v", err)
 	}
 	t.Cleanup(closeRateLimiter)
-	return newTopMux(newHealthState(st, registry, false), handler)
+	top := newTopMux(newHealthState(st, registry, false), handler)
+	registerPublicMetrics(top, settings, dash)
+	return top
 }
 
 func doRequest(h http.Handler, method, path, key, body string, headers map[string]string) *httptest.ResponseRecorder {

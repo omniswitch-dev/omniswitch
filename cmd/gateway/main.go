@@ -178,14 +178,19 @@ func runServe() {
 	}
 	defer closeRateLimiter()
 	topMux := newTopMux(newHealthState(st, registry, settings.allowNoProviders), handler)
+	registerPublicMetrics(topMux, settings, dash)
 
 	// Print startup banner.
 	fmt.Println(banner())
 	log.Printf("OmniSwitch AI Gateway listening on %s", settings.listenAddr)
-	log.Printf("Dashboard: http://localhost%s", settings.listenAddr)
-	log.Printf("Gateway:   http://localhost%s/v1/chat/completions", settings.listenAddr)
+	baseURL := displayBaseURL(settings.listenAddr)
+	if warning := insecureListenWarning(settings); warning != "" {
+		log.Print(warning)
+	}
+	log.Printf("Dashboard: %s", baseURL)
+	log.Printf("Gateway:   %s/v1/chat/completions", baseURL)
 	if settings.mcpEnabled {
-		log.Printf("MCP:       http://localhost%s/mcp", settings.listenAddr)
+		log.Printf("MCP:       %s/mcp", baseURL)
 	}
 	log.Printf("Providers: %v", registry.Names())
 
