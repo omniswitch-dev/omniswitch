@@ -116,3 +116,23 @@ func TestViewerCannotRenderPromptWithGETBody(t *testing.T) {
 		t.Fatalf("viewer POST /api/logs = %d, want 403", rec.Code)
 	}
 }
+
+func TestAuthDisabledIgnoresSpoofedRateLimitHeaders(t *testing.T) {
+	h := newSecurityTestServer(t, func(s *runtimeSettings) {
+		s.authEnabled = false
+		s.rateLimitRequests = 2
+	})
+	allowed := 0
+	for i := range 10 {
+		rec := doRequest(h, http.MethodGet, "/api/version", "", "", map[string]string{
+			"x-omniswitch-rate-limit": "1000000",
+			"x-omniswitch-key-id":     "rotating-" + string(rune('a'+i)),
+		})
+		if rec.Code == http.StatusOK {
+			allowed++
+		}
+	}
+	if allowed != 2 {
+		t.Fatalf("allowed = %d of 10, want 2", allowed)
+	}
+}

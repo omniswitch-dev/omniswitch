@@ -270,6 +270,9 @@ func wrapGatewayMiddleware(settings runtimeSettings, st *store.Store, mux http.H
 		return nil, nil, fmt.Errorf("failed to initialize rate limiter: %w", err)
 	}
 	handler := gateway.CORSMiddlewareWithOrigins(settings.corsOrigins, gateway.LoggingMiddleware(auth.Wrap(authorize.Wrap(rateLimiter.Wrap(mux)))))
+	// Strip client-supplied identity headers before anything else runs, in
+	// every auth mode; only the auth middleware may set them.
+	handler = gateway.StripInternalIdentityHeaders(handler)
 	return handler, closeRateLimiter, nil
 }
 

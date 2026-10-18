@@ -52,11 +52,46 @@ func (a *AuthMiddleware) SetTokenAuthenticator(authenticator TokenAuthenticator)
 	a.authenticator = authenticator
 }
 
+// internalIdentityHeaders are request headers that downstream handlers
+// trust as identity, quota, or tenant attributes. Only the authentication
+// middleware may set them; any value a client sends is removed first.
+var internalIdentityHeaders = []string{
+	"x-omniswitch-key-id",
+	"x-omniswitch-rate-limit",
+	"x-omniswitch-workspace-id",
+	"x-omniswitch-organization-id",
+	"x-omniswitch-role",
+	"x-omniswitch-auth-method",
+	"x-omniswitch-user-id",
+}
+
+// stripInternalIdentityHeaders deletes every internal identity header from
+// the request.
+func stripInternalIdentityHeaders(header http.Header) {
+	for _, name := range internalIdentityHeaders {
+		header.Del(name)
+	}
+}
+
+// StripInternalIdentityHeaders removes client-supplied internal identity
+// headers (key id, rate limit, workspace, organization, role, auth method,
+// user id) regardless of the authentication mode. Use it as the outermost
+// gateway middleware so a caller can never choose its own quota, cache
+// scope, dashboard scope, or MCP policy role.
+func StripInternalIdentityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stripInternalIdentityHeaders(r.Header)
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (a *AuthMiddleware) Wrap(next http.Handler) http.Handler {
 	if !a.enabled {
-		return next
+		// Without authentication nothing may vouch for identity headers.
+		return StripInternalIdentityHeaders(next)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stripInternalIdentityHeaders(r.Header)
 		if isPublicDiscoveryRoute(r) {
 			next.ServeHTTP(w, r)
 			return
@@ -135,6 +170,11 @@ func (a *AuthMiddleware) serveIdentity(w http.ResponseWriter, r *http.Request, n
 	r.Header.Set("x-omniswitch-organization-id", identity.OrganizationID)
 	r.Header.Set("x-omniswitch-role", normalizeRole(identity.Role))
 	r.Header.Set("x-omniswitch-auth-method", identity.AuthMethod)
+	if identity.Subject != "" {
+		r.Header.Set("x-omniswitch-user-id", identity.Subject)
+	} else {
+		r.Header.Del("x-omniswitch-user-id")
+	}
 	next.ServeHTTP(w, r.WithContext(withIdentity(r.Context(), identity)))
 }
 
@@ -335,20 +375,23 @@ func remoteHost(remoteAddr string) string {
 }
 
 type localRateLimitBackend struct {
-	mu      sync.Mutex
-	windows map[string][]time.Time
+	mu        sync.Mutex
+	windows   map[string][]time.Time
+	lastSweep time.Time
+	now       func() time.Time
 }
 
 func newLocalRateLimitBackend() *localRateLimitBackend {
-	return &localRateLimitBackend{windows: make(map[string][]time.Time)}
+	return &localRateLimitBackend{windows: make(map[string][]time.Time), now: time.Now}
 }
 
 func (backend *localRateLimitBackend) Allow(_ context.Context, key string, limit int, interval time.Duration) (bool, time.Duration, error) {
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
 
-	now := time.Now()
+	now := backend.now()
 	cutoff := now.Add(-interval)
+	backend.sweepLocked(now, cutoff, interval)
 
 	timestamps := backend.windows[key]
 	var valid []time.Time
@@ -359,16 +402,41 @@ func (backend *localRateLimitBackend) Allow(_ context.Context, key string, limit
 	}
 
 	if len(valid) >= limit {
-		backend.windows[key] = valid
+		if len(valid) == 0 {
+			delete(backend.windows, key)
+		} else {
+			backend.windows[key] = valid
+		}
 		retryAfter := interval
 		if len(valid) > 0 {
-			retryAfter = time.Until(valid[0].Add(interval))
+			retryAfter = valid[0].Add(interval).Sub(now)
 		}
 		return false, retryAfter, nil
 	}
 
 	backend.windows[key] = append(valid, now)
 	return true, 0, nil
+}
+
+// sweepLocked drops keys whose newest request is older than the window, at
+// most once per interval, so one-off keys (such as many client addresses)
+// do not accumulate forever. The caller holds backend.mu.
+func (backend *localRateLimitBackend) sweepLocked(now, cutoff time.Time, interval time.Duration) {
+	if now.Sub(backend.lastSweep) < interval {
+		return
+	}
+	backend.lastSweep = now
+	for key, timestamps := range backend.windows {
+		if len(timestamps) == 0 || !timestamps[len(timestamps)-1].After(cutoff) {
+			delete(backend.windows, key)
+		}
+	}
+}
+
+func (backend *localRateLimitBackend) size() int {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	return len(backend.windows)
 }
 
 // LoggingMiddleware logs every request.
