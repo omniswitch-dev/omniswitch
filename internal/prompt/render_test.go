@@ -24,6 +24,13 @@ func TestRenderTemplateSinglePass(t *testing.T) {
 		{"no recursion", "{{a}}", map[string]string{"a": "{{b}}{{b}}", "b": "boom"}, "{{b}}{{b}}"},
 		{"value with own placeholder", "{{a}}", map[string]string{"a": "{{a}}"}, "{{a}}"},
 		{"empty template", "", map[string]string{"a": "x"}, ""},
+		// Names outside \w were filled by earlier releases and still are.
+		{"hyphenated name", "Dear {{first-name}}", map[string]string{"first-name": "Ana"}, "Dear Ana"},
+		{"dotted name", "{{user.name}}", map[string]string{"user.name": "Ana"}, "Ana"},
+		{"non-ASCII name", "Bonjour {{prénom}}", map[string]string{"prénom": "Zoé"}, "Bonjour Zoé"},
+		{"exact lookup", "{{ name }} {{name}}", map[string]string{"name": "Ana"}, "{{ name }} Ana"},
+		{"spaced name", "{{ name }}", map[string]string{" name ": "Ana"}, "Ana"},
+		{"extra braces", "{{{name}}}", map[string]string{"name": "Ana"}, "{Ana}"},
 	}
 	for _, tc := range cases {
 		got, err := renderTemplate(tc.template, tc.vars, MaxRenderedBytes)

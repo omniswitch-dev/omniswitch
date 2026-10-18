@@ -149,7 +149,7 @@ func (h *Handler) RenderPrompt(w http.ResponseWriter, r *http.Request) {
 func renderTemplate(template string, variables map[string]string, limit int) (string, error) {
 	var out strings.Builder
 	last := 0
-	for _, match := range varPattern.FindAllStringSubmatchIndex(template, -1) {
+	for _, match := range placeholderPattern.FindAllStringSubmatchIndex(template, -1) {
 		start, end := match[0], match[1]
 		value, ok := variables[template[match[2]:match[3]]]
 		if !ok {
@@ -169,7 +169,14 @@ func renderTemplate(template string, variables map[string]string, limit int) (st
 	return out.String(), nil
 }
 
+// varPattern finds the variable names listed when a prompt is stored.
 var varPattern = regexp.MustCompile(`\{\{(\w+)\}\}`)
+
+// placeholderPattern finds the placeholders that rendering fills. It
+// accepts any name without braces, such as {{first-name}}, {{user.name}} or
+// {{prénom}}, and the name is looked up exactly as written, as earlier
+// releases did with strings.ReplaceAll.
+var placeholderPattern = regexp.MustCompile(`\{\{([^{}]+)\}\}`)
 
 func extractVariables(template string) []string {
 	matches := varPattern.FindAllStringSubmatch(template, -1)
