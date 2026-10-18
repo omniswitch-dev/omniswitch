@@ -122,7 +122,7 @@ func NewMultiHandler(engine policy.Engine, auditor audit.Logger, configs []Targe
 		engine:  engine,
 		auditor: auditor,
 		targets: make(map[string]*target, len(configs)),
-		client:  &http.Client{Transport: transport},
+		client:  &http.Client{Transport: transport, CheckRedirect: sameOriginRedirect},
 		tokens:  newTokenCache(),
 	}
 	for index, config := range configs {
@@ -148,6 +148,42 @@ func NewMultiHandler(engine policy.Engine, auditor audit.Logger, configs []Targe
 		}
 	}
 	return handler, nil
+}
+
+// maxRedirects matches the net/http default redirect limit.
+const maxRedirects = 10
+
+// sameOriginRedirect follows a redirect only when it keeps the scheme, host
+// and port of the original request. Operator-configured headers (API keys)
+// and, on a 307/308, a token exchange client_secret in the body would
+// otherwise be sent to whatever host the upstream names.
+func sameOriginRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if origin := via[0].URL; !sameOrigin(origin, req.URL) {
+		return fmt.Errorf("refusing redirect from %s://%s to %s://%s", origin.Scheme, origin.Host, req.URL.Scheme, req.URL.Host)
+	}
+	return nil
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectivePort(a) == effectivePort(b)
+}
+
+func effectivePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	}
+	return ""
 }
 
 func newTarget(name string, config TargetConfig, engine policy.Engine) (*target, error) {
