@@ -74,6 +74,11 @@ func TestSQLiteCacheRoundTripAndExpiration(t *testing.T) {
 		t.Fatalf("NewSQLiteCache() error = %v", err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
+	// A fake clock keeps the test independent of how long the writes take.
+	// The entry expires on a whole second, where RFC3339Nano strings used
+	// to sort after later fractional times.
+	clock := time.Date(2026, 10, 18, 12, 0, 0, 750_000_000, time.UTC)
+	c.now = func() time.Time { return clock }
 
 	resp := &provider.ChatResponse{
 		ID:      "chat_cached",
@@ -98,7 +103,7 @@ func TestSQLiteCacheRoundTripAndExpiration(t *testing.T) {
 		t.Fatalf("Get() = %+v, %v, want cached response", got, ok)
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	clock = clock.Add(750 * time.Millisecond)
 	_, ok, err = c.Get("cache-key")
 	if err != nil {
 		t.Fatalf("expired Get() error = %v", err)
