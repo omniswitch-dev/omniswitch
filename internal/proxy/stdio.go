@@ -50,6 +50,12 @@ type stdioClient struct {
 	closed bool
 
 	nextID atomic.Uint64
+
+	// inflight maps a client request (caller scope plus the client's id)
+	// to the bridge id of the call in flight, so a client's
+	// notifications/cancelled can be rewritten to the id the server saw.
+	inflightMu sync.Mutex
+	inflight   map[string]json.RawMessage
 }
 
 type stdioProcess struct {
@@ -80,12 +86,15 @@ func newStdioClient(command string, args []string, environment map[string]string
 		environment: cloneHeaders(environment),
 		timeout:     defaultCallTimeout,
 		startLock:   make(chan struct{}, 1),
+		inflight:    map[string]json.RawMessage{},
 	}, nil
 }
 
 // Call forwards one JSON-RPC request (which must carry an id) and returns the
-// matching response with the client's id restored.
-func (client *stdioClient) Call(ctx context.Context, request []byte) ([]byte, error) {
+// matching response with the client's id restored. When scope is not empty
+// the call is registered under scope and the client's id while it is in
+// flight, so Cancel can map the client's cancellation to it.
+func (client *stdioClient) Call(ctx context.Context, request []byte, scope string) ([]byte, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(request, &fields); err != nil {
 		return nil, fmt.Errorf("decode stdio MCP request: %w", err)
@@ -98,7 +107,11 @@ func (client *stdioClient) Call(ctx context.Context, request []byte) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
-	response, err := client.roundTrip(ctx, process, fields)
+	track := ""
+	if scope != "" {
+		track = inflightKey(scope, clientID)
+	}
+	response, err := client.roundTrip(ctx, process, fields, track)
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +131,57 @@ func (client *stdioClient) Notify(ctx context.Context, message []byte) error {
 		return err
 	}
 	return client.write(ctx, process, message)
+}
+
+// Cancel forwards a client's notifications/cancelled for a call made through
+// Call with the same scope, rewriting params.requestId to the call's bridge
+// id. It reports false (and sends nothing) when no such call is in flight:
+// the server never saw the client's id, so forwarding it would cancel
+// nothing or, worse, an unrelated request.
+func (client *stdioClient) Cancel(ctx context.Context, scope string, message []byte) (bool, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(message, &fields); err != nil {
+		return false, nil
+	}
+	var params map[string]json.RawMessage
+	if err := json.Unmarshal(fields["params"], &params); err != nil || params == nil {
+		return false, nil
+	}
+	requestID, ok := params["requestId"]
+	if !ok {
+		return false, nil
+	}
+	client.inflightMu.Lock()
+	bridgeID, ok := client.inflight[inflightKey(scope, requestID)]
+	client.inflightMu.Unlock()
+	if !ok {
+		return false, nil
+	}
+	params["requestId"] = bridgeID
+	encodedParams, err := json.Marshal(params)
+	if err != nil {
+		return true, err
+	}
+	fields["params"] = encodedParams
+	line, err := json.Marshal(fields)
+	if err != nil {
+		return true, err
+	}
+	client.mu.Lock()
+	process := client.proc
+	client.mu.Unlock()
+	if process == nil || process.hasExited() {
+		return true, nil // the call fails on its own when the process exits
+	}
+	return true, client.write(ctx, process, line)
+}
+
+func inflightKey(scope string, clientID json.RawMessage) string {
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, clientID); err != nil {
+		return scope + "\x00" + string(clientID)
+	}
+	return scope + "\x00" + compact.String()
 }
 
 // InitializeResult returns the server's cached initialize result, starting
@@ -143,8 +207,20 @@ func (client *stdioClient) bridgeID() json.RawMessage {
 
 // roundTrip assigns a bridge id, writes the request and waits for the
 // response, the context, the per-call timeout, or process exit.
-func (client *stdioClient) roundTrip(ctx context.Context, process *stdioProcess, fields map[string]json.RawMessage) ([]byte, error) {
+func (client *stdioClient) roundTrip(ctx context.Context, process *stdioProcess, fields map[string]json.RawMessage, track string) ([]byte, error) {
 	id := client.bridgeID()
+	if track != "" {
+		client.inflightMu.Lock()
+		client.inflight[track] = id
+		client.inflightMu.Unlock()
+		defer func() {
+			client.inflightMu.Lock()
+			if bytes.Equal(client.inflight[track], id) {
+				delete(client.inflight, track)
+			}
+			client.inflightMu.Unlock()
+		}()
+	}
 	outgoing := make(map[string]json.RawMessage, len(fields))
 	for key, value := range fields {
 		outgoing[key] = value
@@ -279,7 +355,7 @@ func (client *stdioClient) handshake(ctx context.Context, process *stdioProcess)
 		"jsonrpc": json.RawMessage(`"2.0"`),
 		"method":  json.RawMessage(`"initialize"`),
 		"params":  json.RawMessage(params),
-	})
+	}, "")
 	if err != nil {
 		return err
 	}

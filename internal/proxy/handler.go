@@ -282,6 +282,9 @@ func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, rpcR
 		Session: model.Session{ID: r.Header.Get("Mcp-Session-Id")},
 	}, model.Decision{Allowed: true, Rule: "passthrough", Reason: "forwarded without tool policy evaluation"})
 
+	if rpcReq.Method == "notifications/cancelled" && !rpcReq.HasID && h.forwardStdioCancellation(w, r, rpcReq) {
+		return
+	}
 	if tgt.stdio != nil {
 		switch {
 		case rpcReq.Method == "":
@@ -306,6 +309,44 @@ func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, rpcR
 		}
 	}
 	h.forwardToTarget(w, r, tgt, rpcReq, h.forwardBody(r.Context(), rpcReq, ""))
+}
+
+// forwardStdioCancellation routes a client's notifications/cancelled to the
+// stdio target running the call, with the request id rewritten to the
+// bridge id that target saw. It reports whether it answered the request.
+// A cancellation for an unknown or finished call is dropped when the
+// default target is stdio; otherwise the caller forwards it to the default
+// HTTP target as before.
+func (h *Handler) forwardStdioCancellation(w http.ResponseWriter, r *http.Request, rpcReq mcp.Request) bool {
+	body := h.forwardBody(r.Context(), rpcReq, "")
+	scope := stdioScope(r)
+	for _, key := range h.targetOrder {
+		tgt := h.targets[key]
+		if tgt.stdio == nil {
+			continue
+		}
+		found, err := tgt.stdio.Cancel(r.Context(), scope, body)
+		if !found {
+			continue
+		}
+		if err != nil {
+			writeNotificationError(w, http.StatusBadGateway, mcp.CodeInternalError, "Forwarding failed", err)
+			return true
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return true
+	}
+	if h.targets[h.defaultName].stdio != nil {
+		w.WriteHeader(http.StatusAccepted)
+		return true
+	}
+	return false
+}
+
+// stdioScope identifies the caller whose request ids a stdio call is
+// registered under: the authenticated key and the MCP session.
+func stdioScope(r *http.Request) string {
+	return "key=" + r.Header.Get("x-omniswitch-key-id") + "\x00session=" + r.Header.Get("Mcp-Session-Id")
 }
 
 func (h *Handler) handleToolCall(w http.ResponseWriter, r *http.Request, rpcReq mcp.Request) {
@@ -594,7 +635,7 @@ func (h *Handler) forwardToTarget(w http.ResponseWriter, r *http.Request, tgt *t
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		payload, err := tgt.stdio.Call(r.Context(), body)
+		payload, err := tgt.stdio.Call(r.Context(), body, stdioScope(r))
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, mcp.ErrorResponse(rpcReq.ID, mcp.CodeInternalError, "Forwarding failed", err))
 			return
@@ -626,7 +667,7 @@ func (h *Handler) forwardToTarget(w http.ResponseWriter, r *http.Request, tgt *t
 // callTarget performs one buffered request/response exchange with a target.
 func (h *Handler) callTarget(ctx context.Context, tgt *target, body []byte, incoming http.Header, forwardSession bool) (int, http.Header, []byte, error) {
 	if tgt.stdio != nil {
-		payload, err := tgt.stdio.Call(ctx, body)
+		payload, err := tgt.stdio.Call(ctx, body, "")
 		if err != nil {
 			return 0, nil, nil, err
 		}
