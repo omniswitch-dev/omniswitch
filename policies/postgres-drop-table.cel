@@ -1,4 +1,5 @@
 // name: postgres-drop-table
 // reason: Dropping table {{resource.name}} is forbidden.
-tool.name == "postgres" &&
-action.name == "drop_table"
+// version: v2
+(tool.name == "postgres" || target.name == "postgres") &&
+(action.operation == "drop_table" || action.name == "drop_table")

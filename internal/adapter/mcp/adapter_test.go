@@ -45,7 +45,7 @@ func TestToToolRequest(t *testing.T) {
 				}
 			}`,
 			wantTool: "postgres",
-			wantAct:  "drop_table",
+			wantAct:  "delete",
 			wantRes:  "ledger_staging",
 			wantEnv:  "staging",
 		},
