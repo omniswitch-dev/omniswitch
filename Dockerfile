@@ -1,4 +1,8 @@
-FROM golang:1.26-bookworm AS build
+# Pin the patch release: the golang image sets GOTOOLCHAIN=local, so a stale
+# cached golang:1.26 tag would build with an older 1.26.x and ignore the
+# `toolchain go1.26.9` line in go.mod that the vulnerability fixes rely on.
+# Keep this in sync with the toolchain line.
+FROM golang:1.26.9-bookworm AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
