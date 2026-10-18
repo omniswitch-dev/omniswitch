@@ -44,3 +44,21 @@ func TestInsertAPIKeyKeepsSpend(t *testing.T) {
 		}
 	})
 }
+
+func TestUpsertUserReturnsStoredID(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, st *Store) {
+		ctx := context.Background()
+		created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		u1, err := st.UpsertUser(ctx, User{ID: "u1", Email: "a@x", Name: "A", CreatedAt: created})
+		if err != nil || u1.ID != "u1" {
+			t.Fatalf("UpsertUser(new) = %+v, %v", u1, err)
+		}
+		u2, err := st.UpsertUser(ctx, User{ID: "u2", Email: "a@x", Name: "B"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if u2.ID != "u1" || !u2.CreatedAt.Equal(created) || u2.Name != "B" {
+			t.Fatalf("UpsertUser(existing email) = %+v, want stored id u1 and created_at", u2)
+		}
+	})
+}

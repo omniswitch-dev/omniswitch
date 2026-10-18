@@ -1894,22 +1894,39 @@ func (s *Store) GetWorkspaceByID(ctx context.Context, id string) (Workspace, err
 	return workspace, nil
 }
 
+// InsertUser upserts user by email. Use UpsertUser to learn the stored ID.
 func (s *Store) InsertUser(ctx context.Context, user User) error {
+	_, err := s.UpsertUser(ctx, user)
+	return err
+}
+
+// UpsertUser inserts user, or updates the name and metadata of the existing
+// user with the same email, and returns the stored row. On an existing email
+// the stored ID and created_at win over the ones in user, so callers must
+// use the returned ID (for example for workspace memberships).
+func (s *Store) UpsertUser(ctx context.Context, user User) (User, error) {
 	if user.CreatedAt.IsZero() {
 		user.CreatedAt = time.Now().UTC()
 	}
 	metadata, _ := json.Marshal(user.Metadata)
-	_, err := s.exec(ctx,
+	var id, createdAt string
+	err := s.writeQueryRow(ctx,
 		`INSERT INTO users (id, email, name, created_at, metadata)
 		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(email) DO UPDATE SET name = excluded.name, metadata = excluded.metadata`,
+		ON CONFLICT(email) DO UPDATE SET name = excluded.name, metadata = excluded.metadata
+		RETURNING id, created_at`,
 		user.ID,
 		user.Email,
 		user.Name,
 		formatTime(user.CreatedAt),
 		string(metadata),
-	)
-	return err
+	).Scan(&id, &createdAt)
+	if err != nil {
+		return user, err
+	}
+	user.ID = id
+	user.CreatedAt = parseTime(createdAt)
+	return user, nil
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {

@@ -135,11 +135,14 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().UTC(),
 		Metadata:  req.Metadata,
 	}
-	if err := h.store.InsertUser(r.Context(), user); err != nil {
+	// An existing email keeps its stored ID; respond with that ID, not the
+	// fresh one generated above, which was never stored.
+	stored, err := h.store.UpsertUser(r.Context(), user)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, user)
+	writeJSON(w, http.StatusCreated, stored)
 }
 
 func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
