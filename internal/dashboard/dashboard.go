@@ -25,6 +25,9 @@ var staticFiles embed.FS
 type Handler struct {
 	store      *store.Store
 	configPath string
+	// onConfigChange, when set, is called with the id and name of a stored
+	// gateway config after /api/configs changed it.
+	onConfigChange func(refs ...string)
 }
 
 // New creates a new dashboard handler.
@@ -34,6 +37,19 @@ func New(st *store.Store) *Handler {
 
 func (h *Handler) SetConfigPath(path string) {
 	h.configPath = strings.TrimSpace(path)
+}
+
+// SetConfigChangeHook sets a function that is called with the id and name
+// of a stored gateway config after /api/configs creates, updates, enables,
+// disables or deletes it. The gateway uses it to drop its cached copy.
+func (h *Handler) SetConfigChangeHook(hook func(refs ...string)) {
+	h.onConfigChange = hook
+}
+
+func (h *Handler) configChanged(refs ...string) {
+	if h.onConfigChange != nil {
+		h.onConfigChange(refs...)
+	}
 }
 
 // RegisterRoutes adds dashboard routes to the given mux.
@@ -254,6 +270,7 @@ func (h *Handler) configs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		h.configChanged(record.ID, record.Name)
 		writeJSON(w, http.StatusCreated, record)
 	case http.MethodPatch:
 		ref := strings.TrimSpace(r.URL.Query().Get("id"))
@@ -275,6 +292,7 @@ func (h *Handler) configs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "config not found")
 			return
 		}
+		h.configChanged(ref)
 		writeJSON(w, http.StatusOK, map[string]any{"enabled": *req.Enabled})
 	case http.MethodDelete:
 		ref := strings.TrimSpace(r.URL.Query().Get("id"))
@@ -289,6 +307,7 @@ func (h *Handler) configs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "config not found")
 			return
 		}
+		h.configChanged(ref)
 		writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

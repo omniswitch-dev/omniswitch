@@ -45,6 +45,11 @@ type routeHandlers struct {
 // authentication, authorization, and rate-limit middleware.
 func newGatewayMux(h routeHandlers) *http.ServeMux {
 	mux := http.NewServeMux()
+	if h.dash != nil && h.gateway != nil {
+		// Changes made through /api/configs drop the cached config
+		// routers of this replica at once.
+		h.dash.SetConfigChangeHook(h.gateway.InvalidateConfigRouters)
+	}
 	registerGatewayAPIRoutes(mux, h.gateway)
 	registerInfoRoutes(mux, h.settings, h.registry)
 	if h.mcp != nil {
