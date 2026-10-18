@@ -108,6 +108,9 @@ type Prompt struct {
 	CreatedAt time.Time         `json:"created_at"`
 	UpdatedAt time.Time         `json:"updated_at"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
+
+	// WorkspaceID is the prompt's namespace; empty is the global namespace.
+	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
 // GuardrailEvent logs a guardrail trigger.
@@ -583,6 +586,7 @@ var legacyColumns = []struct{ table, column, definition string }{
 	{"api_keys", "spend_usd", "{{FLOAT}} DEFAULT 0"},
 	{"api_keys", "workspace_id", "TEXT"},
 	{"api_keys", "role", "TEXT"},
+	{"prompts", "workspace_id", "TEXT NOT NULL DEFAULT ''"},
 	{"semantic_cache", "cache_key", "TEXT"},
 	{"semantic_cache", "expires_at", "TEXT"},
 	// Tenant of the caller. A constant default keeps ADD COLUMN a
@@ -1139,61 +1143,23 @@ func (s *Store) InsertPrompt(ctx context.Context, p Prompt) error {
 	vars, _ := json.Marshal(p.Variables)
 	meta, _ := json.Marshal(p.Metadata)
 	_, err := s.exec(ctx,
-		`INSERT INTO prompts (id, name, version, template, variables, created_at, updated_at, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, p.Name, p.Version, p.Template, string(vars),
+		`INSERT INTO prompts (id, workspace_id, name, version, template, variables, created_at, updated_at, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, p.WorkspaceID, p.Name, p.Version, p.Template, string(vars),
 		formatTime(p.CreatedAt), formatTime(p.UpdatedAt), string(meta),
 	)
 	return err
 }
 
-// ListPrompts returns all prompts.
+// ListPrompts returns all prompts in every workspace namespace.
 func (s *Store) ListPrompts(ctx context.Context) ([]Prompt, error) {
-	rows, err := s.query(ctx,
-		"SELECT id, name, COALESCE(version, 1), template, COALESCE(variables, ''), created_at, updated_at FROM prompts ORDER BY updated_at DESC")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var prompts []Prompt
-	for rows.Next() {
-		var p Prompt
-		var createdAt, updatedAt, varsStr string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Version, &p.Template, &varsStr, &createdAt, &updatedAt); err != nil {
-			return nil, err
-		}
-		p.CreatedAt = parseTime(createdAt)
-		p.UpdatedAt = parseTime(updatedAt)
-		_ = json.Unmarshal([]byte(varsStr), &p.Variables)
-		prompts = append(prompts, p)
-	}
-	return prompts, rows.Err()
+	return s.listPrompts(ctx, "SELECT "+promptColumns+" FROM prompts ORDER BY updated_at DESC")
 }
 
+// ListPromptVersions returns every version of name in the global namespace
+// (the empty workspace ID). Use ListWorkspacePromptVersions for a workspace.
 func (s *Store) ListPromptVersions(ctx context.Context, name string) ([]Prompt, error) {
-	rows, err := s.query(ctx,
-		"SELECT id, name, COALESCE(version, 1), template, COALESCE(variables, ''), created_at, updated_at FROM prompts WHERE name = ? ORDER BY version DESC",
-		name,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var prompts []Prompt
-	for rows.Next() {
-		var p Prompt
-		var createdAt, updatedAt, varsStr string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Version, &p.Template, &varsStr, &createdAt, &updatedAt); err != nil {
-			return nil, err
-		}
-		p.CreatedAt = parseTime(createdAt)
-		p.UpdatedAt = parseTime(updatedAt)
-		_ = json.Unmarshal([]byte(varsStr), &p.Variables)
-		prompts = append(prompts, p)
-	}
-	return prompts, rows.Err()
+	return s.ListWorkspacePromptVersions(ctx, "", name)
 }
 
 // maxPromptVersionAttempts bounds CreatePromptVersion retries when a
@@ -1203,21 +1169,22 @@ const maxPromptVersionAttempts = 5
 // CreatePromptVersion stores p as the next version of p.Name and returns it
 // with Version set. The version is computed inside the INSERT, so two
 // concurrent creates cannot both read the same MAX(version) and store a
-// duplicate. On PostgreSQL a per-name advisory lock serializes creates for
-// one name; on SQLite the single writer connection does. If the unique
-// (name, version) index rejects the row anyway, the insert is retried.
+// duplicate. Versions are numbered per (workspace, name). On PostgreSQL a
+// per-name advisory lock serializes creates for one name; on SQLite the
+// single writer connection does. If the unique (workspace_id, name,
+// version) index rejects the row anyway, the insert is retried.
 func (s *Store) CreatePromptVersion(ctx context.Context, p Prompt) (Prompt, error) {
 	vars, _ := json.Marshal(p.Variables)
 	meta, _ := json.Marshal(p.Metadata)
-	query := s.txSQL(`INSERT INTO prompts (id, name, version, template, variables, created_at, updated_at, metadata)
-		SELECT CAST(? AS TEXT), CAST(? AS TEXT), COALESCE(MAX(version), 0) + 1, CAST(? AS TEXT), CAST(? AS TEXT),
+	query := s.txSQL(`INSERT INTO prompts (id, workspace_id, name, version, template, variables, created_at, updated_at, metadata)
+		SELECT CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), COALESCE(MAX(version), 0) + 1, CAST(? AS TEXT), CAST(? AS TEXT),
 			CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT)
-		FROM prompts WHERE name = ?
+		FROM prompts WHERE workspace_id = ? AND name = ?
 		RETURNING version`)
-	args := []any{p.ID, p.Name, p.Template, string(vars), formatTime(p.CreatedAt), formatTime(p.UpdatedAt), string(meta), p.Name}
+	args := []any{p.ID, p.WorkspaceID, p.Name, p.Template, string(vars), formatTime(p.CreatedAt), formatTime(p.UpdatedAt), string(meta), p.WorkspaceID, p.Name}
 	var lastErr error
 	for attempt := 0; attempt < maxPromptVersionAttempts; attempt++ {
-		version, err := s.insertPromptVersion(ctx, query, p.Name, args)
+		version, err := s.insertPromptVersion(ctx, query, p.WorkspaceID+"/"+p.Name, args)
 		if err == nil {
 			p.Version = version
 			return p, nil
@@ -1230,14 +1197,14 @@ func (s *Store) CreatePromptVersion(ctx context.Context, p Prompt) (Prompt, erro
 	return p, fmt.Errorf("create prompt version: %w", lastErr)
 }
 
-func (s *Store) insertPromptVersion(ctx context.Context, query, name string, args []any) (int, error) {
+func (s *Store) insertPromptVersion(ctx context.Context, query, lockKey string, args []any) (int, error) {
 	tx, err := s.wdb.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	if s.pg {
-		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", "omniswitch.prompt:"+name); err != nil {
+		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", "omniswitch.prompt:"+lockKey); err != nil {
 			return 0, err
 		}
 	}
@@ -1261,20 +1228,10 @@ func isUniqueViolation(err error) bool {
 	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
-// GetPrompt returns a specific prompt by ID.
+// GetPrompt returns a specific prompt by ID, in any workspace namespace.
+// Use GetWorkspacePrompt to stay inside one namespace.
 func (s *Store) GetPrompt(ctx context.Context, id string) (Prompt, error) {
-	var p Prompt
-	var createdAt, updatedAt, varsStr string
-	err := s.queryRow(ctx,
-		"SELECT id, name, COALESCE(version, 1), template, COALESCE(variables, ''), created_at, updated_at FROM prompts WHERE id = ?", id,
-	).Scan(&p.ID, &p.Name, &p.Version, &p.Template, &varsStr, &createdAt, &updatedAt)
-	if err != nil {
-		return p, err
-	}
-	p.CreatedAt = parseTime(createdAt)
-	p.UpdatedAt = parseTime(updatedAt)
-	_ = json.Unmarshal([]byte(varsStr), &p.Variables)
-	return p, nil
+	return scanPrompt(s.queryRow(ctx, "SELECT "+promptColumns+" FROM prompts WHERE id = ?", id))
 }
 
 // InsertGuardrailEvent stores a guardrail event.

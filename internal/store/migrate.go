@@ -177,8 +177,11 @@ func (s *Store) migrate() error {
 			}
 		}
 	}
-	if err := s.optionalIndex(ctx, tx, schemaIndex{name: "idx_prompts_name_version", table: "prompts", columns: "(name, version)", unique: true},
-		"find the duplicate rows with: SELECT name, version, COUNT(*) FROM prompts GROUP BY name, version HAVING COUNT(*) > 1; "+
+	// Prompt versions are unique per workspace namespace. The index
+	// replaces the global (name, version) index, which would stop two
+	// workspaces from using the same prompt name.
+	if err := s.optionalIndex(ctx, tx, schemaIndex{name: "idx_prompts_workspace_name_version", table: "prompts", columns: "(workspace_id, name, version)", unique: true, replaces: "idx_prompts_name_version"},
+		"find the duplicate rows with: SELECT workspace_id, name, version, COUNT(*) FROM prompts GROUP BY workspace_id, name, version HAVING COUNT(*) > 1; "+
 			"delete or renumber them and the index is created on the next start"); err != nil {
 		return err
 	}
@@ -198,21 +201,33 @@ func (s *Store) migrate() error {
 // unique index over rows that already hold duplicates. A failure is logged
 // with hint and the migration continues: startup must not fail on old data.
 // The savepoint keeps a PostgreSQL error from aborting the whole
-// transaction.
+// transaction. ix.replaces is dropped only once ix exists, so a failed
+// build keeps the older index.
 func (s *Store) optionalIndex(ctx context.Context, tx *sql.Tx, ix schemaIndex, hint string) error {
 	if s.pg {
 		exists, _, err := pgIndexState(ctx, tx, ix.name)
 		if err != nil {
 			return fmt.Errorf("migration failed: check index %s: %w", ix.name, err)
 		}
-		if exists {
+		replacedExists := false
+		if ix.replaces != "" {
+			if replacedExists, _, err = pgIndexState(ctx, tx, ix.replaces); err != nil {
+				return fmt.Errorf("migration failed: check index %s: %w", ix.replaces, err)
+			}
+		}
+		if exists && !replacedExists {
 			return nil
+		}
+		if exists {
+			return s.dropReplacedIndex(ctx, tx, ix)
 		}
 	}
 	if _, err := tx.ExecContext(ctx, "SAVEPOINT optional_index"); err != nil {
 		return fmt.Errorf("migration failed: savepoint: %w", err)
 	}
+	created := true
 	if _, err := tx.ExecContext(ctx, ix.createSQL(false)); err != nil {
+		created = false
 		log.Printf("store: warning: could not create index %s, continuing without it: %v; %s", ix.name, err, hint)
 		if _, rbErr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT optional_index"); rbErr != nil {
 			return fmt.Errorf("migration failed: rollback to savepoint: %w", rbErr)
@@ -220,6 +235,20 @@ func (s *Store) optionalIndex(ctx context.Context, tx *sql.Tx, ix schemaIndex, h
 	}
 	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT optional_index"); err != nil {
 		return fmt.Errorf("migration failed: release savepoint: %w", err)
+	}
+	if created {
+		return s.dropReplacedIndex(ctx, tx, ix)
+	}
+	return nil
+}
+
+// dropReplacedIndex drops the index that ix supersedes, if any.
+func (s *Store) dropReplacedIndex(ctx context.Context, tx *sql.Tx, ix schemaIndex) error {
+	if ix.replaces == "" {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, "DROP INDEX IF EXISTS "+ix.replaces); err != nil {
+		return fmt.Errorf("migration failed: drop index %s: %w", ix.replaces, err)
 	}
 	return nil
 }

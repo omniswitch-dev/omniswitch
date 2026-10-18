@@ -72,7 +72,7 @@ func TestUniquePromptIndexIsOptional(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.wdb.Exec("DROP INDEX idx_prompts_name_version"); err != nil {
+	if _, err := st.wdb.Exec("DROP INDEX idx_prompts_workspace_name_version"); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"a", "b"} {
@@ -111,7 +111,7 @@ func TestPostgresUniquePromptIndexIsOptional(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.wdb.Exec("DROP INDEX idx_prompts_name_version"); err != nil {
+	if _, err := st.wdb.Exec("DROP INDEX idx_prompts_workspace_name_version"); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"a", "b"} {
