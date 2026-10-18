@@ -64,10 +64,28 @@ OPENAI_API_KEY=sk-... go run ./cmd/gateway serve
 The gateway starts on `http://localhost:8080` and serves the dashboard at
 `http://localhost:8080/`.
 
-Run with Docker Compose:
+Authentication is **off by default**. With auth off and no listen address
+configured, the gateway listens on `127.0.0.1:8080` only, so it is reachable
+from the same machine and nowhere else. To accept traffic from other hosts,
+turn on authentication and give the first start a bootstrap admin key:
 
 ```bash
-docker compose up -d
+export OMNISWITCH_BOOTSTRAP_API_KEY=$(openssl rand -hex 32)
+OMNISWITCH_AUTH=true OMNISWITCH_LISTEN=:8080 OPENAI_API_KEY=sk-... omniswitch serve
+curl -H "Authorization: Bearer $OMNISWITCH_BOOTSTRAP_API_KEY" http://localhost:8080/v1/models
+```
+
+With auth on, the gateway refuses to start when no API key exists (unless OIDC
+is configured), so the first start needs `OMNISWITCH_BOOTSTRAP_API_KEY`. The
+bootstrap key is an owner key; use it to create named keys through `/api/keys`
+(see [docs/API.md](docs/API.md)).
+
+Run with Docker Compose (auth is on, so the bootstrap key is required and
+compose refuses to start without it):
+
+```bash
+export OMNISWITCH_BOOTSTRAP_API_KEY=$(openssl rand -hex 32)
+OPENAI_API_KEY=sk-... docker compose up -d
 ```
 
 Run on Kubernetes:

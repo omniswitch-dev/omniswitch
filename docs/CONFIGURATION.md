@@ -163,9 +163,87 @@ Supported provider types:
 
 - `openai`
 - `anthropic`
-- `google`
+- `google` (alias `gemini`)
 - `groq`
-- `custom`
+- `cohere` (native Cohere v2 chat adapter)
+- `azure` (alias `azure-openai`, native Azure OpenAI adapter)
+- `bedrock` (alias `aws-bedrock`, native AWS Bedrock Converse adapter with SigV4 signing)
+- `custom` (any OpenAI-compatible endpoint)
+- the OpenAI-compatible presets listed below (`mistral`, `xai`, ...)
+
+Every account needs `name` and `type`. For `openai`, `anthropic`, `google`,
+`groq`, and `cohere`, `api_key_env` names the variable that holds the key
+(default: the provider's standard variable such as `OPENAI_API_KEY`). Setting
+`base_url` on any non-Azure, non-Bedrock account turns it into an
+OpenAI-compatible custom provider, which also honors `models` and
+`extra_headers`. An account whose credentials are missing is skipped with a
+log line rather than failing startup.
+
+Providers can also be registered from the environment alone, with no config
+entry: setting `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`,
+`GROQ_API_KEY`, or `COHERE_API_KEY` registers that provider, and the Azure and
+Bedrock variables below register `azure` and `bedrock`.
+
+### Azure OpenAI
+
+```yaml
+providers:
+  - name: azure-prod
+    type: azure
+    endpoint: https://YOUR_RESOURCE.openai.azure.com   # or base_url
+    api_key_env: AZURE_OPENAI_API_KEY                   # default
+    api_version: "2024-10-21"                           # default
+    models: [gpt-4o, gpt-4o-mini]                       # deployment names
+```
+
+Requests go to `{endpoint}/openai/deployments/{model}/chat/completions`, so
+each model name is an Azure deployment name. `endpoint` is required (config
+validation rejects an Azure account without an absolute HTTP(S) endpoint); it
+falls back to `AZURE_OPENAI_ENDPOINT` at registration time. Without a config
+entry, setting both `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_ENDPOINT`
+registers a provider named `azure`, with optional `AZURE_OPENAI_MODELS`
+(comma-separated deployment names, default `gpt-4o,gpt-4o-mini`) and
+`AZURE_OPENAI_API_VERSION`.
+
+### AWS Bedrock
+
+```yaml
+providers:
+  - name: bedrock-us
+    type: bedrock
+    region: us-east-1                              # required
+    aws_access_key_env: AWS_ACCESS_KEY_ID          # default
+    aws_secret_key_env: AWS_SECRET_ACCESS_KEY      # default
+    aws_session_token_env: AWS_SESSION_TOKEN       # default, optional
+    models: [anthropic.claude-3-5-sonnet-20240620-v1:0]
+    guardrail_id: abc123                           # optional Bedrock Guardrail
+    guardrail_version: "1"
+```
+
+The adapter calls the Bedrock Converse API with SigV4-signed requests using
+static credentials read from the named environment variables. Without a config
+entry, setting `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` registers a
+provider named `bedrock` in `AWS_REGION` (then `AWS_DEFAULT_REGION`, then
+`us-east-1`), with optional `AWS_SESSION_TOKEN`, `OMNISWITCH_BEDROCK_MODELS`
+(comma-separated model or inference-profile IDs; defaults come from the model
+catalog), and `OMNISWITCH_BEDROCK_GUARDRAIL_ID` /
+`OMNISWITCH_BEDROCK_GUARDRAIL_VERSION`.
+
+### Cohere
+
+```yaml
+providers:
+  - name: cohere-prod
+    type: cohere
+    api_key_env: COHERE_API_KEY   # default
+```
+
+### Reserved: `inference` replicas
+
+Config validation accepts `type: inference` with `replicas` (each with `url`,
+optional `runtime`, `models`, and `priority`) and `health_interval`, but the
+gateway does not register `inference` accounts in this release; such an
+account is skipped at startup.
 
 ### OpenAI-compatible presets
 
@@ -191,7 +269,9 @@ providers:
     models: [mistral-large-latest]
 ```
 
-`custom` connects any OpenAI-compatible endpoint. Use `base_url`, optional `models`, and optional `extra_headers`. Header values support environment expansion.
+`custom` connects any OpenAI-compatible endpoint. Use `base_url`, optional `models`, and optional `extra_headers`. Header values support environment expansion. The example below reaches
+Azure through the generic adapter; prefer the native [`type: azure`](#azure-openai)
+account unless you need a fixed URL (for example, behind an API proxy).
 
 ```yaml
 providers:
@@ -220,7 +300,7 @@ also draw their default model lists from the catalog; Bedrock pricing then
 matches by substring against the catalog's canonical Claude model IDs because
 Bedrock model IDs vary by region/cross-region-inference-profile prefix.
 Models not present in the catalog return zero estimated cost rather than a
-guessed default. Mistral, DeepSeek, and xAI are reachable via `type: custom`
+guessed default. Mistral, DeepSeek, and xAI are reachable through the OpenAI-compatible
 presets (see above) and have reference-only catalog rows under provider
 `custom-preset-reference` for documentation purposes; they are not read by any
 adapter.
@@ -319,10 +399,16 @@ normal key and remove the bootstrap variable. `OMNISWITCH_BOOTSTRAP_ROLE` may be
 
 ## Routing
 
-Routes support direct providers, ordered `fallbacks`, weighted `variants`, a
+A route may set `strategy`: `direct`, `fallback`, `round-robin`,
+`least-latency`, or `cost-optimal` (lowest catalog input-token price). Routes
+support direct providers, ordered `fallbacks`, weighted `variants`, a
 CEL `condition` on a variant (`model` and `prompt` variables), retry count and
 backoff, retryable HTTP status codes, per-attempt timeouts, a shadow provider,
-and request shaping. `default_params` fills absent values,
+and request shaping. The route-level `shadow_provider` sends a copy of each
+request to that provider asynchronously for comparison; the client response
+always comes from the primary route. `gateway.shadow_provider` (or
+`OMNISWITCH_SHADOW_PROVIDER`) sets a gateway-wide shadow provider for routes
+that do not set their own. `default_params` fills absent values,
 `override_params` always wins, and `drop_params` is applied last. The current
 request-shaping fields are `model`, `temperature`, `max_tokens`, `top_p`,
 `stream`, and `stop`.
@@ -339,6 +425,29 @@ the provider selection to a specified `reroute_provider`, and `fallback` overrid
 the requested model to a specified `fallback` model (e.g. `anthropic/claude-3`). `stream_buffer: true` (default) buffers an SSE response before emitting
 it, allowing output enforcement; turning it off reduces latency but makes
 stream output a trusted-provider trade-off.
+
+`guardrails.tool_rules` inspect tool calls rather than text. Each rule has a
+`name`, an optional `stage` (`input`, `output` (default), or `both`), a
+`tool_name` regex matched against the function name, an `arguments_pattern`
+regex matched against the raw JSON arguments, an `action` (default `deny`),
+and an optional `message`. A rule needs at least one of the two patterns and
+triggers only when every pattern it sets matches.
+
+```yaml
+guardrails:
+  tool_rules:
+    - name: no-shell-rm
+      tool_name: '^(shell|exec)$'
+      arguments_pattern: 'rm\s+-rf'
+      action: deny
+```
+
+`guardrails.llm_judges` call an OpenAI-compatible chat completions `url` with
+`model` and ask it for a JSON verdict (`triggered`, `message`, `details`)
+about the content and tool calls. Optional keys: `stage` (default `both`),
+`action` (default `deny`), `system_prompt` (replaces the built-in evaluator
+prompt), `api_key_env` (sent as a bearer token), `headers`, `timeout` (default
+`10s`), and `fail_open`.
 
 `guardrails.webhooks` adds an opt-in connector for a managed or in-house
 moderation service. OmniSwitch sends `{stage, text, messages}` and expects
@@ -401,10 +510,19 @@ curl -X POST http://localhost:8080/api/virtual-keys \
 
 ## Environment Variables
 
-- `OMNISWITCH_LISTEN`
+Environment variables override the matching config-file keys. An empty value
+is treated as unset.
+
+- `OMNISWITCH_CONFIG` - path of the YAML or JSON gateway config file.
+- `OMNISWITCH_LISTEN` - listen address. When neither this nor
+  `gateway.listen` is set, the gateway binds `127.0.0.1:8080` while
+  authentication is off and `:8080` (all interfaces) while it is on.
 - `OMNISWITCH_DATA`
 - `OMNISWITCH_DATABASE_URL` - a `postgres://` DSN enables PostgreSQL storage so multiple gateway replicas share keys, logs, budgets, and configuration. When unset (or not a postgres URL), SQLite in the data directory is used.
-- `OMNISWITCH_AUTH`
+- `OMNISWITCH_AUTH` - defaults to `false` (no authentication) unless
+  `gateway.auth` is set in the config file or an OIDC JWKS URL is configured.
+  With auth on and an empty key store, set `OMNISWITCH_BOOTSTRAP_API_KEY` for
+  the first start.
 - `OMNISWITCH_BOOTSTRAP_API_KEY`
 - `OMNISWITCH_BOOTSTRAP_WORKSPACE`
 - `OMNISWITCH_BOOTSTRAP_ROLE`
@@ -452,6 +570,16 @@ curl -X POST http://localhost:8080/api/virtual-keys \
 - `ANTHROPIC_API_KEY`
 - `GOOGLE_API_KEY`
 - `GROQ_API_KEY`
+- `COHERE_API_KEY`
+- `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_MODELS`,
+  `AZURE_OPENAI_API_VERSION` - see [Azure OpenAI](#azure-openai).
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
+  `AWS_REGION`, `AWS_DEFAULT_REGION`, `OMNISWITCH_BEDROCK_MODELS`,
+  `OMNISWITCH_BEDROCK_GUARDRAIL_ID`, `OMNISWITCH_BEDROCK_GUARDRAIL_VERSION` -
+  see [AWS Bedrock](#aws-bedrock).
+- `MISTRAL_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `TOGETHER_API_KEY`,
+  `FIREWORKS_API_KEY`, `PERPLEXITY_API_KEY`, `CEREBRAS_API_KEY`,
+  `OPENROUTER_API_KEY` - see [OpenAI-compatible presets](#openai-compatible-presets).
 
 ## Command Line and Health Checks
 
