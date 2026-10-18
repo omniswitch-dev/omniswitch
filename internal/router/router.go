@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -184,6 +183,21 @@ func (r *Router) CloneWithRoutes(overrides map[string]Route) *Router {
 		cloned.conditions[expression] = compiled
 	}
 	compileRouteConditions(cloned.conditions, overrides)
+	return cloned
+}
+
+// CloneForShadow returns a copy of r for mirrored (shadow) traffic. The copy
+// keeps r's routes but uses breaker and its own latency tracker, so shadow
+// calls can neither open circuits nor skew least-latency routing for
+// production traffic.
+func (r *Router) CloneForShadow(breaker *CircuitBreaker) *Router {
+	cloned := r.CloneWithRoutes(nil)
+	cloned.mu.Lock()
+	defer cloned.mu.Unlock()
+	if breaker != nil {
+		cloned.breakers = breaker
+	}
+	cloned.latency = newLatencyTracker()
 	return cloned
 }
 
@@ -517,9 +531,14 @@ func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, provider
 				break
 			}
 
-			// Brief backoff before retry.
+			// Brief backoff before retry. A Retry-After hint that is too
+			// long moves on to the next provider instead of waiting.
 			if attempt < maxRetries-1 {
-				if err := waitForRetry(ctx, retryBackoff(route.RetryBackoff, attempt)); err != nil {
+				delay, ok := retryWait(route.RetryBackoff, attempt, err)
+				if !ok {
+					break
+				}
+				if err := waitForRetry(ctx, delay); err != nil {
 					return provider.ChatResponse{}, meta, err
 				}
 			}
@@ -584,7 +603,11 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 					break
 				}
 				if attempt < attempts-1 {
-					if err := waitForRetry(ctx, retryBackoff(route.RetryBackoff, attempt)); err != nil {
+					delay, ok := retryWait(route.RetryBackoff, attempt, err)
+					if !ok {
+						break
+					}
+					if err := waitForRetry(ctx, delay); err != nil {
 						return nil, meta, err
 					}
 				}
@@ -926,16 +949,6 @@ func (r *Router) recordAttemptFailure(ctx context.Context, providerName string, 
 	r.recordFailure(providerName)
 }
 
-func countsAsProviderFailure(ctx context.Context, err error) bool {
-	if err == nil {
-		return false
-	}
-	if ctx != nil && ctx.Err() != nil {
-		return false
-	}
-	return !errors.Is(err, context.Canceled)
-}
-
 func (r *Router) recordLatency(providerName string, latency time.Duration) {
 	r.mu.Lock()
 	tracker := r.latency
@@ -1100,35 +1113,6 @@ func waitForRetry(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
-}
-
-var statusCodePattern = regexp.MustCompile(`(?i)status\s*(?:code\s*)?\(?([0-9]{3})\)?`)
-
-func isRetryable(err error, codes []int) bool {
-	if err == nil {
-		return false
-	}
-	// A request field an adapter cannot honour (e.g. seed on Anthropic) will
-	// fail identically on every retry against the same provider; surface it
-	// immediately instead of burning retry budget. Fallback to a different
-	// provider is still attempted by the caller's provider loop.
-	var unsupported *provider.UnsupportedParameterError
-	if errors.As(err, &unsupported) {
-		return false
-	}
-	if len(codes) == 0 {
-		return true
-	}
-	match := statusCodePattern.FindStringSubmatch(err.Error())
-	if len(match) != 2 {
-		return false
-	}
-	for _, code := range codes {
-		if fmt.Sprint(code) == match[1] {
-			return true
-		}
-	}
-	return false
 }
 
 // conditionEnv is the shared CEL environment for conditional variants.

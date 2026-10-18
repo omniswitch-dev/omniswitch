@@ -1485,8 +1485,7 @@ func (h *Handler) shadow(activeRouter *router.Router, requestID, traceID, primar
 		log.Printf("shadow request to %s dropped: %d shadow requests already in flight", shadowProvider, cap(h.shadowSlots))
 		return
 	}
-	shadowRouter := activeRouter.CloneWithRoutes(nil)
-	shadowRouter.SetCircuitBreaker(h.shadowBreaker)
+	shadowRouter := activeRouter.CloneForShadow(h.shadowBreaker)
 	go func() {
 		defer func() { <-h.shadowSlots }()
 		shadowCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
