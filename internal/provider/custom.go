@@ -39,13 +39,6 @@ func WithCustomHeaders(headers map[string]string) CustomOption {
 	return func(c *Custom) { c.extraHeaders = headers }
 }
 
-// WithCustomStreamUsage controls whether streaming requests ask the upstream
-// for a final usage chunk (stream_options.include_usage). It is on by
-// default except for hosts known to reject the field.
-func WithCustomStreamUsage(enabled bool) CustomOption {
-	return func(c *Custom) { c.streamUsage = enabled }
-}
-
 // customStreamUsageDefault reports whether include_usage is safe to send to
 // baseURL. Mistral's OpenAI-compatible API rejects unknown fields,
 // including stream_options, with 422.

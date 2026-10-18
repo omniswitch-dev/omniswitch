@@ -60,11 +60,9 @@ func newProviderTransport(headerTimeout time.Duration) *http.Transport {
 // streamingClient returns a copy of plain without the overall Timeout, for
 // streaming requests. Cancellation then comes from the request context
 // (client disconnect, gateway deadlines) and the transport's
-// ResponseHeaderTimeout still bounds the time to first byte.
+// ResponseHeaderTimeout still bounds the time to first byte. plain must not
+// be nil; every adapter constructor sets its client.
 func streamingClient(plain *http.Client) *http.Client {
-	if plain == nil {
-		return &http.Client{Transport: newProviderTransport(defaultRequestTimeout)}
-	}
 	if plain.Timeout == 0 {
 		return plain
 	}

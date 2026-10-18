@@ -125,14 +125,13 @@ func upstreamStreamError(providerName string, raw json.RawMessage) error {
 // accumulated usage. The gateway prices the request from it and forwards it
 // only to clients that asked for stream_options.include_usage.
 func usageOnlyChunk(id, model string, usage Usage) ChatResponseChunk {
-	u := usage
 	return ChatResponseChunk{
 		ID:      id,
 		Object:  "chat.completion.chunk",
 		Created: time.Now().Unix(),
 		Model:   model,
 		Choices: []ChunkChoice{},
-		Usage:   &u,
+		Usage:   &usage,
 	}
 }
 
