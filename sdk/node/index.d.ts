@@ -1,17 +1,17 @@
 import OpenAI from "openai";
 
 export interface OmniSwitchOptions extends OpenAI.ClientOptions {
-  /** Gateway URL with or without a trailing /v1. */
+  /** Gateway URL with or without a trailing /v1. Defaults to OMNISWITCH_GATEWAY_URL. */
   gatewayUrl?: string;
-  /** Dynamic config name or ID sent as x-omniswitch-config. */
+  /** Dynamic config name or ID sent as x-omniswitch-config. Defaults to OMNISWITCH_CLIENT_CONFIG. */
   config?: string;
-  /** Force routing to a named provider or alias. */
+  /** Force routing to a named provider or alias. Defaults to OMNISWITCH_PROVIDER. */
   provider?: string;
-  /** Trace ID used to group requests in OmniSwitch observability. */
+  /** Trace ID used to group requests in OmniSwitch observability. Defaults to OMNISWITCH_TRACE_ID. */
   traceId?: string;
-  /** Session ID used to group requests in OmniSwitch observability. */
+  /** Session ID used to group requests in OmniSwitch observability. Defaults to OMNISWITCH_SESSION_ID. */
   sessionId?: string;
-  /** Provider used for asynchronous shadow comparison. */
+  /** Provider used for asynchronous shadow comparison. Defaults to OMNISWITCH_CLIENT_SHADOW_PROVIDER. */
   shadowProvider?: string;
 }
 

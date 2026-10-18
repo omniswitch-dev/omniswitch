@@ -170,6 +170,15 @@ to your gateway and using an OmniSwitch API key when authentication is enabled.
 The lightweight SDK wrappers in `sdk/` add convenience headers for traces,
 sessions, provider overrides, dynamic configs, and virtual key routing.
 
+The SDKs are not published to PyPI or npm yet, so install them from this
+repository (see [sdk/python](sdk/python/README.md) and
+[sdk/node](sdk/node/README.md)):
+
+```bash
+pip install "git+https://github.com/omniswitch-dev/omniswitch#subdirectory=sdk/python"
+npm install openai ./omniswitch/sdk/node   # from a local clone
+```
+
 Python:
 
 ```python

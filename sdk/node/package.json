@@ -4,6 +4,14 @@
   "description": "Node.js and TypeScript SDK for the OmniSwitch AI Gateway",
   "main": "index.js",
   "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
   "license": "Apache-2.0",
   "keywords": [
     "ai",
