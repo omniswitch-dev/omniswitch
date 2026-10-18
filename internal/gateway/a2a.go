@@ -1,13 +1,14 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/omniswitch-dev/omniswitch/internal/provider"
 )
@@ -31,24 +32,32 @@ func (h *Handler) A2AAgentCard(w http.ResponseWriter, r *http.Request) {
 // cache isolation, logs, and provider telemetry.
 func (h *Handler) A2A(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
 		writeA2AError(w, nil, -32600, "Invalid Request")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxRequestBytes)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeA2AError(w, nil, -32700, "Parse error")
+		return
+	}
+	if !json.Valid(raw) {
+		writeA2AError(w, nil, -32700, "Parse error")
+		return
+	}
 	var request a2aRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.JSONRPC != "2.0" || len(request.ID) == 0 {
+	if err := json.Unmarshal(raw, &request); err != nil || request.JSONRPC != "2.0" || len(request.ID) == 0 {
 		writeA2AError(w, request.ID, -32600, "Invalid Request")
 		return
 	}
 	switch request.Method {
-	case "SendMessage":
-		h.a2aSendMessage(w, r, request, false)
-	case "message/send":
+	case "SendMessage", "message/send":
 		h.a2aSendMessage(w, r, request, false)
 	case "SendMessageStream", "message/stream":
 		h.a2aSendMessage(w, r, request, true)
 	case "GetTask", "tasks/get":
-		h.a2aGetTask(w, request)
+		h.a2aGetTask(w, r, request)
 	case "CancelTask", "tasks/cancel":
 		h.a2aCancelTask(w, r, request)
 	case "GetExtendedAgentCard":
@@ -73,6 +82,16 @@ type a2aSendMessageRequest struct {
 		} `json:"parts"`
 	} `json:"message"`
 	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+// a2aCaller identifies the authenticated caller that owns tasks. It prefers
+// the identity stored by the authentication middleware and falls back to the
+// identity headers that middleware sets.
+func a2aCaller(r *http.Request) (keyID, workspaceID string) {
+	if identity, ok := IdentityFromContext(r.Context()); ok {
+		return identity.APIKeyID, identity.WorkspaceID
+	}
+	return r.Header.Get("x-omniswitch-key-id"), r.Header.Get("x-omniswitch-workspace-id")
 }
 
 func (h *Handler) a2aSendMessage(w http.ResponseWriter, r *http.Request, request a2aRPCRequest, stream bool) {
@@ -100,43 +119,33 @@ func (h *Handler) a2aSendMessage(w http.ResponseWriter, r *http.Request, request
 		return
 	}
 
-	task := &a2aTask{ID: newA2ATaskID(), ContextID: input.Message.ContextID, CreatedAt: time.Now().UTC()}
-	task.Status = a2aTaskStatus{State: a2aStateWorking, Timestamp: time.Now().UTC().Format(time.RFC3339Nano)}
-	a2aTasks.Store(task.ID, task)
-	pruneA2ATasks()
+	// CancelTask cancels this context, which stops the inference.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	keyID, workspaceID := a2aCaller(r)
+	task := newA2ATask(input.Message.ContextID, keyID, workspaceID, cancel)
+	a2aTasks.put(task)
 
 	if stream {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
-		writeA2AStreamEvent(w, "status-update", map[string]any{
-			"taskId": task.ID, "contextId": task.ContextID,
-			"status": map[string]any{"state": a2aStateWorking},
-		})
+		writeA2AStreamResult(w, request.ID, statusUpdate(task.snapshot(), false, nil))
 	}
 
 	chatRequest := provider.ChatRequest{Model: model, Messages: []provider.Message{{Role: "user", Content: strings.Join(parts, "\n")}}}
-	chat, headers, status, _, err := h.executeCompatibleChat(r, chatRequest)
-	copyHeaders(w.Header(), headers)
+	chat, headers, status, _, err := h.executeCompatibleChat(r.WithContext(ctx), chatRequest)
+	if !stream {
+		copyHeaders(w.Header(), headers)
+	}
 
-	finish := func(failed bool, failureMessage string) {
-		if failed {
-			setState(task, a2aStateFailed)
-			task.Status.Message = map[string]any{
-				"role": "ROLE_AGENT", "parts": []map[string]string{{"text": failureMessage}},
-			}
-			a2aTasks.Store(task.ID, task)
-			if stream {
-				writeA2AStreamEvent(w, "status-update", taskPayload(task))
-				fmt.Fprintf(w, "event: error\ndata: {\"code\":-32000,\"message\":%q}\n\n", failureMessage)
-			} else {
-				writeA2AError(w, request.ID, -32603, fmt.Sprintf("inference failed (HTTP %d)", status))
-			}
-			return
-		}
+	var view a2aTaskView
+	if err != nil {
+		view = task.fail(fmt.Sprintf("inference failed (HTTP %d)", status))
+	} else {
 		content := ""
-		messageID := "msg_" + task.ID
+		messageID := "msg_" + task.id
 		if len(chat.Choices) > 0 {
 			content = chat.Choices[0].Message.Content
 			messageID = "msg_" + chat.ID
@@ -146,106 +155,125 @@ func (h *Handler) a2aSendMessage(w http.ResponseWriter, r *http.Request, request
 			"parts":     []map[string]string{{"text": content}},
 			"messageId": messageID,
 		}
-		if task.ContextID != "" {
-			message["contextId"] = task.ContextID
+		if task.contextID != "" {
+			message["contextId"] = task.contextID
 		}
-		task.History = append(task.History, message)
-		task.Artifacts = append(task.Artifacts, a2aArtifact{
+		view = task.complete(message, a2aArtifact{
+			ArtifactID:  "artifact_" + strings.TrimPrefix(task.id, "task_"),
 			Name:        "response",
 			Description: "Agent response text",
 			Parts:       []map[string]any{{"kind": "text", "text": content}},
 		})
-		setState(task, a2aStateCompleted)
-		a2aTasks.Store(task.ID, task)
+	}
 
-		payload := taskPayload(task)
-		if stream {
-			writeA2AStreamEvent(w, "artifact-update", map[string]any{
-				"taskId": task.ID, "contextId": task.ContextID,
-				"artifact": payload.Artifacts[len(payload.Artifacts)-1],
+	if stream {
+		// Response headers can no longer be sent once the stream started, so
+		// gateway metadata (provider, cost, ...) travels in the final frame.
+		if view.Status.State == a2aStateCompleted && len(view.Artifacts) > 0 {
+			writeA2AStreamResult(w, request.ID, map[string]any{
+				"kind": "artifact-update", "taskId": view.ID, "contextId": view.ContextID,
+				"artifact": view.Artifacts[len(view.Artifacts)-1], "append": false, "lastChunk": true,
 			})
-			writeA2AStreamEvent(w, "status-update", payload)
-		} else {
-			response := map[string]any{
-				"id":        task.ID,
-				"contextId": task.ContextID,
-				"status":    task.Status,
-				"artifacts": task.Artifacts,
-				"history":   task.History,
-			}
-			writeA2AResponse(w, request.ID, response)
+		}
+		writeA2AStreamResult(w, request.ID, statusUpdate(view, true, gatewayMetadata(headers)))
+		if view.Status.State == a2aStateFailed {
+			writeA2AStreamFrame(w, map[string]any{"jsonrpc": "2.0", "id": request.ID, "error": map[string]any{
+				"code": -32603, "message": fmt.Sprintf("inference failed (HTTP %d)", status),
+			}})
+		}
+		return
+	}
+	if view.Status.State == a2aStateFailed {
+		writeA2AError(w, request.ID, -32603, fmt.Sprintf("inference failed (HTTP %d)", status))
+		return
+	}
+	writeA2AResponse(w, request.ID, view)
+}
+
+func statusUpdate(view a2aTaskView, final bool, metadata map[string]string) map[string]any {
+	update := map[string]any{
+		"kind": "status-update", "taskId": view.ID, "contextId": view.ContextID,
+		"status": view.Status, "final": final,
+	}
+	if len(metadata) > 0 {
+		update["metadata"] = metadata
+	}
+	return update
+}
+
+// gatewayMetadata returns the gateway's own response headers
+// (x-omniswitch-*) as a flat map.
+func gatewayMetadata(headers http.Header) map[string]string {
+	metadata := map[string]string{}
+	for key, values := range headers {
+		if strings.HasPrefix(strings.ToLower(key), "x-omniswitch-") && len(values) > 0 {
+			metadata[strings.ToLower(key)] = values[0]
 		}
 	}
-	finish(err != nil, fmt.Sprintf("inference failed (HTTP %d)", status))
+	return metadata
 }
 
-type a2aTaskView struct {
-	ID        string           `json:"id"`
-	ContextID string           `json:"contextId,omitempty"`
-	Status    a2aTaskStatus    `json:"status"`
-	Artifacts []a2aArtifact    `json:"artifacts,omitempty"`
-	History   []map[string]any `json:"history,omitempty"`
+// writeA2AStreamResult emits one SSE frame holding a JSON-RPC response, as
+// the A2A JSON-RPC binding requires for streaming methods.
+func writeA2AStreamResult(w http.ResponseWriter, id json.RawMessage, result any) {
+	writeA2AStreamFrame(w, map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 }
 
-func taskPayload(task *a2aTask) a2aTaskView {
-	return a2aTaskView{ID: task.ID, ContextID: task.ContextID, Status: task.Status, Artifacts: task.Artifacts, History: task.History}
-}
-
-// writeA2AStreamEvent emits one SSE frame. Errors during flush are ignored:
-// the client may have disconnected mid-stream.
-func writeA2AStreamEvent(w http.ResponseWriter, event string, payload any) {
+// writeA2AStreamFrame emits one SSE data frame. Write errors are ignored: the
+// client may have disconnected mid-stream.
+func writeA2AStreamFrame(w http.ResponseWriter, payload any) {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return
 	}
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, encoded)
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", encoded)
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
 }
 
-func (h *Handler) a2aGetTask(w http.ResponseWriter, request a2aRPCRequest) {
+func a2aTaskID(w http.ResponseWriter, request a2aRPCRequest) (string, bool) {
 	var params struct {
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(request.Params, &params); err != nil || strings.TrimSpace(params.ID) == "" {
 		writeA2AError(w, request.ID, -32602, "params.id is required")
-		return
+		return "", false
 	}
-	task, ok := getA2ATask(params.ID)
+	return strings.TrimSpace(params.ID), true
+}
+
+func (h *Handler) a2aGetTask(w http.ResponseWriter, r *http.Request, request a2aRPCRequest) {
+	id, ok := a2aTaskID(w, request)
 	if !ok {
-		writeA2AError(w, request.ID, -32001, a2aTaskNotFoundError(params.ID))
 		return
 	}
-	writeA2AResponse(w, request.ID, taskPayload(task))
+	keyID, workspaceID := a2aCaller(r)
+	task, ok := a2aTasks.get(id, keyID, workspaceID)
+	if !ok {
+		writeA2AError(w, request.ID, -32001, a2aTaskNotFoundError(id))
+		return
+	}
+	writeA2AResponse(w, request.ID, task.snapshot())
 }
 
 func (h *Handler) a2aCancelTask(w http.ResponseWriter, r *http.Request, request a2aRPCRequest) {
-	var params struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(request.Params, &params); err != nil || strings.TrimSpace(params.ID) == "" {
-		writeA2AError(w, request.ID, -32602, "params.id is required")
-		return
-	}
-	task, ok := getA2ATask(params.ID)
+	id, ok := a2aTaskID(w, request)
 	if !ok {
-		writeA2AError(w, request.ID, -32001, a2aTaskNotFoundError(params.ID))
 		return
 	}
-	switch task.Status.State {
-	case a2aStateCompleted:
-		// Terminal state; report as-is per spec.
-	case a2aStateCanceled:
-	default:
-		if task.Status.State == a2aStateWorking {
-			// The governing request has not returned yet; mark canceled so the
-			// completing writer records the outcome against a canceled task.
-			setState(task, a2aStateCanceled)
-			a2aTasks.Store(task.ID, task)
-		}
+	keyID, workspaceID := a2aCaller(r)
+	task, ok := a2aTasks.get(id, keyID, workspaceID)
+	if !ok {
+		writeA2AError(w, request.ID, -32001, a2aTaskNotFoundError(id))
+		return
 	}
-	writeA2AResponse(w, request.ID, taskPayload(task))
+	view, canceled := task.requestCancel()
+	if !canceled {
+		writeA2AError(w, request.ID, -32002, fmt.Sprintf("task %q is %s and cannot be canceled", id, view.Status.State))
+		return
+	}
+	writeA2AResponse(w, request.ID, view)
 }
 
 func (h *Handler) a2aAgentCard(r *http.Request) map[string]any {
