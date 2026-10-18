@@ -97,5 +97,8 @@ The unit tests stub the `openai` package and need no network access:
 python3 -m unittest discover -s sdk/python/tests
 ```
 
-Early `from sentinel import OmniSwitch` imports are still supported by a small
-compatibility shim.
+The package installs one module, `omniswitch`. The old `sentinel` module is no
+longer shipped, because it would clash with the unrelated `sentinel` package on
+PyPI. Replace `from sentinel import OmniSwitch` with
+`from omniswitch import OmniSwitch`; the `Sentinel` alias is still available
+from `omniswitch`.
