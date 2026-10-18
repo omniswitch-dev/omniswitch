@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -125,6 +126,44 @@ func TestControlPlaneBodyLimit(t *testing.T) {
 		handler.ServeHTTP(rec, req)
 		if rec.Code != tc.wantCode || (readErr != nil) != tc.wantError {
 			t.Errorf("%s size %d chunked %v: code %d err %v", tc.path, tc.size, tc.chunked, rec.Code, readErr)
+		}
+	}
+}
+
+func TestControlPlaneBodyLimitStreamedBodyGets413(t *testing.T) {
+	// The handler maps a decode error to 400, like the real control-plane
+	// handlers do.
+	handler := ControlPlaneBodyLimit(16, 64, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte("decode: " + err.Error()))
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantCode int
+		wantBody string
+	}{
+		{"over the limit", `{"name":"` + strings.Repeat("x", 32) + `"}`, http.StatusRequestEntityTooLarge, `"request body too large"`},
+		{"invalid within the limit", `{"name":`, http.StatusBadRequest, "decode: unexpected EOF"},
+		{"valid within the limit", `{"name":"a"}`, http.StatusCreated, ""},
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/keys", io.MultiReader(strings.NewReader(tc.body)))
+		req.ContentLength = -1
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != tc.wantCode || !strings.Contains(rec.Body.String(), tc.wantBody) {
+			t.Errorf("%s: code %d body %q, want %d with %q", tc.name, rec.Code, rec.Body.String(), tc.wantCode, tc.wantBody)
+		}
+		if tc.wantCode == http.StatusRequestEntityTooLarge {
+			if strings.Contains(rec.Body.String(), "decode:") || rec.Header().Get("Content-Type") != "application/json" {
+				t.Errorf("%s: body %q content type %q, want only the JSON 413 error", tc.name, rec.Body.String(), rec.Header().Get("Content-Type"))
+			}
 		}
 	}
 }

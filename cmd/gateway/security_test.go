@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -148,6 +149,34 @@ func TestControlPlaneRejectsOversizedBodies(t *testing.T) {
 	}
 	if rec := doRequest(h, http.MethodPost, "/api/feedback", routeTestKey, `{"request_id":"r","score":1}`, nil); rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
 		t.Fatalf("small feedback status = %d body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A streamed body has no Content-Length, so the limit is found only
+	// while the handler reads it. It still gets 413, and an unauthenticated
+	// caller is rejected before the body is read.
+	streamed := func(path, key, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, io.MultiReader(strings.NewReader(body)))
+		req.ContentLength = -1
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	bigKey := `{"name":"` + strings.Repeat("x", 2<<20) + `"}`
+	for _, path := range []string{"/api/feedback", "/api/keys", "/api/prompts"} {
+		body := big
+		if path != "/api/feedback" {
+			body = bigKey
+		}
+		rec := streamed(path, routeTestKey, body)
+		if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), "request body too large") {
+			t.Fatalf("streamed oversized %s = %d %s, want 413", path, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := streamed("/api/keys", "", bigKey); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated streamed body = %d, want 401", rec.Code)
 	}
 }
 
