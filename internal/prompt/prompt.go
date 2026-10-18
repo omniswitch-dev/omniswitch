@@ -101,12 +101,35 @@ func (h *Handler) ListPromptVersions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"prompts": prompts})
 }
 
+// Render limits bound the work one render request can cause.
+const (
+	// MaxRenderedBytes caps the size of a rendered prompt.
+	MaxRenderedBytes = 1 << 20
+	// MaxRenderVariables caps how many variables one request may supply.
+	MaxRenderVariables = 256
+	// MaxRenderVariableBytes caps the size of one variable value.
+	MaxRenderVariableBytes = 256 << 10
+)
+
+// errRenderTooLarge reports a render that would exceed MaxRenderedBytes.
+var errRenderTooLarge = fmt.Errorf("rendered prompt exceeds %d bytes", MaxRenderedBytes)
+
 // RenderPrompt handles POST /api/prompts/render.
 func (h *Handler) RenderPrompt(w http.ResponseWriter, r *http.Request) {
 	var req RenderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if len(req.Variables) > MaxRenderVariables {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("at most %d variables are allowed", MaxRenderVariables))
+		return
+	}
+	for key, value := range req.Variables {
+		if len(value) > MaxRenderVariableBytes {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("variable %q exceeds %d bytes", key, MaxRenderVariableBytes))
+			return
+		}
 	}
 
 	p, err := h.store.GetPrompt(r.Context(), req.PromptID)
@@ -115,12 +138,40 @@ func (h *Handler) RenderPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rendered := p.Template
-	for key, value := range req.Variables {
-		rendered = strings.ReplaceAll(rendered, "{{"+key+"}}", value)
+	rendered, err := renderTemplate(p.Template, req.Variables, MaxRenderedBytes)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
-
 	writeJSON(w, http.StatusOK, map[string]string{"rendered": rendered})
+}
+
+// renderTemplate substitutes {{name}} placeholders in a single pass over the
+// template. Substituted values are copied verbatim and never scanned again,
+// so a value containing another placeholder cannot trigger recursive
+// expansion. Unknown placeholders are left as-is. Rendering stops with an
+// error once the output would exceed limit bytes.
+func renderTemplate(template string, variables map[string]string, limit int) (string, error) {
+	var out strings.Builder
+	last := 0
+	for _, match := range varPattern.FindAllStringSubmatchIndex(template, -1) {
+		start, end := match[0], match[1]
+		value, ok := variables[template[match[2]:match[3]]]
+		if !ok {
+			continue
+		}
+		if out.Len()+(start-last)+len(value) > limit {
+			return "", errRenderTooLarge
+		}
+		out.WriteString(template[last:start])
+		out.WriteString(value)
+		last = end
+	}
+	if out.Len()+len(template)-last > limit {
+		return "", errRenderTooLarge
+	}
+	out.WriteString(template[last:])
+	return out.String(), nil
 }
 
 var varPattern = regexp.MustCompile(`\{\{(\w+)\}\}`)
