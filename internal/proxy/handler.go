@@ -481,6 +481,11 @@ func (h *Handler) handleToolList(w http.ResponseWriter, r *http.Request, rpcReq 
 		// per-target decisions and acknowledge it.
 		for _, key := range h.targetOrder {
 			tgt := h.targets[key]
+			for _, synthetic := range tgt.openAPITools {
+				listRequest := h.listRequest(r, tgt, synthetic.Name)
+				decision, _ := tgt.engine.Evaluate(r.Context(), listRequest)
+				h.audit(r, rpcReq.Method, listRequest, decision)
+			}
 			listRequest := h.listRequest(r, tgt, tgt.name)
 			decision, _ := tgt.engine.Evaluate(r.Context(), listRequest)
 			h.audit(r, rpcReq.Method, listRequest, decision)
@@ -495,6 +500,7 @@ func (h *Handler) handleToolList(w http.ResponseWriter, r *http.Request, rpcReq 
 		for _, synthetic := range tgt.openAPITools {
 			listRequest := h.listRequest(r, tgt, synthetic.Name)
 			decision, err := tgt.engine.Evaluate(r.Context(), listRequest)
+			h.audit(r, rpcReq.Method, listRequest, decision)
 			if err != nil || !decision.Allowed {
 				continue
 			}
@@ -506,7 +512,8 @@ func (h *Handler) handleToolList(w http.ResponseWriter, r *http.Request, rpcReq 
 			if err := json.Unmarshal(encoded, &entry); err != nil {
 				continue
 			}
-			entry["name"], _ = json.Marshal(key + "__" + synthetic.Name)
+			// Same prefix as upstream tools; targetForTool folds case.
+			entry["name"], _ = json.Marshal(tgt.name + "__" + synthetic.Name)
 			tools = append(tools, entry)
 		}
 		listRequest := h.listRequest(r, tgt, tgt.name)
