@@ -35,13 +35,22 @@ docker run --rm -p 8080:8080 \
 
 ## Run with Docker Compose
 
-`docker-compose.yml` enables authentication and refuses to start without a
+`docker-compose.yml` enables authentication, so the first start needs a
 bootstrap key:
 
 ```bash
 export OMNISWITCH_BOOTSTRAP_API_KEY="$(openssl rand -hex 32)"
 OPENAI_API_KEY=sk-... docker compose up -d --build
 ```
+
+On an empty database the gateway exits with "authentication is enabled but no
+API keys exist" when `OMNISWITCH_BOOTSTRAP_API_KEY` is not set; because the
+service restarts unless stopped, `docker compose logs gateway` then shows that
+error repeatedly. Compose itself does not require the variable, so
+`docker compose config`, `ps`, `logs` and `down` work without it. After the
+first start the key is stored (hashed) in the database and the variable can be
+left unset. If you set it again, use the same value: a different value rotates
+the bootstrap owner key and the old key stops working.
 
 The service restarts unless stopped. To stamp the image with build metadata
 (reported by `omniswitch version` and `GET /api/version`), set
@@ -63,8 +72,11 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up --build
 The overlay waits for Postgres readiness before starting the gateway and keeps
 Postgres data in a named volume. It exposes no database port on the host.
 `sslmode=disable` is for this local compose network only; use TLS for an external
-production database. The base `/data` volume remains available for the local
-semantic cache. Existing SQLite data is **not** copied into Postgres.
+production database. Exact and semantic cache entries are stored in Postgres with the rest of the
+control-plane data. Existing SQLite data is **not** copied into Postgres.
+Unlike the bootstrap key, `OMNISWITCH_POSTGRES_PASSWORD` is required by every
+compose command that loads the overlay, because the gateway needs the database
+URL on every start.
 
 ## Run on Kubernetes
 
@@ -104,9 +116,12 @@ replica validation, configurable startup/readiness/liveness probes, an optional
 PodDisruptionBudget, and authenticated Prometheus ServiceMonitors. Private
 metrics must use a bearer token; annotation-based scraping is enabled only when
 `observability.prometheus.public=true` explicitly permits anonymous reads.
-With auth on (the chart default) and no bootstrap key supplied, the chart
-generates one into its Secret (`bootstrap.generate=true`) and keeps it across
-upgrades; OTLP export headers can come from an existing Secret through
+With auth on (the chart default), no OIDC and no bootstrap key supplied, the
+chart generates one into its Secret (`bootstrap.generate=true`) and keeps it
+across `helm upgrade`. `helm template`, Argo CD and similar GitOps tools cannot
+keep it stable (each render creates a new key, which rotates the owner key), so
+with those tools set `bootstrap.generate=false` and supply the key through
+`existingSecret` or `secrets`. OTLP export headers can come from an existing Secret through
 `observability.otel.headersSecret`. See the chart README for details.
 
 ## Persistence

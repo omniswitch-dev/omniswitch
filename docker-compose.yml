@@ -15,12 +15,15 @@ services:
       OMNISWITCH_CONFIG: examples/gateway-config.yaml
       OMNISWITCH_DATA: /data
       OMNISWITCH_AUTH: "true"
-      # Required because OMNISWITCH_AUTH=true: the initial admin API key clients
-      # use as `Authorization: Bearer <key>`. Set it in your shell or an
-      # uncommitted .env file before `docker compose up`, for example
+      # Needed for the first start because OMNISWITCH_AUTH=true: the initial
+      # owner API key clients use as `Authorization: Bearer <key>`. Set it in
+      # your shell or an uncommitted .env file before the first
+      # `docker compose up`, for example
       # `export OMNISWITCH_BOOTSTRAP_API_KEY=$(openssl rand -hex 32)`.
-      # Compose refuses to start without it. Do not commit a real key.
-      OMNISWITCH_BOOTSTRAP_API_KEY: ${OMNISWITCH_BOOTSTRAP_API_KEY:?Set OMNISWITCH_BOOTSTRAP_API_KEY (for example with openssl rand -hex 32)}
+      # On an empty database the gateway refuses to start without it. Once the
+      # key exists you may unset it; if you set it again, use the same value:
+      # a different value rotates the owner key. Do not commit a real key.
+      OMNISWITCH_BOOTSTRAP_API_KEY: ${OMNISWITCH_BOOTSTRAP_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}

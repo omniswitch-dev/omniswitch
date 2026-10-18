@@ -80,8 +80,10 @@ is configured), so the first start needs `OMNISWITCH_BOOTSTRAP_API_KEY`. The
 bootstrap key is an owner key; use it to create named keys through `/api/keys`
 (see [docs/API.md](docs/API.md)).
 
-Run with Docker Compose (auth is on, so the bootstrap key is required and
-compose refuses to start without it):
+Run with Docker Compose (auth is on, so the first start needs the bootstrap
+key; on an empty database the gateway exits without it. Later runs may leave
+it unset, but if you set it again use the same value, since a new value
+rotates the owner key):
 
 ```bash
 export OMNISWITCH_BOOTSTRAP_API_KEY=$(openssl rand -hex 32)
