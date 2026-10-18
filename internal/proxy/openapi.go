@@ -355,8 +355,9 @@ func normalizeYAML(node any) any {
 
 // executeOpenAPICall maps MCP tool arguments onto an HTTP request. Arguments
 // are routed by their declared location: path values are escaped (values
-// containing '/' or '..' are rejected), query/header/cookie values go where
-// declared, and arguments["body"] is sent as the whole JSON request body.
+// that are "." or contain '/', '\' or '..' are rejected), query, header and
+// cookie values go where declared, and arguments["body"] is sent as the
+// whole JSON request body.
 // Undeclared arguments become query parameters.
 func executeOpenAPICall(ctx context.Context, client *http.Client, baseURL string, headers map[string]string, tool *openAPITool, args map[string]any) (*http.Response, error) {
 	path := tool.Path
@@ -367,7 +368,9 @@ func executeOpenAPICall(ctx context.Context, client *http.Client, baseURL string
 
 	substitute := func(name string, value any) error {
 		text := toStringValue(value)
-		if text == "" || strings.Contains(text, "/") || strings.Contains(text, "\\") || strings.Contains(text, "..") {
+		// "." and ".." are dot segments that servers normalizing paths
+		// would resolve to a different resource.
+		if text == "" || text == "." || strings.Contains(text, "/") || strings.Contains(text, "\\") || strings.Contains(text, "..") {
 			return fmt.Errorf("invalid value for path parameter %q", name)
 		}
 		path = strings.ReplaceAll(path, "{"+name+"}", url.PathEscape(text))

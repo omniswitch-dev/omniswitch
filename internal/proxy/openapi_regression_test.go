@@ -135,7 +135,7 @@ func TestOpenAPIRejectsPathTraversalAndMissingParams(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.Close()
-	for _, args := range []string{`{"id":"../admin/delete?all=true","org":"a"}`, `{"id":"a/b","org":"a"}`, `{"id":"x"}`, `{"id":"x","org":"a\r\nX-Evil: 1"}`} {
+	for _, args := range []string{`{"id":"../admin/delete?all=true","org":"a"}`, `{"id":".","org":"a"}`, `{"id":"..","org":"a"}`, `{"id":"a\\b","org":"a"}`, `{"id":"a/b","org":"a"}`, `{"id":"x"}`, `{"id":"x","org":"a\r\nX-Evil: 1"}`} {
 		rec := serve(h, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"api__getUser","arguments":`+args+`}}`)
 		if !strings.Contains(rec.Body.String(), `"isError":true`) {
 			t.Fatalf("args %s: response %s, want tool error", args, rec.Body.String())
