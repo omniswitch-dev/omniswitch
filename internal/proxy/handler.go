@@ -16,6 +16,7 @@ import (
 
 	"github.com/omniswitch-dev/omniswitch/internal/adapter/mcp"
 	"github.com/omniswitch-dev/omniswitch/internal/audit"
+	"github.com/omniswitch-dev/omniswitch/internal/explain"
 	"github.com/omniswitch-dev/omniswitch/internal/model"
 	"github.com/omniswitch-dev/omniswitch/internal/policy"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -239,6 +240,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if parseErr.Code == mcp.CodeParseError {
 			status = http.StatusBadRequest
 		}
+		if parseErr.Notification {
+			// A notification gets no JSON-RPC response; MCP streamable HTTP
+			// answers a rejected one with an HTTP error status.
+			writeNotificationError(w, http.StatusBadRequest, parseErr.Code, parseErr.Message, parseErr.Err)
+			return
+		}
 		writeJSON(w, status, mcp.ErrorResponse(parseErr.ID, parseErr.Code, parseErr.Message, parseErr.Err))
 		return
 	}
@@ -314,7 +321,7 @@ func (h *Handler) handleToolCall(w http.ResponseWriter, r *http.Request, rpcReq 
 	decision, evalErr := tgt.engine.Evaluate(r.Context(), toolReq)
 	h.audit(r, rpcReq.Method, toolReq, decision)
 	if evalErr != nil || !decision.Allowed {
-		writeJSON(w, http.StatusOK, mcp.DeniedResponse(rpcReq.ID, decision))
+		writeDenied(w, rpcReq, decision)
 		return
 	}
 	h.forwardToTarget(w, r, tgt, rpcReq, h.forwardBody(r.Context(), rpcReq, toolName))
@@ -385,6 +392,18 @@ func (h *Handler) audit(r *http.Request, method string, req model.ToolRequest, d
 }
 
 func (h *Handler) handleToolList(w http.ResponseWriter, r *http.Request, rpcReq mcp.Request) {
+	if !rpcReq.HasID {
+		// A tools/list notification has no result to return; record the
+		// per-target decisions and acknowledge it.
+		for _, key := range h.targetOrder {
+			tgt := h.targets[key]
+			listRequest := h.listRequest(r, tgt, tgt.name)
+			decision, _ := tgt.engine.Evaluate(r.Context(), listRequest)
+			h.audit(r, rpcReq.Method, listRequest, decision)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	tools := make([]map[string]json.RawMessage, 0)
 	for _, key := range h.targetOrder {
 		tgt := h.targets[key]
@@ -569,7 +588,7 @@ func (h *Handler) forwardToTarget(w http.ResponseWriter, r *http.Request, tgt *t
 	if tgt.stdio != nil {
 		if !rpcReq.HasID {
 			if err := tgt.stdio.Notify(r.Context(), body); err != nil {
-				writeJSON(w, http.StatusBadGateway, mcp.ErrorResponse(nil, mcp.CodeInternalError, "Forwarding failed", err))
+				writeNotificationError(w, http.StatusBadGateway, mcp.CodeInternalError, "Forwarding failed", err)
 				return
 			}
 			w.WriteHeader(http.StatusAccepted)
@@ -586,6 +605,10 @@ func (h *Handler) forwardToTarget(w http.ResponseWriter, r *http.Request, tgt *t
 		return
 	}
 	response, err := h.targetRequest(r.Context(), tgt, body, r.Header, isDefault)
+	if err != nil && !rpcReq.HasID {
+		writeNotificationError(w, http.StatusBadGateway, mcp.CodeInternalError, "Forwarding failed", err)
+		return
+	}
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, mcp.ErrorResponse(rpcReq.ID, mcp.CodeInternalError, "Forwarding failed", err))
 		return
@@ -713,6 +736,29 @@ func cloneHeaders(source map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+// writeDenied answers a tool call the policy denied. A request gets a tool
+// result with isError; a notification gets HTTP 403 with a JSON-RPC error
+// that has no id.
+func writeDenied(w http.ResponseWriter, rpcReq mcp.Request, decision model.Decision) {
+	if !rpcReq.HasID {
+		writeNotificationError(w, http.StatusForbidden, mcp.CodeRequestDenied, "Request denied by policy", errors.New(explain.Inline(decision)))
+		return
+	}
+	writeJSON(w, http.StatusOK, mcp.DeniedResponse(rpcReq.ID, decision))
+}
+
+// writeNotificationError rejects a notification with an HTTP error status.
+// The body is a JSON-RPC error without an id, as MCP streamable HTTP allows.
+func writeNotificationError(w http.ResponseWriter, status, code int, message string, err error) {
+	response := mcp.ErrorResponse(nil, code, message, err)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(struct {
+		JSONRPC string     `json:"jsonrpc"`
+		Error   *mcp.Error `json:"error"`
+	}{JSONRPC: "2.0", Error: response.Error})
 }
 
 func writeJSON(w http.ResponseWriter, status int, response mcp.Response) {

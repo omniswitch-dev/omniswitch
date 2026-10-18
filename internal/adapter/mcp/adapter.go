@@ -70,6 +70,9 @@ type ParseError struct {
 	Message string
 	ID      json.RawMessage
 	Err     error
+	// Notification reports that the message was a JSON object without an
+	// "id" member. JSON-RPC notifications get no JSON-RPC response.
+	Notification bool
 }
 
 func (e *ParseError) Error() string {
@@ -87,6 +90,10 @@ const (
 	CodeMethodNotFound = -32601
 	CodeInvalidParams  = -32602
 	CodeInternalError  = -32603
+	// CodeRequestDenied is the implementation-defined JSON-RPC error code
+	// used when a policy denies a notification (which cannot carry a tool
+	// result).
+	CodeRequestDenied = -32001
 )
 
 // Decode reads and parses one JSON-RPC request. See Parse.
@@ -104,6 +111,29 @@ func Decode(reader io.Reader) (Request, error) {
 // duplicates differently, which would let the policy see different data than
 // the upstream server.
 func Parse(body []byte) (Request, error) {
+	req, err := parse(body)
+	if err != nil {
+		var parseErr *ParseError
+		if errors.As(err, &parseErr) && parseErr.Code != CodeParseError && !hasIDMember(body) {
+			parseErr.Notification = true
+		}
+	}
+	return req, err
+}
+
+// hasIDMember reports whether body is a JSON object with an "id" member.
+// It returns true for anything else so that only real notifications are
+// treated as such.
+func hasIDMember(body []byte) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil {
+		return true
+	}
+	_, ok := fields["id"]
+	return ok
+}
+
+func parse(body []byte) (Request, error) {
 	if !json.Valid(body) {
 		return Request{}, &ParseError{Code: CodeParseError, Message: "Parse error", Err: errors.New("invalid JSON")}
 	}

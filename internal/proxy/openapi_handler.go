@@ -18,7 +18,7 @@ func (h *Handler) handleOpenAPICall(w http.ResponseWriter, r *http.Request, tgt 
 	decision, evalErr := tgt.engine.Evaluate(r.Context(), toolReq)
 	h.audit(r, rpcReq.Method, toolReq, decision)
 	if evalErr != nil || !decision.Allowed {
-		writeJSON(w, http.StatusOK, mcp.DeniedResponse(rpcReq.ID, decision))
+		writeDenied(w, rpcReq, decision)
 		return
 	}
 
@@ -29,6 +29,16 @@ func (h *Handler) handleOpenAPICall(w http.ResponseWriter, r *http.Request, tgt 
 	ctx, cancel := context.WithTimeout(r.Context(), tgt.callTimeout())
 	defer cancel()
 	resp, err := executeOpenAPICall(ctx, h.client, baseURL, tgt.headers, tool, rpcReq.Params.Arguments)
+	if !rpcReq.HasID {
+		// A notification gets no JSON-RPC response.
+		if err != nil {
+			writeNotificationError(w, http.StatusBadGateway, mcp.CodeInternalError, "Forwarding failed", err)
+			return
+		}
+		_ = resp.Body.Close()
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	if err != nil {
 		writeJSON(w, http.StatusOK, mcp.Response{JSONRPC: "2.0", ID: rpcReq.ID, Result: map[string]any{
 			"content": []map[string]any{{"type": "text", "text": "upstream error: " + err.Error()}},
