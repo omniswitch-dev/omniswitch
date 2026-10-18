@@ -10,7 +10,9 @@ OmniSwitch is in public beta. This page lists limitations that are current, know
 ## API surface
 
 - **Responses API and Anthropic Messages API support a documented subset**, not full parity with the upstream vendor APIs. Structured outputs, some tool-use flows, and certain streaming edge cases may not be forwarded; unsupported fields are either translated on a best-effort basis or rejected rather than silently dropped where practical (see `CHANGELOG.md` for the passthrough-fidelity work).
-- **A2A (Agent-to-Agent) support covers the v1 task lifecycle** (create, poll, cancel) with SSE streaming for task updates. Push notifications and an outbound A2A client (OmniSwitch acting as an A2A caller rather than callee) are not implemented.
+- **A2A (Agent-to-Agent) support covers the v1 task lifecycle** (create, poll, cancel) with single-shot SSE: a streaming request gets status and artifact frames for one completed response, not incremental tokens. There is no `tasks/resubscribe`. Tasks are kept in memory (at most 10,000, for one hour), so they are lost on restart and are not shared between replicas. Push notifications and an outbound A2A client (OmniSwitch acting as an A2A caller rather than callee) are not implemented.
+- **MCP token exchange is not configurable.** The MCP proxy library supports RFC 8693 token exchange for Go embedders, but gateway configuration does not expose it. Use `forward_bearer_token: true` to delegate an OIDC caller's token.
+- **Non-default streamable-HTTP MCP targets** that require their own MCP session are not initialized by the gateway. The client's `Mcp-Session-Id` is forwarded only to the first target.
 
 ## Identity and transport security
 
@@ -23,7 +25,7 @@ OmniSwitch is in public beta. This page lists limitations that are current, know
 
 ## Caching
 
-- **Semantic cache is token-frequency cosine similarity, not embeddings.** OmniSwitch's semantic cache matches requests using cosine similarity over token-frequency vectors of the prompt text — it does not call an embedding model. This is cheaper and dependency-free, but it is a weaker notion of "semantic" than a vector-embedding-based cache: it will miss paraphrases that an embedding model would catch, and can occasionally match on superficial token overlap rather than true meaning. Treat it as an exact-ish cache with some tolerance for whitespace/formatting differences, not as embedding-quality semantic matching.
+- **Semantic cache is token-frequency cosine similarity, not embeddings.** OmniSwitch's semantic cache matches requests using cosine similarity over role- and order-aware token and bigram vectors of the conversation — it does not call an embedding model. Prompts with images, audio, other non-text parts or tool calls match only prompts with exactly the same media and tool calls. This is cheaper and dependency-free, but it is a weaker notion of "semantic" than a vector-embedding-based cache: it will miss paraphrases that an embedding model would catch, and can occasionally match on superficial token overlap rather than true meaning. Treat it as an exact-ish cache with some tolerance for whitespace/formatting differences, not as embedding-quality semantic matching.
 
 ## Authorization
 

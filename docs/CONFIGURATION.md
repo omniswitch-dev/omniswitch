@@ -142,6 +142,25 @@ routes:
         condition: 'model == "canary-chat"'
 ```
 
+Retries, fallbacks and timeouts:
+
+- `max_retries` retries the same provider. Without `retry_codes`, only
+  transient failures are retried: 408, 409, 425, 429, 5xx and errors with no
+  HTTP status (for example a refused connection). With `retry_codes`, only
+  the listed statuses are retried.
+- An error that is not retried moves the request to the next provider in
+  `fallbacks`. An unsupported parameter is never retried on the same provider.
+- `retry_backoff` is the minimum wait between retries. A `Retry-After`
+  header from the provider extends the wait up to 10 seconds. When the
+  provider asks for a longer wait, the router moves to the next fallback.
+- `timeout` limits one attempt. For a streaming request it limits the time
+  to the first chunk, and after that it is an idle timeout between chunks,
+  so a long generation is not cut off.
+- The circuit breaker counts 5xx responses, 408, 429, timeouts and network
+  errors. Other 4xx responses and client disconnects do not open it.
+- An invalid CEL `condition` is logged once when routes load, and that
+  variant never matches.
+
 ## Provider Accounts
 
 Provider accounts create virtual providers without putting secrets in config.
@@ -511,14 +530,18 @@ curl -X POST http://localhost:8080/api/virtual-keys \
 ## Environment Variables
 
 Environment variables override the matching config-file keys. An empty value
-is treated as unset.
+is treated as unset. An invalid boolean, integer, number or duration stops
+startup with an error that names the variable. Booleans accept `true`/`false`,
+`1`/`0`, `t`/`f`, `y`/`n`, `yes`/`no` and `on`/`off` in any case. Integers must be
+positive (`OMNISWITCH_LOG_RETENTION_DAYS` also accepts `0`), and durations use
+Go syntax such as `30s` or `5m`.
 
 - `OMNISWITCH_CONFIG` - path of the YAML or JSON gateway config file.
 - `OMNISWITCH_LISTEN` - listen address. When neither this nor
   `gateway.listen` is set, the gateway binds `127.0.0.1:8080` while
   authentication is off and `:8080` (all interfaces) while it is on.
 - `OMNISWITCH_DATA`
-- `OMNISWITCH_DATABASE_URL` - a `postgres://` DSN enables PostgreSQL storage so multiple gateway replicas share keys, logs, budgets, and configuration. When unset (or not a postgres URL), SQLite in the data directory is used.
+- `OMNISWITCH_DATABASE_URL` - a `postgres://` or `postgresql://` DSN enables PostgreSQL storage so multiple gateway replicas share keys, logs, budgets, and configuration. When it and `gateway.storage_url` are unset, SQLite in the data directory is used. Any other URL scheme stops startup with an error.
 - `OMNISWITCH_AUTH` - defaults to `false` (no authentication) unless
   `gateway.auth` is set in the config file or an OIDC JWKS URL is configured.
   With auth on and an empty key store, set `OMNISWITCH_BOOTSTRAP_API_KEY` for
@@ -560,10 +583,12 @@ is treated as unset.
 - `OMNISWITCH_OTEL_INSECURE`
 - `OMNISWITCH_OTEL_TIMEOUT`
 - `OMNISWITCH_PROMETHEUS_ENABLED`
+- `OMNISWITCH_METRICS_PUBLIC` - defaults to `false`. When authentication is on, `/metrics` needs a valid key unless this is `true`.
 - `OMNISWITCH_VAULT_KEY`
 - `OMNISWITCH_MCP_ENABLED` - defaults to `false`. When enabled without `OMNISWITCH_MCP_POLICY` (or `mcp.policy`) set, the gateway falls back to a conservative embedded default policy rather than failing to start.
 - `OMNISWITCH_MCP_POLICY`
 - `OMNISWITCH_MCP_UPSTREAM`
+- `OMNISWITCH_POLICY_DIR` - the only directory that `POST /api/evals/policy` reads policy files from. Defaults to the directory of `OMNISWITCH_MCP_POLICY` (`policies`). Requests may name only relative `.cel`, `.yaml` or `.yml` files inside it.
 - `OMNISWITCH_SHUTDOWN_TIMEOUT` - defaults to `30s`. On SIGINT/SIGTERM, `omniswitch serve` stops accepting new connections, waits up to this long for in-flight requests (including SSE streams) to finish, then exits `0`.
 - `OMNISWITCH_ALLOW_NO_PROVIDERS` - defaults to `false`. When `false`, `GET /readyz` reports not-ready if no provider is registered; set to `true` for local smoke-testing without any provider configured.
 - `OMNISWITCH_LOG_RETENTION_DAYS` - defaults to `0` (keep forever). When positive, the gateway deletes request logs, guardrail events and shadow requests older than this many days, once at startup and then every hour. Records from the current UTC month are always kept, because monthly key budgets are computed from them. Lifetime key spend is stored on the key and is not affected. Expired semantic-cache entries are deleted on the same hourly schedule whatever this value is.

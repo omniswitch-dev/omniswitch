@@ -354,10 +354,26 @@ Creates a OmniSwitch API key.
   "workspace_id": "ws_123",
   "role": "admin",
   "rate_limit": 120,
+  "budget_usd": 500,
   "monthly_cost_budget": 50,
-  "monthly_token_budget": 1000000
+  "monthly_token_budget": 1000000,
+  "expires_in": "720h"
 }
 ```
+
+All limits are optional; zero or a missing field means no limit.
+
+- `budget_usd` is a lifetime cap. It is compared with the key's total spend
+  and never resets.
+- `monthly_cost_budget` (USD) and `monthly_token_budget` are compared with
+  the key's usage since the start of the current UTC month, so they reset
+  every month. Usage counts every request that incurred upstream cost,
+  including a response that a guardrail denied after generation. Cache hits
+  do not count.
+- `expires_in` is a Go duration such as `720h`. Day units such as `30d` are
+  rejected.
+
+A request over a budget gets HTTP 402 with a message that names the budget.
 
 ### `GET /api/keys`
 
@@ -493,15 +509,27 @@ The MCP gateway supports JSON-RPC over HTTP, including streaming
 `text/event-stream` responses from streamable HTTP/SSE-capable upstreams.
 Targets can opt into OIDC bearer-token delegation with
 `forward_bearer_token: true`; local OmniSwitch API keys are never forwarded.
-It supports persistent stdio targets as well as HTTP and streamable HTTP. It
-does not yet implement OpenAPI conversion. A2A is exposed separately through
+It supports persistent stdio targets, HTTP and streamable HTTP, and targets
+that set `openapi_spec` (see "OpenAPI-to-MCP conversion" in
+[`CONFIGURATION.md`](CONFIGURATION.md)). A2A is exposed separately through
 the `/.well-known/agent-card.json` and `/a2a` endpoints.
 
 ## Roles and Scopes
 
 When `OMNISWITCH_AUTH=true`, API-key roles are `viewer`, `member`, `admin`, and
-`owner`. All valid keys can call inference and MCP. Viewers can read dashboard
-data (scoped to their own key); members can change prompts and run policy evals;
-admins/owners can mutate keys, virtual keys, and organization/workspace data.
-Admins and owners see global dashboard aggregates, while other roles are
-limited to their key's logs and metrics.
+`owner` (`editor` is an alias for `member`). All valid keys can call inference
+(`/v1/*`) and MCP (`/mcp`). For `/api/*` routes the gateway requires:
+
+| Route | Read (`GET`, `HEAD`, `OPTIONS`) | Write (any other method) |
+|---|---|---|
+| `/api/health` | none | none |
+| `/api/keys`, `/api/virtual-keys`, `/api/virtual-keys/rotate`, `/api/users`, `/api/workspace-members`, `/api/configs`, `/api/config/raw` | `admin` | `admin` |
+| `/api/orgs`, `/api/workspaces` | `viewer` | `admin` |
+| `/api/prompts`, `/api/prompts/versions`, `/api/prompts/render`, `/api/evals/policy` | `viewer` | `member` |
+| `/api/feedback` | `viewer` | `viewer` |
+| Any other `/api/*` route | `viewer` | `admin` |
+
+Key, user, membership, and config routes need `admin` even to read, because
+they expose credential metadata, user emails, or raw configuration that can
+contain secrets. Admins and owners see global dashboard aggregates, while other
+roles are limited to their key's logs and metrics.

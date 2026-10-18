@@ -15,7 +15,7 @@ Local defaults:
 go run ./cmd/proxy
 ```
 
-The proxy listens on `:8080`, loads `policies/production-delete.yaml`, and forwards allowed calls to `http://127.0.0.1:8090/mcp`. Override those with `OMNISWITCH_LISTEN`, `OMNISWITCH_POLICY`, and `OMNISWITCH_UPSTREAM`.
+The proxy listens on `127.0.0.1:8080`, loads `policies/production-delete.yaml`, and forwards allowed calls to `http://127.0.0.1:8090/mcp`. Override those with `OMNISWITCH_LISTEN`, `OMNISWITCH_POLICY`, and `OMNISWITCH_UPSTREAM`. The standalone proxy has no authentication and removes all `x-omniswitch-*` request headers, so identity-based rules see an anonymous caller; use the gateway binary for authenticated deployments.
 
 OmniSwitch policy and decision trace documents use `apiVersion: omniswitch.dev/v1`. A decision trace is the portable artifact for time travel: it stores the request, policy reference, result, evaluation latency, and per-rule match graph.
 

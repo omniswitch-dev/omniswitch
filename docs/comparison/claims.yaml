@@ -184,10 +184,12 @@ claims:
 - capability: fallbacks-retries
   gateway: omniswitch
   status: 'yes'
-  detail: route-level fallbacks, max_retries, retry_backoff, retry_codes, per-attempt timeout.
-  source_url: docs/PORTKEY_COMPARISON.md
-  verified_on: '2026-09-11'
-  version: v0.2.0-beta (commit 88a27c0)
+  detail: route-level fallbacks, max_retries, retry_backoff, retry_codes, per-attempt timeout (time to first
+    chunk, then idle, for streams). Only transient errors are retried by default, and Retry-After is honored
+    up to 10s.
+  source_url: internal/router/errors.go
+  verified_on: '2026-10-18'
+  version: v0.2.0-beta (commit 5ee337f)
 - capability: weighted-load-balancing
   gateway: omniswitch
   status: 'yes'
@@ -220,12 +222,13 @@ claims:
 - capability: semantic-cache
   gateway: omniswitch
   status: 'yes'
-  detail: NOT embedding-based. Vectorize() builds a normalized token-frequency map over lowercased, stop-word-filtered
-    tokens; Similarity() is cosine over those token-frequency vectors. State this precisely wherever OmniSwitch's
+  detail: NOT embedding-based. Vectorize() builds a normalized, role- and order-aware token and bigram frequency
+    map of the conversation; Similarity() is cosine over those vectors. Prompts with images, audio or tool
+    calls match only prompts with the same media and tool calls. State this precisely wherever OmniSwitch's
     cache is compared to embedding-based semantic caches.
   source_url: internal/cache/cache.go
-  verified_on: '2026-09-11'
-  version: v0.2.0-beta (commit 88a27c0)
+  verified_on: '2026-10-18'
+  version: v0.2.0-beta (commit 5ee337f)
 - capability: budgets-quotas
   gateway: omniswitch
   status: 'yes'
@@ -323,18 +326,22 @@ claims:
   version: v0.2.0-beta (commit 88a27c0)
 - capability: openapi-to-mcp
   gateway: omniswitch
-  status: 'no'
-  detail: Not implemented; explicit gap in the project's own comparison doc.
-  source_url: docs/PORTKEY_COMPARISON.md
-  verified_on: '2026-09-11'
-  version: v0.2.0-beta (commit 88a27c0)
+  status: 'yes'
+  detail: An MCP target with openapi_spec exposes the operations of an OpenAPI 3.x document (JSON or YAML,
+    local $refs) as MCP tools. Arguments go to their declared path, query, header or cookie location, and
+    calls pass through the same CEL policy as other MCP tools.
+  source_url: internal/proxy/openapi.go
+  verified_on: '2026-10-18'
+  version: v0.2.0-beta (commit 5ee337f)
 - capability: mcp-oauth-token-exchange
   gateway: omniswitch
-  status: 'yes'
-  detail: RFC 8693 token exchange plus RFC 7523 JWT Bearer Grant for MCP OAuth delegation.
-  source_url: CHANGELOG.md
-  verified_on: '2026-09-11'
-  version: v0.2.0-beta (commit 88a27c0)
+  status: partial
+  detail: RFC 8693 token exchange (with an RFC 7523 JWT Bearer option) exists in the MCP proxy library
+    (TargetConfig.TokenExchange) for Go embedders, but gateway configuration does not expose it. Config-only
+    deployments can forward an OIDC caller's bearer token to a target (forward_bearer_token).
+  source_url: internal/proxy/token_exchange.go
+  verified_on: '2026-10-18'
+  version: v0.2.0-beta (commit 5ee337f)
 - capability: a2a-agent-card
   gateway: omniswitch
   status: 'yes'
@@ -346,11 +353,13 @@ claims:
   gateway: omniswitch
   status: partial
   detail: 'SendMessage / SendMessageStream, GetTask, CancelTask implemented (JSON-RPC methods and REST
-    aliases). Agent card advertises pushNotifications: false, so push-notification task updates are not
+    aliases). SendMessageStream is single-shot SSE (status and artifact frames for one completed response,
+    no token streaming or resubscribe). Tasks are in memory (10,000 max, 1h TTL) and not shared across
+    replicas. Agent card advertises pushNotifications: false, so push-notification task updates are not
     supported.'
   source_url: internal/gateway/a2a_tasks.go
-  verified_on: '2026-09-11'
-  version: v0.2.0-beta (commit 88a27c0)
+  verified_on: '2026-10-18'
+  version: v0.2.0-beta (commit 5ee337f)
 - capability: prompt-management
   gateway: omniswitch
   status: partial
@@ -397,11 +406,12 @@ claims:
 - capability: sqlite-postgres
   gateway: omniswitch
   status: 'yes'
-  detail: SQLite by default; PostgreSQL via OMNISWITCH_DATABASE_URL. Logs and keys remain SQLite-local
-    even in the Postgres case per the project's own docs.
+  detail: SQLite by default; PostgreSQL via OMNISWITCH_DATABASE_URL or gateway.storage_url holds all store
+    state (keys, logs, budgets, prompts, configs, cache), with migrations under an advisory lock. A2A tasks
+    stay in process memory, and rate limits need Redis to be shared across replicas.
   source_url: internal/store/store.go
-  verified_on: '2026-09-11'
-  version: v0.2.0-beta (commit 88a27c0)
+  verified_on: '2026-10-18'
+  version: v0.2.0-beta (commit 5ee337f)
 - capability: kubernetes-manifests-helm
   gateway: omniswitch
   status: 'yes'
