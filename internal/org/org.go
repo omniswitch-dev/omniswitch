@@ -4,15 +4,19 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/omniswitch-dev/omniswitch/internal/gateway"
 	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
-// Handler serves organization and workspace management APIs.
+// Handler serves organization and workspace management APIs. Every handler
+// is limited to the caller's tenant (gateway.ScopeFromContext); see
+// tenant.go for the rules.
 type Handler struct {
 	store *store.Store
 }
@@ -36,6 +40,12 @@ type CreateUserRequest struct {
 	Email    string            `json:"email"`
 	Name     string            `json:"name,omitempty"`
 	Metadata map[string]string `json:"metadata,omitempty"`
+	// WorkspaceID adds the user to this workspace with Role. A scoped
+	// caller always creates a user together with a membership in a
+	// workspace it can see; a workspace-scoped caller defaults to its own
+	// workspace.
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	Role        string `json:"role,omitempty"`
 }
 
 type WorkspaceMemberRequest struct {
@@ -45,6 +55,10 @@ type WorkspaceMemberRequest struct {
 }
 
 func (h *Handler) CreateOrganization(w http.ResponseWriter, r *http.Request) {
+	if !gateway.ScopeFromContext(r.Context()).Global() {
+		writeError(w, http.StatusForbidden, "only global callers can create organizations")
+		return
+	}
 	var req CreateOrganizationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -69,7 +83,7 @@ func (h *Handler) CreateOrganization(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListOrganizations(w http.ResponseWriter, r *http.Request) {
-	organizations, err := h.store.ListOrganizations(r.Context())
+	organizations, err := h.store.ListOrganizationsForTenant(r.Context(), tenantFilter(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -81,10 +95,26 @@ func (h *Handler) ListOrganizations(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
+	scope := gateway.ScopeFromContext(r.Context())
+	if scope.WorkspaceID != "" {
+		writeError(w, http.StatusForbidden, "workspace-scoped callers cannot create workspaces")
+		return
+	}
 	var req CreateWorkspaceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if !scope.Global() {
+		// An organization-scoped caller creates workspaces only in its
+		// own organization; another organization looks like a missing
+		// one.
+		requested := strings.TrimSpace(req.OrganizationID)
+		if requested != "" && requested != scope.OrganizationID {
+			writeError(w, http.StatusNotFound, "organization not found")
+			return
+		}
+		req.OrganizationID = scope.OrganizationID
 	}
 	if strings.TrimSpace(req.OrganizationID) == "" || strings.TrimSpace(req.Name) == "" {
 		writeError(w, http.StatusBadRequest, "organization_id and name are required")
@@ -106,7 +136,7 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListWorkspaces(w http.ResponseWriter, r *http.Request) {
-	workspaces, err := h.store.ListWorkspaces(r.Context(), r.URL.Query().Get("organization_id"))
+	workspaces, err := h.store.ListWorkspacesForTenant(r.Context(), tenantFilter(r), r.URL.Query().Get("organization_id"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -135,6 +165,12 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().UTC(),
 		Metadata:  req.Metadata,
 	}
+	scope := gateway.ScopeFromContext(r.Context())
+	workspaceID := strings.TrimSpace(req.WorkspaceID)
+	if !scope.Global() {
+		h.createScopedUser(w, r, scope, user, workspaceID, req.Role)
+		return
+	}
 	// An existing email keeps its stored ID; respond with that ID, not the
 	// fresh one generated above, which was never stored.
 	stored, err := h.store.UpsertUser(r.Context(), user)
@@ -142,11 +178,19 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if workspaceID != "" {
+		if err := h.store.UpsertWorkspaceMember(r.Context(), store.WorkspaceMember{
+			WorkspaceID: workspaceID, UserID: stored.ID, Role: memberRole(req.Role), CreatedAt: user.CreatedAt,
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
 	writeJSON(w, http.StatusCreated, stored)
 }
 
 func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
-	users, err := h.store.ListUsers(r.Context())
+	users, err := h.store.ListUsersForTenant(r.Context(), tenantFilter(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -167,16 +211,24 @@ func (h *Handler) UpsertWorkspaceMember(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "workspace_id and user_id are required")
 		return
 	}
-	role := strings.TrimSpace(req.Role)
-	if role == "" {
-		role = "viewer"
-	}
-
 	member := store.WorkspaceMember{
 		WorkspaceID: strings.TrimSpace(req.WorkspaceID),
 		UserID:      strings.TrimSpace(req.UserID),
-		Role:        role,
+		Role:        memberRole(req.Role),
 		CreatedAt:   time.Now().UTC(),
+	}
+	if scope := gateway.ScopeFromContext(r.Context()); !scope.Global() {
+		if !h.authorizeMembership(w, r, scope, member) {
+			return
+		}
+		if _, err := h.store.GetUserByID(r.Context(), member.UserID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "user not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	if err := h.store.UpsertWorkspaceMember(r.Context(), member); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -186,7 +238,7 @@ func (h *Handler) UpsertWorkspaceMember(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *Handler) ListWorkspaceMembers(w http.ResponseWriter, r *http.Request) {
-	members, err := h.store.ListWorkspaceMembers(r.Context(), r.URL.Query().Get("workspace_id"))
+	members, err := h.store.ListWorkspaceMembersForTenant(r.Context(), tenantFilter(r), r.URL.Query().Get("workspace_id"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
