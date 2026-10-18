@@ -33,6 +33,21 @@ docker run --rm -p 8080:8080 \
   omniswitch-ai-gateway
 ```
 
+## Run with Docker Compose
+
+`docker-compose.yml` enables authentication and refuses to start without a
+bootstrap key:
+
+```bash
+export OMNISWITCH_BOOTSTRAP_API_KEY="$(openssl rand -hex 32)"
+OPENAI_API_KEY=sk-... docker compose up -d --build
+```
+
+The service restarts unless stopped. To stamp the image with build metadata
+(reported by `omniswitch version` and `GET /api/version`), set
+`OMNISWITCH_BUILD_VERSION`, `OMNISWITCH_BUILD_COMMIT`, and
+`OMNISWITCH_BUILD_DATE` before building.
+
 ## Compose with Postgres
 
 The base compose quickstart uses SQLite. To use a shared Postgres 16 store,
@@ -41,6 +56,7 @@ your bootstrap key and provider credentials:
 
 ```bash
 export OMNISWITCH_POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+export OMNISWITCH_BOOTSTRAP_API_KEY="$(openssl rand -hex 32)"
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml up --build
 ```
 
@@ -88,6 +104,10 @@ replica validation, configurable startup/readiness/liveness probes, an optional
 PodDisruptionBudget, and authenticated Prometheus ServiceMonitors. Private
 metrics must use a bearer token; annotation-based scraping is enabled only when
 `observability.prometheus.public=true` explicitly permits anonymous reads.
+With auth on (the chart default) and no bootstrap key supplied, the chart
+generates one into its Secret (`bootstrap.generate=true`) and keeps it across
+upgrades; OTLP export headers can come from an existing Secret through
+`observability.otel.headersSecret`. See the chart README for details.
 
 ## Persistence
 
