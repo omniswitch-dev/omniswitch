@@ -3,6 +3,7 @@ package guardrail
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -415,7 +416,7 @@ func (e *Engine) evaluate(ctx context.Context, input GuardrailInput) []Result {
 			if webhook.config.FailOpen {
 				continue
 			}
-			triggered = append(triggered, Result{Triggered: true, Type: "webhook:" + webhook.config.Name, Action: webhook.config.Action, Message: "External guardrail unavailable: " + webhook.config.Name, Details: err.Error()})
+			triggered = append(triggered, Result{Triggered: true, Type: "webhook:" + webhook.config.Name, Action: webhook.config.Action, Message: "External guardrail unavailable: " + webhook.config.Name, Details: redactTransportError(err)})
 			continue
 		}
 		if result.Triggered {
@@ -431,7 +432,7 @@ func (e *Engine) evaluate(ctx context.Context, input GuardrailInput) []Result {
 			if judge.config.FailOpen {
 				continue
 			}
-			triggered = append(triggered, Result{Triggered: true, Type: "llm:" + judge.config.Name, Action: judge.config.Action, Message: "LLM guardrail unavailable: " + judge.config.Name, Details: err.Error()})
+			triggered = append(triggered, Result{Triggered: true, Type: "llm:" + judge.config.Name, Action: judge.config.Action, Message: "LLM guardrail unavailable: " + judge.config.Name, Details: redactTransportError(err)})
 			continue
 		}
 		if result.Triggered {
@@ -839,3 +840,33 @@ func extractJSONObject(text string) string {
 }
 
 func Now() time.Time { return time.Now().UTC() }
+
+// redactTransportError describes a webhook or judge failure without the
+// endpoint URL. *url.Error embeds the full request URL, and webhook URLs
+// often carry secrets in the path or query string (Slack-style tokens,
+// ?key=...), while Result.Details is persisted with guardrail events and
+// shown through the trace and log APIs.
+func redactTransportError(err error) string {
+	if err == nil {
+		return ""
+	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		return err.Error()
+	}
+	if urlErr.Timeout() {
+		return "request timed out"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "request canceled"
+	}
+	inner := urlErr.Err
+	if inner == nil {
+		return "request failed"
+	}
+	message := inner.Error()
+	if urlErr.URL != "" {
+		message = strings.ReplaceAll(message, urlErr.URL, "[redacted]")
+	}
+	return "request failed: " + message
+}

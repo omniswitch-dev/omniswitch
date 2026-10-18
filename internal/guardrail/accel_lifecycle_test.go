@@ -2,7 +2,13 @@ package guardrail
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/omniswitch-dev/omniswitch/internal/accel"
 	"github.com/omniswitch-dev/omniswitch/internal/provider"
@@ -65,5 +71,50 @@ func TestEngineCloseIsIdempotentAndKeepsEvaluating(t *testing.T) {
 	}
 	if err := NewEngine().Close(); err != nil {
 		t.Fatalf("Close() without rules error = %v", err)
+	}
+}
+
+func TestRedactTransportError(t *testing.T) {
+	secretURL := "https://hooks.example.com/services/T000/B000/SECRETTOKEN?key=abc"
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "plain", err: errors.New("unexpected status 502 Bad Gateway"), want: "unexpected status 502 Bad Gateway"},
+		{name: "dial", err: &url.Error{Op: "Post", URL: secretURL, Err: errors.New("dial tcp: connection refused")}, want: "request failed: dial tcp: connection refused"},
+		{name: "inner repeats url", err: &url.Error{Op: "Post", URL: secretURL, Err: fmt.Errorf("bad %s", secretURL)}, want: "request failed: bad [redacted]"},
+		{name: "canceled", err: &url.Error{Op: "Post", URL: secretURL, Err: context.Canceled}, want: "request canceled"},
+		{name: "nil", err: nil, want: ""},
+	}
+	for _, tt := range tests {
+		if got := redactTransportError(tt.err); got != tt.want {
+			t.Errorf("%s: redactTransportError() = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestWebhookTransportErrorDetailsHideURL(t *testing.T) {
+	// A closed local port gives a fast transport error.
+	secretURL := "http://127.0.0.1:1/hook/SECRETTOKEN?api_key=topsecret"
+	e := NewEngineWithConfig(Config{Webhooks: []Webhook{{Name: "external", URL: secretURL, Stage: "input", Timeout: 2 * time.Second}}})
+	defer e.Close()
+	e.webhooks[0].client = &http.Client{Timeout: 2 * time.Second}
+	results := e.EvaluateInputContext(context.Background(), []provider.Message{{Role: "user", Content: "hello"}})
+	var found bool
+	for _, r := range results {
+		if r.Type != "webhook:external" {
+			continue
+		}
+		found = true
+		if strings.Contains(r.Details, "SECRETTOKEN") || strings.Contains(r.Details, "topsecret") || strings.Contains(r.Details, "/hook/") {
+			t.Fatalf("Details leaks the webhook URL: %q", r.Details)
+		}
+		if r.Details == "" {
+			t.Fatal("Details is empty, want a redacted reason")
+		}
+	}
+	if !found {
+		t.Fatalf("results = %+v, want a fail-closed webhook result", results)
 	}
 }
