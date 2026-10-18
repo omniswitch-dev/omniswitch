@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -147,5 +148,40 @@ func TestControlPlaneRejectsOversizedBodies(t *testing.T) {
 	}
 	if rec := doRequest(h, http.MethodPost, "/api/feedback", routeTestKey, `{"request_id":"r","score":1}`, nil); rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
 		t.Fatalf("small feedback status = %d body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPolicyReplayDirectoryDefault checks that policy replay reads only a
+// dedicated policies directory by default. A policy file next to the gateway
+// config or in the working directory must not expose the other files there.
+func TestPolicyReplayDirectoryDefault(t *testing.T) {
+	cases := []struct {
+		name, mcpPolicy, policyDirEnv, want string
+	}{
+		{name: "built-in default", want: "policies"},
+		{name: "policies directory", mcpPolicy: "/app/policies/mcp.yaml", want: "/app/policies"},
+		{name: "policy next to the config", mcpPolicy: "/config/mcp-policy.yaml", want: ""},
+		{name: "policy in the working directory", mcpPolicy: "mcp-policy.yaml", want: ""},
+		{name: "explicit directory", mcpPolicy: "/config/mcp-policy.yaml", policyDirEnv: "/srv/replay", want: "/srv/replay"},
+		{name: "explicitly off", policyDirEnv: "off", want: ""},
+		{name: "explicitly off with a dash", policyDirEnv: "-", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGatewayEnv(t)
+			if tc.mcpPolicy != "" {
+				t.Setenv("OMNISWITCH_MCP_POLICY", tc.mcpPolicy)
+			}
+			if tc.policyDirEnv != "" {
+				t.Setenv("OMNISWITCH_POLICY_DIR", tc.policyDirEnv)
+			}
+			settings, err := loadRuntimeSettings()
+			if err != nil {
+				t.Fatalf("loadRuntimeSettings() error = %v", err)
+			}
+			if settings.policyDir != filepath.FromSlash(tc.want) {
+				t.Fatalf("policyDir = %q, want %q", settings.policyDir, tc.want)
+			}
+		})
 	}
 }

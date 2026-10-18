@@ -226,9 +226,11 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 	}
 	settings.mcpUpstreamURL = env("OMNISWITCH_MCP_UPSTREAM", settings.mcpUpstreamURL)
 	// Policy replay (/api/evals/policy) only reads policy files from this
-	// operator-trusted directory. It defaults to the directory holding the
-	// MCP policy file.
-	settings.policyDir = env("OMNISWITCH_POLICY_DIR", filepath.Dir(settings.mcpPolicyPath))
+	// operator-trusted directory. "off" or "-" turns replay off.
+	settings.policyDir = env("OMNISWITCH_POLICY_DIR", defaultPolicyDir(settings.mcpPolicyPath))
+	if strings.EqualFold(settings.policyDir, "off") || settings.policyDir == "-" {
+		settings.policyDir = ""
+	}
 	settings.oidcJWKSURL = env("OMNISWITCH_OIDC_JWKS_URL", settings.oidcJWKSURL)
 	settings.oidcIssuer = env("OMNISWITCH_OIDC_ISSUER", settings.oidcIssuer)
 	settings.oidcAudience = env("OMNISWITCH_OIDC_AUDIENCE", settings.oidcAudience)
@@ -652,6 +654,20 @@ func applyHotConfig(cfg gatewayconfig.Config, rtr *router.Router, gw *gateway.Ha
 func prevRouteOwnedByFile(prev map[string]router.Route, model string) bool {
 	_, ok := prev[model]
 	return ok
+}
+
+// defaultPolicyDir returns the policy replay directory used when
+// OMNISWITCH_POLICY_DIR is not set: the directory of the MCP policy file,
+// but only when that directory is a dedicated "policies" directory. A policy
+// file kept next to the gateway config, or in the working directory, would
+// otherwise let replay requests read the other YAML files there. In that
+// case replay stays off until OMNISWITCH_POLICY_DIR names a directory.
+func defaultPolicyDir(mcpPolicyPath string) string {
+	dir := filepath.Dir(filepath.Clean(mcpPolicyPath))
+	if filepath.Base(dir) != "policies" {
+		return ""
+	}
+	return dir
 }
 
 func env(key, fallback string) string {

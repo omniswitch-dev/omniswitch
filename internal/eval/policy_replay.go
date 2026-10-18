@@ -33,7 +33,7 @@ func (h *Handler) SetPolicyRoot(root string) {
 // rejected. The returned paths are fully resolved and inside root.
 func resolveReplayPolicyPaths(root string, names []string) ([]string, error) {
 	if strings.TrimSpace(root) == "" {
-		return nil, errors.New("policy replay is disabled: no policy directory is configured")
+		return nil, errors.New("policy replay is disabled: set OMNISWITCH_POLICY_DIR to the directory that holds the policy files to replay")
 	}
 	if len(names) > maxReplayPolicyFiles {
 		return nil, fmt.Errorf("at most %d policy_paths are allowed", maxReplayPolicyFiles)
