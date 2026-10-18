@@ -366,8 +366,8 @@ without a restart:
 - `alerts`;
 - `budget_fail_open` and `budget_refresh_interval`;
 - `circuit_breaker_failures` and `circuit_breaker_cooldown`. A change installs
-  a new breaker with all circuits closed. A reload without a change keeps
-  open circuits open.
+  a new breaker with all circuits closed, for client traffic and for shadow
+  traffic. A reload without a change keeps open circuits open.
 
 The gateway logs and skips a file that is not valid. Providers, identity,
 rate-limit backends and MCP targets need a restart.

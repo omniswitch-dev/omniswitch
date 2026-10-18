@@ -67,6 +67,7 @@ identity:
     workspace_claim: workspace_id
     organization_claim: organization_id
     cache_ttl: 5m
+    stale_if_error: 24h
 
 guardrails:
   actions:
@@ -176,12 +177,23 @@ Retries, fallbacks and timeouts:
   to the first chunk, and after that it is an idle timeout between chunks,
   so a long generation is not cut off.
 - The circuit breaker counts 5xx responses, 408, 429, timeouts and network
-  errors. Other 4xx responses and client disconnects do not open it.
-  `circuit_breaker_failures` and `circuit_breaker_cooldown` reload with the
+  errors. Other 4xx responses and client disconnects do not open it. After
+  `circuit_breaker_failures` consecutive failures, the provider's circuit
+  opens for `circuit_breaker_cooldown`, and requests skip the provider.
+- When the cooldown ends, the circuit is half-open: one request at a time
+  (the probe) goes to the provider, and other requests use the fallback
+  chain as for an open circuit. A successful probe closes the circuit. A
+  failed probe opens it again for another cooldown. A probe that ends because
+  the client cancelled frees the slot without a verdict. A probe that reports
+  nothing within the cooldown counts as lost, and the next request becomes
+  the probe. A retry against the same provider stops when its circuit opens.
+- `circuit_breaker_failures` and `circuit_breaker_cooldown` reload with the
   config file. A change to one of them installs a new breaker with all
   circuits closed. A reload that does not change them keeps the current
   breaker and its open circuits. Requests that use a stored config share
-  this breaker.
+  this breaker. Shadow traffic (`shadow_provider`) has a separate breaker
+  with the same settings, so shadow failures never open circuits for client
+  traffic. The same reload rule applies to the shadow breaker.
 - An invalid CEL `condition` is logged once when routes load, and that
   variant never matches.
 
@@ -499,6 +511,23 @@ and organization claims are mapped with the configurable claim names. JWT
 claims are also available to authorization CEL rules as `subject` and
 `claims`. Supplying a JWKS URL enables gateway authentication automatically.
 
+The gateway caches the JWKS signing keys for `cache_ttl` (default `5m`). When
+the cache expires, requests keep using the cached keys while one background
+fetch refreshes them, so a slow JWKS endpoint does not delay requests. If the
+refresh fails, the cached keys stay usable for `stale_if_error` (default `24h`,
+`0` to `168h`) after `cache_ttl`, so an identity provider outage does not
+reject every OIDC caller. After a failed fetch, the next fetch waits 1 second,
+and the wait doubles up to 1 minute until a fetch succeeds. During that wait,
+a token with an unknown `kid` does not start a fetch. When the grace ends, the
+gateway drops the cached keys and rejects OIDC tokens with 401 until the JWKS
+endpoint answers again. A successful fetch replaces the key set at once.
+
+Security trade-off: during an outage the gateway accepts tokens signed with
+the cached keys for at most `stale_if_error`, also a key that the identity
+provider revoked during the outage. Token `exp` and `nbf` are still checked.
+Set `stale_if_error: 0` to reject OIDC tokens as soon as `cache_ttl` ends and
+a refresh fails.
+
 When `auth: true` is used on an empty database, set
 `OMNISWITCH_BOOTSTRAP_API_KEY` for the first process start. OmniSwitch stores only
 its SHA-256 hash and creates the `bootstrap-admin` owner key. Store the secret
@@ -745,6 +774,7 @@ Go syntax such as `30s` or `5m`.
 - `OMNISWITCH_OIDC_WORKSPACE_CLAIM`
 - `OMNISWITCH_OIDC_ORGANIZATION_CLAIM`
 - `OMNISWITCH_OIDC_CACHE_TTL`
+- `OMNISWITCH_OIDC_STALE_IF_ERROR` (a Go duration from `0` to `168h`; another value stops startup)
 - `OMNISWITCH_SHADOW_PROVIDER`
 - `OMNISWITCH_AB_TEST`
 - `OMNISWITCH_OTEL_ENABLED`
