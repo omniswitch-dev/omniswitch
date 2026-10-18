@@ -256,6 +256,7 @@ func (client *stdioClient) spawn() (*stdioProcess, error) {
 		return nil, fmt.Errorf("open stdio MCP stdout: %w", err)
 	}
 	command.Stderr = os.Stderr
+	configureStdioCommand(command)
 	if err := command.Start(); err != nil {
 		_ = stdin.Close()
 		return nil, fmt.Errorf("start stdio MCP server: %w", err)
@@ -404,9 +405,7 @@ func (process *stdioProcess) kill(reason error) {
 		}
 		process.mu.Unlock()
 		_ = process.stdin.Close()
-		if process.cmd.Process != nil {
-			_ = process.cmd.Process.Kill()
-		}
+		killStdioCommand(process.cmd)
 	})
 }
 
