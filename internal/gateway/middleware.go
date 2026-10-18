@@ -543,6 +543,24 @@ func withIdentity(ctx context.Context, identity Identity) context.Context {
 	return context.WithValue(ctx, identityContextKey, identity)
 }
 
+// ContextWithIdentity returns ctx carrying identity, as AuthMiddleware does
+// for authenticated requests. It exists for handlers' tests and embedders.
+func ContextWithIdentity(ctx context.Context, identity Identity) context.Context {
+	return withIdentity(ctx, identity)
+}
+
+// RoleRank orders roles: owner 4, admin 3, member (or editor) 2, anything
+// else 1 (viewer). Handlers use it to stop callers granting roles above
+// their own.
+func RoleRank(role string) int {
+	return roleRank(role)
+}
+
+// NormalizeRole maps a role name onto owner, admin, member or viewer.
+func NormalizeRole(role string) string {
+	return normalizeRole(role)
+}
+
 func IdentityFromContext(ctx context.Context) (Identity, bool) {
 	identity, ok := ctx.Value(identityContextKey).(Identity)
 	return identity, ok
