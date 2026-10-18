@@ -30,6 +30,9 @@ const (
 	maxBufferedResponseBytes = 16 << 20
 	// maxListPages caps tools/list pagination per target.
 	maxListPages = 20
+	// auditTimeout bounds one audit insert, which runs detached from the
+	// request's cancellation.
+	auditTimeout = 5 * time.Second
 )
 
 // TargetConfig defines a named upstream MCP server. A configured target is
@@ -427,7 +430,11 @@ func (h *Handler) audit(r *http.Request, method string, req model.ToolRequest, d
 	if sc := oteltrace.SpanContextFromContext(r.Context()); sc.IsValid() {
 		event.TraceID = sc.TraceID().String()
 	}
-	if err := h.auditor.Log(r.Context(), event); err != nil {
+	// The record must survive a client that disconnects mid-request, so the
+	// insert gets its own deadline instead of the request's cancellation.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), auditTimeout)
+	defer cancel()
+	if err := h.auditor.Log(ctx, event); err != nil {
 		log.Printf("mcp audit log failed (method=%s target=%s): %v", method, event.Target, err)
 	}
 }

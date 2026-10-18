@@ -1,10 +1,14 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/omniswitch-dev/omniswitch/internal/audit"
 )
 
 // TestNotificationsGetNoJSONRPCResponse covers MCP streamable HTTP rules: an
@@ -73,5 +77,38 @@ func TestNotificationsGetNoJSONRPCResponse(t *testing.T) {
 	rec := serve(h, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"github__delete_repo","arguments":{"repo":"prod-api"}}}`)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":7`) || !strings.Contains(rec.Body.String(), `"isError":true`) {
 		t.Fatalf("request response = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+type contextCheckingAuditor struct {
+	memoryAuditor
+	errs []error
+}
+
+func (a *contextCheckingAuditor) Log(ctx context.Context, event audit.Event) error {
+	if err := ctx.Err(); err != nil {
+		a.mu.Lock()
+		a.errs = append(a.errs, err)
+		a.mu.Unlock()
+		return err
+	}
+	return a.memoryAuditor.Log(ctx, event)
+}
+
+func TestAuditSurvivesCancelledRequestContext(t *testing.T) {
+	upstream := &recordingUpstream{}
+	auditor := &contextCheckingAuditor{}
+	h, err := NewMultiHandler(loadEngine(t, "../../policies/production-delete.yaml"), auditor, []TargetConfig{
+		{Name: "github", Upstream: upstream.server(t).URL},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the client already went away
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"github__delete_repo","arguments":{"repo":"prod-api"}}}`)).WithContext(ctx)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if len(auditor.errs) != 0 || len(auditor.events) != 1 || auditor.events[0].Decision != "DENY" {
+		t.Fatalf("audit errs=%v events=%+v", auditor.errs, auditor.events)
 	}
 }
