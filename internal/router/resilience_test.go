@@ -419,28 +419,6 @@ func TestConditionalVariantsCompileOnce(t *testing.T) {
 	}
 }
 
-func TestCountsAsProviderFailure(t *testing.T) {
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	tests := []struct {
-		name string
-		ctx  context.Context
-		err  error
-		want bool
-	}{
-		{"nil error", context.Background(), nil, false},
-		{"upstream error", context.Background(), errors.New("status 500"), true},
-		{"deadline", context.Background(), context.DeadlineExceeded, true},
-		{"cancelled error", context.Background(), fmt.Errorf("read: %w", context.Canceled), false},
-		{"parent done", cancelled, errors.New("status 500"), false},
-	}
-	for _, tt := range tests {
-		if got := countsAsProviderFailure(tt.ctx, tt.err); got != tt.want {
-			t.Errorf("%s: countsAsProviderFailure() = %v, want %v", tt.name, got, tt.want)
-		}
-	}
-}
-
 func TestRouteTimeoutParsing(t *testing.T) {
 	for value, want := range map[string]time.Duration{
 		"": 0, "   ": 0, "bogus": 0, "-1s": 0, "0s": 0, "250ms": 250 * time.Millisecond, " 2s ": 2 * time.Second,

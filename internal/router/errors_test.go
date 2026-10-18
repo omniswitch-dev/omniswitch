@@ -127,19 +127,35 @@ func TestRetryWait(t *testing.T) {
 	}
 }
 
-func TestCountsAsProviderFailureByStatus(t *testing.T) {
+func TestCountsAsProviderFailure(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	type failureCase struct {
+		name string
+		ctx  context.Context
+		err  error
+		want bool
+	}
+	tests := []failureCase{
+		{"nil error", context.Background(), nil, false},
+		{"plain upstream error", context.Background(), errors.New("status 500"), true},
+		{"deadline", context.Background(), context.DeadlineExceeded, true},
+		{"cancelled error", context.Background(), fmt.Errorf("read: %w", context.Canceled), false},
+		{"parent done", cancelled, errors.New("status 500"), false},
+		{"unsupported parameter", context.Background(), &provider.UnsupportedParameterError{Provider: "p", Param: "seed"}, false},
+	}
+	// Client errors must not trip the breaker; timeouts, throttling and
+	// server errors must.
 	for _, code := range []int{400, 401, 403, 404, 409, 413, 422} {
-		if countsAsProviderFailure(context.Background(), upstreamErr(code)) {
-			t.Errorf("status %d counted as a provider failure; client errors must not trip the breaker", code)
-		}
+		tests = append(tests, failureCase{fmt.Sprintf("status %d", code), context.Background(), upstreamErr(code), false})
 	}
 	for _, code := range []int{408, 429, 500, 502, 503, 529} {
-		if !countsAsProviderFailure(context.Background(), upstreamErr(code)) {
-			t.Errorf("status %d not counted as a provider failure", code)
-		}
+		tests = append(tests, failureCase{fmt.Sprintf("status %d", code), context.Background(), upstreamErr(code), true})
 	}
-	if countsAsProviderFailure(context.Background(), &provider.UnsupportedParameterError{Provider: "p", Param: "seed"}) {
-		t.Error("unsupported parameter counted as a provider failure")
+	for _, tt := range tests {
+		if got := countsAsProviderFailure(tt.ctx, tt.err); got != tt.want {
+			t.Errorf("%s: countsAsProviderFailure() = %v, want %v", tt.name, got, tt.want)
+		}
 	}
 }
 
