@@ -678,7 +678,7 @@ func (s *Store) InsertLog(ctx context.Context, log RequestLog) error {
 			input_tokens, output_tokens, total_tokens, latency_ms, cost,
 			request_body, response_body, decision, decision_reason, error_message, cached, metadata)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		log.ID, log.Timestamp.Format(time.RFC3339Nano), log.TraceID, log.SessionID, log.Provider, log.Model,
+		log.ID, formatTime(log.Timestamp), log.TraceID, log.SessionID, log.Provider, log.Model,
 		log.APIKeyID, log.Status, log.InputTokens, log.OutputTokens, log.TotalTokens,
 		log.LatencyMs, log.Cost, log.RequestBody, log.ResponseBody,
 		log.Decision, log.DecisionReason, log.ErrorMessage, boolToInt(log.Cached), log.Metadata,
@@ -739,7 +739,7 @@ func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, statu
 			&l.LatencyMs, &l.Cost, &l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached, &l.Metadata); err != nil {
 			return nil, 0, err
 		}
-		l.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
+		l.Timestamp = parseTime(ts)
 		l.Cached = cached == 1
 		logs = append(logs, l)
 	}
@@ -766,7 +766,7 @@ func (s *Store) UpsertGatewayConfig(ctx context.Context, record GatewayConfigRec
 			record.Description,
 			record.Format,
 			record.Body,
-			record.UpdatedAt.Format(time.RFC3339Nano),
+			formatTime(record.UpdatedAt),
 			boolToInt(record.Enabled),
 			record.ID,
 		)
@@ -791,8 +791,8 @@ func (s *Store) UpsertGatewayConfig(ctx context.Context, record GatewayConfigRec
 		record.Description,
 		record.Format,
 		record.Body,
-		record.CreatedAt.Format(time.RFC3339Nano),
-		record.UpdatedAt.Format(time.RFC3339Nano),
+		formatTime(record.CreatedAt),
+		formatTime(record.UpdatedAt),
 		boolToInt(record.Enabled),
 	)
 	return err
@@ -802,7 +802,7 @@ func (s *Store) SetGatewayConfigEnabled(ctx context.Context, ref string, enabled
 	result, err := s.exec(ctx,
 		`UPDATE gateway_configs SET enabled = ?, updated_at = ? WHERE id = ? OR name = ?`,
 		boolToInt(enabled),
-		time.Now().UTC().Format(time.RFC3339Nano),
+		formatTime(time.Now().UTC()),
 		ref,
 		ref,
 	)
@@ -829,8 +829,8 @@ func (s *Store) GetGatewayConfig(ctx context.Context, ref string) (GatewayConfig
 	if err != nil {
 		return record, err
 	}
-	record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	record.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	record.CreatedAt = parseTime(createdAt)
+	record.UpdatedAt = parseTime(updatedAt)
 	record.Enabled = enabled == 1
 	return record, nil
 }
@@ -856,8 +856,8 @@ func (s *Store) ListGatewayConfigs(ctx context.Context, includeDisabled bool) ([
 		if err := rows.Scan(&record.ID, &record.Name, &record.Description, &record.Format, &record.Body, &createdAt, &updatedAt, &enabled); err != nil {
 			return nil, err
 		}
-		record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		record.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+		record.CreatedAt = parseTime(createdAt)
+		record.UpdatedAt = parseTime(updatedAt)
 		record.Enabled = enabled == 1
 		records = append(records, record)
 	}
@@ -866,7 +866,7 @@ func (s *Store) ListGatewayConfigs(ctx context.Context, includeDisabled bool) ([
 
 func (s *Store) DeleteGatewayConfig(ctx context.Context, ref string) error {
 	result, err := s.exec(ctx, `UPDATE gateway_configs SET enabled = 0, updated_at = ? WHERE id = ? OR name = ?`,
-		time.Now().UTC().Format(time.RFC3339Nano),
+		formatTime(time.Now().UTC()),
 		ref,
 		ref,
 	)
@@ -885,7 +885,7 @@ func (s *Store) GetCostAnalytics(ctx context.Context, since time.Time, groupBy, 
 		return nil, err
 	}
 	where := "timestamp >= ?"
-	args := []any{since.Format(time.RFC3339Nano)}
+	args := []any{formatTime(since)}
 	if apiKeyID != "" {
 		where += " AND api_key_id = ?"
 		args = append(args, apiKeyID)
@@ -941,7 +941,7 @@ func (s *Store) GetTrace(ctx context.Context, traceID, apiKeyID string) (TraceDe
 			&l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached, &l.Metadata); err != nil {
 			return detail, err
 		}
-		l.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
+		l.Timestamp = parseTime(ts)
 		l.Cached = cached == 1
 		detail.Logs = append(detail.Logs, l)
 		requestIDs = append(requestIDs, l.ID)
@@ -1001,7 +1001,7 @@ func (s *Store) GetMetricsForAPIKey(ctx context.Context, since time.Time, apiKey
 
 func (s *Store) getMetrics(ctx context.Context, since time.Time, apiKeyID string) (Metrics, error) {
 	var m Metrics
-	sinceStr := since.Format(time.RFC3339Nano)
+	sinceStr := formatTime(since)
 	where := "timestamp >= ?"
 	args := []any{sinceStr}
 	if apiKeyID != "" {
@@ -1043,7 +1043,7 @@ func (s *Store) GetProviderMetricsForAPIKey(ctx context.Context, since time.Time
 }
 
 func (s *Store) getProviderMetrics(ctx context.Context, since time.Time, apiKeyID string) ([]ProviderMetrics, error) {
-	sinceStr := since.Format(time.RFC3339Nano)
+	sinceStr := formatTime(since)
 	where := "timestamp >= ?"
 	args := []any{sinceStr}
 	if apiKeyID != "" {
@@ -1084,7 +1084,7 @@ func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
 	meta, _ := json.Marshal(key.Metadata)
 	var expiresAt *string
 	if key.ExpiresAt != nil {
-		s := key.ExpiresAt.Format(time.RFC3339)
+		s := formatTime(*key.ExpiresAt)
 		expiresAt = &s
 	}
 	_, err := s.exec(ctx,
@@ -1101,7 +1101,7 @@ func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
 			role = excluded.role,
 			metadata = excluded.metadata`,
 		key.ID, key.Name, key.KeyHash, key.KeyPrefix,
-		key.CreatedAt.Format(time.RFC3339), expiresAt,
+		formatTime(key.CreatedAt), expiresAt,
 		key.RateLimit, boolToInt(key.Enabled), key.WorkspaceID, key.Role, string(meta),
 	)
 	if err != nil {
@@ -1129,9 +1129,9 @@ func (s *Store) GetAPIKeyByHash(ctx context.Context, hash string) (APIKey, error
 		return key, err
 	}
 
-	key.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	key.CreatedAt = parseTime(createdAt)
 	if expiresAt.Valid {
-		t, _ := time.Parse(time.RFC3339, expiresAt.String)
+		t := parseTime(expiresAt.String)
 		key.ExpiresAt = &t
 	}
 	key.WorkspaceID = nullableString(workspaceID)
@@ -1161,9 +1161,9 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 		if err := rows.Scan(&k.ID, &k.Name, &k.KeyPrefix, &createdAt, &expiresAt, &k.RateLimit, &k.BudgetUSD, &k.SpendUSD, &k.MonthlyCostBudget, &k.MonthlyTokenBudget, &enabled, &workspaceID, &role); err != nil {
 			return nil, err
 		}
-		k.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		k.CreatedAt = parseTime(createdAt)
 		if expiresAt.Valid {
-			t, _ := time.Parse(time.RFC3339, expiresAt.String)
+			t := parseTime(expiresAt.String)
 			k.ExpiresAt = &t
 		}
 		k.WorkspaceID = nullableString(workspaceID)
@@ -1188,7 +1188,7 @@ func (s *Store) InsertPrompt(ctx context.Context, p Prompt) error {
 		`INSERT INTO prompts (id, name, version, template, variables, created_at, updated_at, metadata)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, p.Name, p.Version, p.Template, string(vars),
-		p.CreatedAt.Format(time.RFC3339), p.UpdatedAt.Format(time.RFC3339), string(meta),
+		formatTime(p.CreatedAt), formatTime(p.UpdatedAt), string(meta),
 	)
 	return err
 }
@@ -1209,8 +1209,8 @@ func (s *Store) ListPrompts(ctx context.Context) ([]Prompt, error) {
 		if err := rows.Scan(&p.ID, &p.Name, &p.Version, &p.Template, &varsStr, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
-		p.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-		p.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		p.CreatedAt = parseTime(createdAt)
+		p.UpdatedAt = parseTime(updatedAt)
 		_ = json.Unmarshal([]byte(varsStr), &p.Variables)
 		prompts = append(prompts, p)
 	}
@@ -1234,8 +1234,8 @@ func (s *Store) ListPromptVersions(ctx context.Context, name string) ([]Prompt, 
 		if err := rows.Scan(&p.ID, &p.Name, &p.Version, &p.Template, &varsStr, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
-		p.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-		p.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		p.CreatedAt = parseTime(createdAt)
+		p.UpdatedAt = parseTime(updatedAt)
 		_ = json.Unmarshal([]byte(varsStr), &p.Variables)
 		prompts = append(prompts, p)
 	}
@@ -1261,8 +1261,8 @@ func (s *Store) GetPrompt(ctx context.Context, id string) (Prompt, error) {
 	if err != nil {
 		return p, err
 	}
-	p.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-	p.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	p.CreatedAt = parseTime(createdAt)
+	p.UpdatedAt = parseTime(updatedAt)
 	_ = json.Unmarshal([]byte(varsStr), &p.Variables)
 	return p, nil
 }
@@ -1272,7 +1272,7 @@ func (s *Store) InsertGuardrailEvent(ctx context.Context, e GuardrailEvent) erro
 	_, err := s.exec(ctx,
 		`INSERT INTO guardrail_events (id, request_id, timestamp, guardrail_type, action, matched, details)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, e.RequestID, e.Timestamp.Format(time.RFC3339Nano),
+		e.ID, e.RequestID, formatTime(e.Timestamp),
 		e.Type, e.Action, boolToInt(e.Matched), e.Details,
 	)
 	return err
@@ -1306,7 +1306,7 @@ func (s *Store) listGuardrailEventsForRequests(ctx context.Context, requestIDs [
 		if err := rows.Scan(&event.ID, &event.RequestID, &timestamp, &event.Type, &event.Action, &matched, &event.Details); err != nil {
 			return nil, err
 		}
-		event.Timestamp, _ = time.Parse(time.RFC3339Nano, timestamp)
+		event.Timestamp = parseTime(timestamp)
 		event.Matched = matched == 1
 		events = append(events, event)
 	}
@@ -1327,9 +1327,9 @@ func (s *Store) GetAPIKeyByID(ctx context.Context, id string) (APIKey, error) {
 		return key, err
 	}
 
-	key.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	key.CreatedAt = parseTime(createdAt)
 	if expiresAt.Valid {
-		t, _ := time.Parse(time.RFC3339, expiresAt.String)
+		t := parseTime(expiresAt.String)
 		key.ExpiresAt = &t
 	}
 	key.WorkspaceID = nullableString(workspaceID)
@@ -1354,7 +1354,7 @@ func (s *Store) GetBudgetUsage(ctx context.Context, apiKeyID string, since time.
 		FROM request_logs
 		WHERE api_key_id = ? AND timestamp >= ? AND decision = 'ALLOW'`,
 		apiKeyID,
-		since.Format(time.RFC3339Nano),
+		formatTime(since),
 	).Scan(&usage.Cost, &usage.Tokens)
 	return usage, err
 }
@@ -1371,7 +1371,7 @@ func (s *Store) InsertSemanticCache(ctx context.Context, entry CacheEntry) error
 
 	var expiresAt *string
 	if entry.ExpiresAt != nil {
-		value := entry.ExpiresAt.Format(time.RFC3339Nano)
+		value := formatTime(*entry.ExpiresAt)
 		expiresAt = &value
 	}
 
@@ -1384,7 +1384,7 @@ func (s *Store) InsertSemanticCache(ctx context.Context, entry CacheEntry) error
 			vector_json = excluded.vector_json, response_json = excluded.response_json`,
 		entry.ID,
 		entry.Key,
-		entry.CreatedAt.Format(time.RFC3339Nano),
+		formatTime(entry.CreatedAt),
 		expiresAt,
 		entry.Model,
 		entry.Prompt,
@@ -1403,7 +1403,7 @@ func (s *Store) GetExactCache(ctx context.Context, key string) (CacheEntry, bool
 		WHERE cache_key = ? AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?)
 		LIMIT 1`,
 		key,
-		time.Now().UTC().Format(time.RFC3339Nano),
+		formatTime(time.Now().UTC()),
 	).Scan(&entry.ID, &entry.Key, &createdAt, &expiresAt, &entry.Model, &entry.Prompt, &vectorJSON, &responseJSON)
 	if err == sql.ErrNoRows {
 		return CacheEntry{}, false, nil
@@ -1411,9 +1411,9 @@ func (s *Store) GetExactCache(ctx context.Context, key string) (CacheEntry, bool
 	if err != nil {
 		return CacheEntry{}, false, err
 	}
-	entry.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	entry.CreatedAt = parseTime(createdAt)
 	if expiresAt != "" {
-		parsed, _ := time.Parse(time.RFC3339Nano, expiresAt)
+		parsed := parseTime(expiresAt)
 		entry.ExpiresAt = &parsed
 	}
 	if err := json.Unmarshal([]byte(vectorJSON), &entry.Vector); err != nil {
@@ -1432,7 +1432,7 @@ func (s *Store) FindSemanticCache(ctx context.Context, model string, vector map[
 		WHERE model = ? AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?)
 		ORDER BY created_at DESC LIMIT 250`,
 		model,
-		time.Now().UTC().Format(time.RFC3339Nano),
+		formatTime(time.Now().UTC()),
 	)
 	if err != nil {
 		return CacheEntry{}, false, err
@@ -1447,9 +1447,9 @@ func (s *Store) FindSemanticCache(ctx context.Context, model string, vector map[
 		if err := rows.Scan(&entry.ID, &entry.Key, &createdAt, &expiresAt, &entry.Model, &entry.Prompt, &vectorJSON, &responseJSON); err != nil {
 			return CacheEntry{}, false, err
 		}
-		entry.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		entry.CreatedAt = parseTime(createdAt)
 		if expiresAt != "" {
-			parsed, _ := time.Parse(time.RFC3339Nano, expiresAt)
+			parsed := parseTime(expiresAt)
 			entry.ExpiresAt = &parsed
 		}
 		if err := json.Unmarshal([]byte(vectorJSON), &entry.Vector); err != nil {
@@ -1486,7 +1486,7 @@ func (s *Store) InsertShadowLog(ctx context.Context, entry ShadowLog) error {
 		entry.ID,
 		entry.RequestID,
 		entry.TraceID,
-		entry.Timestamp.Format(time.RFC3339Nano),
+		formatTime(entry.Timestamp),
 		entry.PrimaryProvider,
 		entry.ShadowProvider,
 		entry.Model,
@@ -1516,7 +1516,7 @@ func (s *Store) ListShadowLogs(ctx context.Context, requestID string) ([]ShadowL
 		if err := rows.Scan(&entry.ID, &entry.RequestID, &entry.TraceID, &timestamp, &entry.PrimaryProvider, &entry.ShadowProvider, &entry.Model, &entry.LatencyMs, &entry.Cost, &entry.Status, &entry.ErrorMessage); err != nil {
 			return nil, err
 		}
-		entry.Timestamp, _ = time.Parse(time.RFC3339Nano, timestamp)
+		entry.Timestamp = parseTime(timestamp)
 		logs = append(logs, entry)
 	}
 	return logs, rows.Err()
@@ -1539,7 +1539,7 @@ func (s *Store) listShadowLogsForTrace(ctx context.Context, traceID string) ([]S
 		if err := rows.Scan(&entry.ID, &entry.RequestID, &entry.TraceID, &timestamp, &entry.PrimaryProvider, &entry.ShadowProvider, &entry.Model, &entry.LatencyMs, &entry.Cost, &entry.Status, &entry.ErrorMessage); err != nil {
 			return nil, err
 		}
-		entry.Timestamp, _ = time.Parse(time.RFC3339Nano, timestamp)
+		entry.Timestamp = parseTime(timestamp)
 		logs = append(logs, entry)
 	}
 	return logs, rows.Err()
@@ -1553,7 +1553,7 @@ func (s *Store) InsertFeedback(ctx context.Context, entry Feedback) error {
 		entry.ID,
 		entry.RequestID,
 		entry.TraceID,
-		entry.Timestamp.Format(time.RFC3339Nano),
+		formatTime(entry.Timestamp),
 		entry.Score,
 		entry.Rating,
 		entry.Comment,
@@ -1598,7 +1598,7 @@ func (s *Store) ListFeedback(ctx context.Context, limit int, requestID, traceID 
 		if err := rows.Scan(&entry.ID, &entry.RequestID, &entry.TraceID, &timestamp, &entry.Score, &entry.Rating, &entry.Comment, &entry.UserID, &metadata); err != nil {
 			return nil, err
 		}
-		entry.Timestamp, _ = time.Parse(time.RFC3339Nano, timestamp)
+		entry.Timestamp = parseTime(timestamp)
 		_ = json.Unmarshal([]byte(metadata), &entry.Metadata)
 		entries = append(entries, entry)
 	}
@@ -1616,7 +1616,7 @@ func (s *Store) InsertOrganization(ctx context.Context, org Organization) error 
 		ON CONFLICT(id) DO UPDATE SET name = excluded.name, metadata = excluded.metadata`,
 		org.ID,
 		org.Name,
-		org.CreatedAt.Format(time.RFC3339Nano),
+		formatTime(org.CreatedAt),
 		string(metadata),
 	)
 	return err
@@ -1637,7 +1637,7 @@ func (s *Store) ListOrganizations(ctx context.Context) ([]Organization, error) {
 		if err := rows.Scan(&org.ID, &org.Name, &createdAt, &metadata); err != nil {
 			return nil, err
 		}
-		org.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		org.CreatedAt = parseTime(createdAt)
 		_ = json.Unmarshal([]byte(metadata), &org.Metadata)
 		organizations = append(organizations, org)
 	}
@@ -1659,7 +1659,7 @@ func (s *Store) InsertWorkspace(ctx context.Context, workspace Workspace) error 
 		workspace.ID,
 		workspace.OrganizationID,
 		workspace.Name,
-		workspace.CreatedAt.Format(time.RFC3339Nano),
+		formatTime(workspace.CreatedAt),
 		string(metadata),
 	)
 	return err
@@ -1688,7 +1688,7 @@ func (s *Store) ListWorkspaces(ctx context.Context, organizationID string) ([]Wo
 		if err := rows.Scan(&workspace.ID, &workspace.OrganizationID, &workspace.Name, &createdAt, &metadata); err != nil {
 			return nil, err
 		}
-		workspace.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		workspace.CreatedAt = parseTime(createdAt)
 		_ = json.Unmarshal([]byte(metadata), &workspace.Metadata)
 		workspaces = append(workspaces, workspace)
 	}
@@ -1707,7 +1707,7 @@ func (s *Store) GetWorkspaceByID(ctx context.Context, id string) (Workspace, err
 	if err != nil {
 		return workspace, err
 	}
-	workspace.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	workspace.CreatedAt = parseTime(createdAt)
 	_ = json.Unmarshal([]byte(metadata), &workspace.Metadata)
 	return workspace, nil
 }
@@ -1724,7 +1724,7 @@ func (s *Store) InsertUser(ctx context.Context, user User) error {
 		user.ID,
 		user.Email,
 		user.Name,
-		user.CreatedAt.Format(time.RFC3339Nano),
+		formatTime(user.CreatedAt),
 		string(metadata),
 	)
 	return err
@@ -1745,7 +1745,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 		if err := rows.Scan(&user.ID, &user.Email, &user.Name, &createdAt, &metadata); err != nil {
 			return nil, err
 		}
-		user.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		user.CreatedAt = parseTime(createdAt)
 		_ = json.Unmarshal([]byte(metadata), &user.Metadata)
 		users = append(users, user)
 	}
@@ -1763,7 +1763,7 @@ func (s *Store) UpsertWorkspaceMember(ctx context.Context, member WorkspaceMembe
 		member.WorkspaceID,
 		member.UserID,
 		member.Role,
-		member.CreatedAt.Format(time.RFC3339Nano),
+		formatTime(member.CreatedAt),
 	)
 	return err
 }
@@ -1791,7 +1791,7 @@ func (s *Store) ListWorkspaceMembers(ctx context.Context, workspaceID string) ([
 		if err := rows.Scan(&member.WorkspaceID, &member.UserID, &member.Role, &createdAt); err != nil {
 			return nil, err
 		}
-		member.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		member.CreatedAt = parseTime(createdAt)
 		members = append(members, member)
 	}
 	return members, rows.Err()
@@ -1821,8 +1821,8 @@ func (s *Store) InsertVirtualKey(ctx context.Context, key VirtualKeyRecord) erro
 		key.ProviderName,
 		key.BaseURL,
 		key.EncryptedKey,
-		key.CreatedAt.Format(time.RFC3339Nano),
-		key.UpdatedAt.Format(time.RFC3339Nano),
+		formatTime(key.CreatedAt),
+		formatTime(key.UpdatedAt),
 		boolToInt(key.Enabled),
 		key.MetadataJSON,
 	)
@@ -1843,8 +1843,8 @@ func (s *Store) GetVirtualKey(ctx context.Context, name string) (VirtualKeyRecor
 	if err != nil {
 		return record, err
 	}
-	record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	record.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	record.CreatedAt = parseTime(createdAt)
+	record.UpdatedAt = parseTime(updatedAt)
 	record.Enabled = enabled == 1
 	return record, nil
 }
@@ -1868,8 +1868,8 @@ func (s *Store) ListVirtualKeys(ctx context.Context) ([]VirtualKeyRecord, error)
 			&record.EncryptedKey, &createdAt, &updatedAt, &enabled, &record.MetadataJSON); err != nil {
 			return nil, err
 		}
-		record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		record.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+		record.CreatedAt = parseTime(createdAt)
+		record.UpdatedAt = parseTime(updatedAt)
 		record.Enabled = enabled == 1
 		records = append(records, record)
 	}
@@ -1880,7 +1880,7 @@ func (s *Store) RotateVirtualKey(ctx context.Context, name, encryptedKey string)
 	result, err := s.exec(ctx,
 		"UPDATE virtual_keys SET encrypted_key = ?, updated_at = ? WHERE name = ?",
 		encryptedKey,
-		time.Now().UTC().Format(time.RFC3339Nano),
+		formatTime(time.Now().UTC()),
 		name,
 	)
 	if err != nil {
@@ -1896,7 +1896,7 @@ func (s *Store) RotateVirtualKey(ctx context.Context, name, encryptedKey string)
 func (s *Store) DisableVirtualKey(ctx context.Context, name string) error {
 	result, err := s.exec(ctx,
 		"UPDATE virtual_keys SET enabled = 0, updated_at = ? WHERE name = ?",
-		time.Now().UTC().Format(time.RFC3339Nano),
+		formatTime(time.Now().UTC()),
 		name,
 	)
 	if err != nil {
@@ -1960,6 +1960,28 @@ func sqliteColumnExists(ctx context.Context, tx *sql.Tx, table, column string) (
 		}
 	}
 	return false, rows.Err()
+}
+
+// timeLayout is the one layout every timestamp column is written in. It is
+// fixed width (nanoseconds are never trimmed) and always UTC, so the TEXT
+// values sort and compare in time order. time.RFC3339Nano trims trailing
+// zeros, and because '.' sorts before 'Z', "00:00:00.5Z" compared lower
+// than "00:00:00Z".
+const timeLayout = "2006-01-02T15:04:05.000000000Z"
+
+// formatTime renders t for storage or for a bound in a timestamp comparison.
+func formatTime(t time.Time) string {
+	return t.UTC().Format(timeLayout)
+}
+
+// parseTime reads a stored timestamp. time.RFC3339Nano also accepts the
+// RFC3339 and RFC3339Nano values written by older releases.
+func parseTime(value string) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 func boolToInt(b bool) int {
@@ -2109,7 +2131,7 @@ func (s *Store) CreateDataset(ctx context.Context, dataset *Dataset) error {
 		`INSERT INTO datasets (id, name, description, version, created_at, updated_at, metadata, examples)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		dataset.ID, dataset.Name, dataset.Description, dataset.Version,
-		dataset.CreatedAt.Format(time.RFC3339Nano), dataset.UpdatedAt.Format(time.RFC3339Nano),
+		formatTime(dataset.CreatedAt), formatTime(dataset.UpdatedAt),
 		string(metadataJSON), string(examplesJSON))
 	return err
 }
@@ -2187,7 +2209,7 @@ func (s *Store) UpdateDataset(ctx context.Context, dataset *Dataset) error {
 	_, err = s.db.ExecContext(ctx,
 		`UPDATE datasets SET name = ?, description = ?, version = ?, updated_at = ?, metadata = ?, examples = ?
 		WHERE id = ?`,
-		dataset.Name, dataset.Description, dataset.Version, dataset.UpdatedAt.Format(time.RFC3339Nano),
+		dataset.Name, dataset.Description, dataset.Version, formatTime(dataset.UpdatedAt),
 		string(metadataJSON), string(examplesJSON), dataset.ID)
 	return err
 }
@@ -2223,7 +2245,7 @@ func (s *Store) AddExamples(ctx context.Context, datasetID string, examples []Da
 
 	_, err = s.db.ExecContext(ctx,
 		`UPDATE datasets SET examples = ?, version = ?, updated_at = ? WHERE id = ?`,
-		string(examplesJSON), dataset.Version, dataset.UpdatedAt.Format(time.RFC3339Nano), datasetID)
+		string(examplesJSON), dataset.Version, formatTime(dataset.UpdatedAt), datasetID)
 	return err
 }
 
@@ -2245,8 +2267,8 @@ func (s *Store) CreateExperiment(ctx context.Context, exp *Experiment) error {
 		`INSERT INTO experiments (id, name, description, dataset_id, config, status, results, created_at, updated_at, created_by)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		exp.ID, exp.Name, exp.Description, exp.DatasetID, string(configJSON),
-		exp.Status, resultsJSON, exp.CreatedAt.Format(time.RFC3339Nano),
-		exp.UpdatedAt.Format(time.RFC3339Nano), exp.CreatedBy)
+		exp.Status, resultsJSON, formatTime(exp.CreatedAt),
+		formatTime(exp.UpdatedAt), exp.CreatedBy)
 	return err
 }
 
@@ -2313,8 +2335,8 @@ func (s *Store) ListExperiments(ctx context.Context, limit, offset int, status s
 		}
 		_ = json.Unmarshal([]byte(configJSON), &exp.Config)
 		_ = json.Unmarshal([]byte(resultsJSON), &exp.Results)
-		exp.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		exp.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+		exp.CreatedAt = parseTime(createdAt)
+		exp.UpdatedAt = parseTime(updatedAt)
 		experiments = append(experiments, &exp)
 	}
 
@@ -2337,6 +2359,6 @@ func (s *Store) UpdateExperiment(ctx context.Context, exp *Experiment) error {
 		`UPDATE experiments SET name = ?, description = ?, dataset_id = ?, config = ?, status = ?, results = ?, updated_at = ?
 		WHERE id = ?`,
 		exp.Name, exp.Description, exp.DatasetID, string(configJSON), exp.Status, resultsJSON,
-		exp.UpdatedAt.Format(time.RFC3339Nano), exp.ID)
+		formatTime(exp.UpdatedAt), exp.ID)
 	return err
 }
