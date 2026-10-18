@@ -313,9 +313,6 @@ func (client *stdioClient) close() {
 	}
 }
 
-// stop is kept for callers and tests that shut a target down.
-func (client *stdioClient) stop() { client.close() }
-
 func (process *stdioProcess) writeLine(line []byte) error {
 	process.writeMu.Lock()
 	defer process.writeMu.Unlock()

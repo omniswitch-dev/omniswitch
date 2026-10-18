@@ -63,7 +63,7 @@ func TestStdioBridgePerformsInitializeHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMultiHandler() error = %v", err)
 	}
-	t.Cleanup(func() { handler.targets["strict"].stdio.stop() })
+	t.Cleanup(func() { handler.targets["strict"].stdio.close() })
 
 	// The client calls a tool directly with no prior initialize: the bridge
 	// must handshake behind the scenes for the strict server to respond.
