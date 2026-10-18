@@ -540,11 +540,14 @@ var schemaIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp)`,
 	`CREATE INDEX IF NOT EXISTS idx_logs_trace ON request_logs(trace_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_logs_session ON request_logs(session_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_logs_api_key ON request_logs(api_key_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_logs_api_key_time ON request_logs(api_key_id, timestamp)`,
 	`CREATE INDEX IF NOT EXISTS idx_logs_provider ON request_logs(provider)`,
 	`CREATE INDEX IF NOT EXISTS idx_logs_status ON request_logs(status)`,
 	`CREATE INDEX IF NOT EXISTS idx_guardrail_request ON guardrail_events(request_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_cache_model ON semantic_cache(model)`,
+	`CREATE INDEX IF NOT EXISTS idx_cache_model_created ON semantic_cache(model, created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_cache_expires ON semantic_cache(expires_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_guardrail_timestamp ON guardrail_events(timestamp)`,
+	`CREATE INDEX IF NOT EXISTS idx_shadow_timestamp ON shadow_requests(timestamp)`,
 	`CREATE INDEX IF NOT EXISTS idx_shadow_request ON shadow_requests(request_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_feedback_request ON feedback(request_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_feedback_trace ON feedback(trace_id)`,
@@ -553,6 +556,10 @@ var schemaIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_virtual_keys_name ON virtual_keys(name)`,
 	`CREATE INDEX IF NOT EXISTS idx_gateway_configs_name ON gateway_configs(name)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_key ON semantic_cache(cache_key) WHERE cache_key IS NOT NULL AND cache_key != ''`,
+	// Superseded by the composite indexes above, which cover the same
+	// prefix and also serve the ORDER BY / range part of the hot queries.
+	`DROP INDEX IF EXISTS idx_logs_api_key`,
+	`DROP INDEX IF EXISTS idx_cache_model`,
 }
 
 // legacyColumns are columns added after the first release. They are added to
@@ -1375,13 +1382,25 @@ func (s *Store) InsertSemanticCache(ctx context.Context, entry CacheEntry) error
 		expiresAt = &value
 	}
 
+	// Entries with an exact-match key are upserted on that key. Inserting a
+	// fresh row for a key whose previous entry had expired used to violate
+	// the unique idx_cache_key index, so that prompt could never be cached
+	// again. The conflict target repeats the partial-index predicate, which
+	// both SQLite and PostgreSQL need to match a partial unique index.
+	conflict := `ON CONFLICT(cache_key) WHERE cache_key IS NOT NULL AND cache_key != '' DO UPDATE SET
+			created_at = excluded.created_at, expires_at = excluded.expires_at,
+			model = excluded.model, prompt_text = excluded.prompt_text,
+			vector_json = excluded.vector_json, response_json = excluded.response_json`
+	if entry.Key == "" {
+		conflict = `ON CONFLICT(id) DO UPDATE SET
+			cache_key = excluded.cache_key, created_at = excluded.created_at, expires_at = excluded.expires_at,
+			model = excluded.model, prompt_text = excluded.prompt_text,
+			vector_json = excluded.vector_json, response_json = excluded.response_json`
+	}
 	_, err = s.exec(ctx,
 		`INSERT INTO semantic_cache (id, cache_key, created_at, expires_at, model, prompt_text, vector_json, response_json)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-			cache_key = excluded.cache_key, created_at = excluded.created_at, expires_at = excluded.expires_at,
-			model = excluded.model, prompt_text = excluded.prompt_text,
-			vector_json = excluded.vector_json, response_json = excluded.response_json`,
+		`+conflict,
 		entry.ID,
 		entry.Key,
 		formatTime(entry.CreatedAt),
@@ -1392,6 +1411,71 @@ func (s *Store) InsertSemanticCache(ctx context.Context, entry CacheEntry) error
 		string(responseJSON),
 	)
 	return err
+}
+
+// purgeBatchSize bounds how many rows one DELETE removes, so a large purge
+// does not hold the SQLite write lock (or one long PostgreSQL statement)
+// for the whole run.
+const purgeBatchSize = 1000
+
+// PurgeExpiredCache deletes cache entries that expired before now and
+// returns how many rows it removed. Entries without an expiry are kept.
+func (s *Store) PurgeExpiredCache(ctx context.Context, now time.Time) (int64, error) {
+	return s.deleteInBatches(ctx, "semantic_cache",
+		"expires_at IS NOT NULL AND expires_at != '' AND expires_at < ?", formatTime(now))
+}
+
+// RetentionResult reports how many rows PurgeRecordsBefore removed.
+type RetentionResult struct {
+	RequestLogs     int64 `json:"request_logs"`
+	GuardrailEvents int64 `json:"guardrail_events"`
+	ShadowRequests  int64 `json:"shadow_requests"`
+}
+
+// PurgeRecordsBefore deletes request logs, guardrail events and shadow
+// requests with a timestamp before cutoff, in batches. Monthly budgets are
+// computed from request_logs, so callers should never pass a cutoff inside
+// the current month.
+func (s *Store) PurgeRecordsBefore(ctx context.Context, cutoff time.Time) (RetentionResult, error) {
+	var result RetentionResult
+	bound := formatTime(cutoff)
+	var err error
+	if result.RequestLogs, err = s.deleteInBatches(ctx, "request_logs", "timestamp < ?", bound); err != nil {
+		return result, err
+	}
+	if result.GuardrailEvents, err = s.deleteInBatches(ctx, "guardrail_events", "timestamp < ?", bound); err != nil {
+		return result, err
+	}
+	if result.ShadowRequests, err = s.deleteInBatches(ctx, "shadow_requests", "timestamp < ?", bound); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// deleteInBatches deletes the rows of table that match where, at most
+// purgeBatchSize per statement. table and where are package constants,
+// never caller input.
+func (s *Store) deleteInBatches(ctx context.Context, table, where string, args ...any) (int64, error) {
+	query := fmt.Sprintf("DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE %s LIMIT ?)", table, table, where)
+	args = append(args, purgeBatchSize)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		res, err := s.exec(ctx, query, args...)
+		if err != nil {
+			return total, fmt.Errorf("purge %s: %w", table, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, fmt.Errorf("purge %s: %w", table, err)
+		}
+		total += n
+		if n < purgeBatchSize {
+			return total, nil
+		}
+	}
 }
 
 func (s *Store) GetExactCache(ctx context.Context, key string) (CacheEntry, bool, error) {
