@@ -374,13 +374,23 @@ func buildMCPTargets(defaultEngine policy.Engine, settings runtimeSettings) ([]m
 			}
 			engine = loaded
 		}
-		targets = append(targets, mcpproxy.TargetConfig{
+		target := mcpproxy.TargetConfig{
 			Name: configured.Name, Transport: configured.Transport, Upstream: configured.Upstream,
 			Command: os.ExpandEnv(configured.Command), Args: expandStrings(configured.Args),
 			Environment: expandHeaderValues(configured.Environment), Headers: expandHeaderValues(configured.Headers), Engine: engine,
 			ForwardBearerToken: configured.ForwardBearerToken != nil && *configured.ForwardBearerToken,
 			OpenAPISpec:        os.ExpandEnv(configured.OpenAPISpec),
-		})
+			Metadata:           configured.Metadata,
+		}
+		exchange, err := mcpTokenExchange(configured.Name, configured.TokenExchange)
+		if err != nil {
+			return nil, err
+		}
+		target.TokenExchange = exchange
+		if configured.Timeout != nil {
+			target.Timeout = configured.Timeout.Duration
+		}
+		targets = append(targets, target)
 	}
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("no enabled MCP targets")

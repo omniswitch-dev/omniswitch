@@ -14,10 +14,9 @@ import (
 	"time"
 )
 
-// TokenExchangeConfig configures RFC 8693 token exchange for a target.
-//
-// The gateway configuration does not expose this yet; it is only reachable
-// through TargetConfig for embedders.
+// TokenExchangeConfig configures RFC 8693 token exchange for a target. The
+// gateway sets it from mcp.targets[].token_exchange; embedders set it on
+// TargetConfig.
 type TokenExchangeConfig struct {
 	// TokenURL is the token endpoint of the authorization server.
 	TokenURL string `json:"token_url" yaml:"token_url"`

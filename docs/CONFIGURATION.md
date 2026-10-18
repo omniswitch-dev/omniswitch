@@ -113,6 +113,18 @@ mcp:
       # Forward an OIDC bearer token only; OmniSwitch API keys never leave the gateway.
       forward_bearer_token: false
 
+    - name: crm
+      upstream: https://crm.example.com/mcp
+      timeout: 30s
+      metadata:
+        environment: production
+      # Swap the OIDC caller's token for a CRM token (RFC 8693).
+      token_exchange:
+        token_url: https://idp.example.com/oauth2/token
+        client_id: omniswitch-gateway
+        client_secret: "${CRM_EXCHANGE_SECRET}"
+        audience: crm-api
+
     - name: filesystem
       transport: stdio
       command: npx
@@ -486,6 +498,42 @@ endpoint. Set `forward_bearer_token: true` only for targets that require
 OAuth/OIDC delegation: it forwards the authenticated OIDC bearer token and
 never forwards a local OmniSwitch API key. Stdio targets use a persistent
 newline-delimited JSON-RPC child process and serialize calls per target.
+
+### Per-target timeout, metadata and token exchange
+
+| Field | Targets | Effect |
+|---|---|---|
+| `timeout` | All | Limits one call. The default is `2m`. For an HTTP target, it limits the wait for the response headers, including the token exchange, so a long event stream is not cut. `tools/list` federation and OpenAPI tool calls are limited as a whole. For a stdio target, it limits each request. |
+| `metadata` | All | Operator-trusted policy attributes. `resource_type` replaces the type that OmniSwitch infers from the tool. `environment` comes before the environments inferred from tool arguments, but `production` from any source always wins. CEL rules read them as `resource.type`, `resource.environment` and `metadata`. Keys that start with `mcp.` are reserved. |
+| `token_exchange` | HTTP targets without `openapi_spec` | Exchanges the OIDC caller's bearer token for a token issued for this target (RFC 8693, `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`) before each call. |
+
+`token_exchange` fields:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `token_url` | Yes | Absolute `http://` or `https://` URL of the token endpoint. |
+| `client_id` | Yes | OAuth client of the gateway at the token endpoint. |
+| `client_secret` | No | Client secret, sent in the form body. |
+| `audience`, `resource`, `scope` | No | Sent as the RFC 8693 parameters of the same names. |
+| `subject_token_type`, `requested_token_type` | No | Default `urn:ietf:params:oauth:token-type:access_token`. |
+| `actor_token`, `actor_token_type` | No | An actor token for delegation. `actor_token_type` needs `actor_token` and has the same default. |
+| `token_cache_ttl` | No | Upper limit for the cache lifetime of an exchanged token. Tokens are cached per caller token and target until one minute before `expires_in` (default 1h). |
+
+`client_id`, `client_secret` and `actor_token` expand `${VAR}` references at
+startup. A reference that expands to an empty value stops startup. Use
+references so that secrets are not in the file that `GET /api/config/raw`
+returns.
+
+Only OIDC-authenticated callers have a token to exchange. A call from an
+OmniSwitch API key goes upstream without an `Authorization` header, and an
+API key is never exchanged. If the token endpoint fails, the call gets a
+JSON-RPC error and is not sent upstream. Validation rejects these
+combinations:
+
+- `token_exchange` on a stdio target, or together with `openapi_spec`.
+- `token_exchange` together with `forward_bearer_token: true`.
+- `token_exchange` together with an `Authorization` entry in `headers`,
+  because the header would replace the exchanged token.
 
 ### OpenAPI-to-MCP conversion
 

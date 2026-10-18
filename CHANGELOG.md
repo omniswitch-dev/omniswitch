@@ -46,6 +46,7 @@ A hardening release: security fixes, verified bug fixes, new regression tests an
 - `/v1/responses` supports function tools and typed input items. Embeddings and rerank honor the `x-omniswitch-config` header.
 - Provider responses pass through `reasoning_content`, `refusal`, `logprobs`, token details, `system_fingerprint` and `service_tier`. Gemini thinking tokens are billed and reported as `reasoning_tokens`.
 - The store tests also run against PostgreSQL when `OMNISWITCH_TEST_POSTGRES_DSN` is set.
+- MCP targets accept `token_exchange` (RFC 8693: the OIDC caller's token is exchanged for a target token before each HTTP call), `timeout` and `metadata` in the gateway configuration. Validation rejects token exchange on stdio and OpenAPI targets, together with `forward_bearer_token`, or with an `Authorization` header. `client_id`, `client_secret` and `actor_token` expand `${VAR}` references, and a reference that expands to an empty value stops startup.
 
 ### Fixed
 
@@ -69,8 +70,8 @@ A hardening release: security fixes, verified bug fixes, new regression tests an
 - The vault used a deterministic fallback master key when `crypto/rand` failed.
 - Startup banner URLs were wrong for `host:port` listen addresses.
 - `install.sh` used `sudo` even when the install directory was writable.
-
 - An MCP target `Timeout` did not apply to calls forwarded to HTTP targets, so a hung upstream held the call for the fixed 2-minute header limit. The target timeout now limits the wait for the response headers (an event stream that has started is not cut), and the shared limit grows to the longest target timeout.
+
 ### Changed
 
 - Deleted the outdated `comparison_iter5.md` and `comparison_iter7.md` notes. The 27 competitor claims that cited only them are now "Unknown" in `docs/comparison/COMPARISON.md` until someone checks them against vendor sources.
@@ -86,7 +87,7 @@ First public beta. Focused on making the install and first-run path trustworthy,
 - OpenAPI-to-MCP conversion so any OpenAPI-described service can be exposed as MCP tools, a `bench` tool, and a proxy-overhead benchmark.
 - A2A v1 task lifecycle (create, poll, cancel) with single-shot SSE for task updates (one status and artifact sequence per request; no token streaming or resubscribe).
 - Guardrail fallback reroute action and automatic retries for guardrail webhook calls.
-- RFC 8693 token exchange (with an RFC 7523 JWT Bearer option) in the MCP proxy library, for delegating identity into federated MCP targets. It is available to Go embedders through `TargetConfig.TokenExchange`; gateway configuration does not expose it yet.
+- RFC 8693 token exchange in the MCP proxy library, for delegating identity into federated MCP targets. It is available to Go embedders through `TargetConfig.TokenExchange`.
 - Storage and handlers for eval datasets and experiments, next to the existing policy replay endpoint. Only policy replay (`POST /api/evals/policy`) is mounted in the gateway; the experiment scorer is a placeholder.
 - First-run reliability, CLI, and health-check fixes so a freshly downloaded binary starts with only `OPENAI_API_KEY` set: MCP is disabled by default, an embedded default policy is used as a fallback when MCP is enabled without an explicit policy path, `omniswitch version`/`validate-config`/`--help` subcommands, and `/healthz`/`/readyz` HTTP endpoints for liveness/readiness probes (tracked in the sibling first-run workstream; see `ROADMAP.md`).
 - Community, governance, and security scaffolding: `SECURITY.md` with supported-versions table and private vulnerability reporting, `SUPPORT.md`, `GOVERNANCE.md`, `MAINTAINERS.md`, `CODEOWNERS`, `.github/dependabot.yml`, a beta-feedback issue form, and an install-verification GitHub Actions workflow.

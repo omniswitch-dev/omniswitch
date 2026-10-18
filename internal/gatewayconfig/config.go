@@ -198,6 +198,31 @@ type MCPTarget struct {
 	ForwardBearerToken *bool             `json:"forward_bearer_token,omitempty" yaml:"forward_bearer_token,omitempty"`
 	OpenAPISpec        string            `json:"openapi_spec,omitempty" yaml:"openapi_spec,omitempty"`
 	Enabled            *bool             `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// TokenExchange swaps the OIDC caller's bearer token for a token issued
+	// for this target (RFC 8693) before each call to an HTTP target.
+	TokenExchange *MCPTokenExchange `json:"token_exchange,omitempty" yaml:"token_exchange,omitempty"`
+	// Timeout bounds one forwarded call. Unset uses the 2-minute default.
+	Timeout *Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	// Metadata holds operator-trusted policy attributes such as
+	// "environment" and "resource_type". Keys starting with "mcp." are
+	// reserved for attributes the gateway sets.
+	Metadata map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+}
+
+// MCPTokenExchange configures RFC 8693 token exchange for an MCP target.
+// client_id, client_secret and actor_token expand ${VAR} references.
+type MCPTokenExchange struct {
+	TokenURL           string    `json:"token_url" yaml:"token_url"`
+	ClientID           string    `json:"client_id" yaml:"client_id"`
+	ClientSecret       string    `json:"client_secret,omitempty" yaml:"client_secret,omitempty"`
+	SubjectTokenType   string    `json:"subject_token_type,omitempty" yaml:"subject_token_type,omitempty"`
+	RequestedTokenType string    `json:"requested_token_type,omitempty" yaml:"requested_token_type,omitempty"`
+	Scope              string    `json:"scope,omitempty" yaml:"scope,omitempty"`
+	Audience           string    `json:"audience,omitempty" yaml:"audience,omitempty"`
+	Resource           string    `json:"resource,omitempty" yaml:"resource,omitempty"`
+	ActorToken         string    `json:"actor_token,omitempty" yaml:"actor_token,omitempty"`
+	ActorTokenType     string    `json:"actor_token_type,omitempty" yaml:"actor_token_type,omitempty"`
+	TokenCacheTTL      *Duration `json:"token_cache_ttl,omitempty" yaml:"token_cache_ttl,omitempty"`
 }
 
 type Observability struct {
@@ -436,6 +461,9 @@ func Validate(cfg Config) error {
 			}
 		default:
 			return fmt.Errorf("mcp.targets[%d].transport must be http, streamable_http, or stdio", i)
+		}
+		if err := validateMCPTargetOptions(i, target); err != nil {
+			return err
 		}
 	}
 	for i, rule := range cfg.Guardrails.Rules {

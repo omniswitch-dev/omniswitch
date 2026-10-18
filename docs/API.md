@@ -508,7 +508,11 @@ Alias for the MCP tool-call gateway.
 The MCP gateway supports JSON-RPC over HTTP, including streaming
 `text/event-stream` responses from streamable HTTP/SSE-capable upstreams.
 Targets can opt into OIDC bearer-token delegation with
-`forward_bearer_token: true`; local OmniSwitch API keys are never forwarded.
+`forward_bearer_token: true`, or exchange the OIDC caller's token for a
+target token with `token_exchange` (RFC 8693). Local OmniSwitch API keys are
+never forwarded or exchanged. A call that exceeds the target `timeout` (default
+2 minutes, measured to the upstream response headers) gets HTTP 502 with a
+JSON-RPC `-32603` error.
 It supports persistent stdio targets, HTTP and streamable HTTP, and targets
 that set `openapi_spec` (see "OpenAPI-to-MCP conversion" in
 [`CONFIGURATION.md`](CONFIGURATION.md)). A2A is exposed separately through

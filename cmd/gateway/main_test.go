@@ -329,6 +329,9 @@ func TestRuntimeConfigSummaryRedactsSensitiveConfig(t *testing.T) {
 		mcpEnabled: true,
 		mcpTargets: []gatewayconfig.MCPTarget{{
 			Name: "github", Upstream: "https://mcp-secret.example/mcp", Headers: map[string]string{"x-api-key": "target-secret"}, ForwardBearerToken: &forwardBearer,
+		}, {
+			Name: "crm", Upstream: "https://crm.example/mcp",
+			TokenExchange: &gatewayconfig.MCPTokenExchange{TokenURL: "https://idp-secret.example/token", ClientID: "gw", ClientSecret: "exchange-secret", ActorToken: "actor-secret"},
 		}},
 		routes: map[string]router.Route{"logical": {Provider: "@openai-prod", Variants: []router.Variant{{Provider: "@openai-prod", Model: "gpt-4o-mini", Weight: 100}}}},
 	}
@@ -347,12 +350,15 @@ func TestRuntimeConfigSummaryRedactsSensitiveConfig(t *testing.T) {
 		"super-secret-pattern",
 		"secret-value",
 		"redis-secret.example",
+		"idp-secret.example",
+		"exchange-secret",
+		"actor-secret",
 	} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("runtime config summary leaked %q in %s", forbidden, body)
 		}
 	}
-	for _, want := range []string{`"backend":"redis"`, `"rule_count":1`, `"webhook_count":1`, `"forward_bearer_token":true`, `"model":"logical"`} {
+	for _, want := range []string{`"backend":"redis"`, `"rule_count":1`, `"webhook_count":1`, `"forward_bearer_token":true`, `"token_exchange":true`, `"model":"logical"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("runtime config summary = %s, want %s", body, want)
 		}

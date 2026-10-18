@@ -14,7 +14,7 @@ OmniSwitch is currently in **public beta** (`v0.2.0-beta.x`). See "Beta scope an
 - OpenAPI-to-MCP conversion, exposing any OpenAPI-described service as MCP tools.
 - A2A v1 task lifecycle (create, poll, cancel) with single-shot SSE for task updates. Tasks are kept in memory on one replica.
 - Guardrail fallback reroute action and automatic retries for guardrail webhook calls.
-- RFC 8693 token exchange (with an RFC 7523 JWT Bearer option) in the MCP proxy library, for Go embedders. Gateway configuration does not expose it yet.
+- RFC 8693 token exchange for MCP targets, configured per target with `mcp.targets[].token_exchange`.
 - Policy replay evals (`POST /api/evals/policy`). Dataset and experiment storage exists, but its API is not mounted yet.
 - PostgreSQL shared-state storage driver alongside SQLite.
 - Helm chart for Kubernetes deployments (`deploy/helm/omniswitch`).
@@ -23,7 +23,7 @@ OmniSwitch is currently in **public beta** (`v0.2.0-beta.x`). See "Beta scope an
 
 - Shared storage or external control-plane support for horizontally scaled key, log, budget, and config state (Postgres driver ships; multi-writer HA and migration tooling are still open).
 - SAML/mTLS identity options on top of the current API key and OIDC/JWKS model.
-- RFC 8693 token exchange in gateway configuration, then native MCP OAuth provider integrations (Keycloak, Auth0).
+- Native MCP OAuth provider integrations (Keycloak, Auth0) on top of the RFC 8693 token exchange.
 - Prompt rollback and playground workflows on top of the current prompt version API.
 - Dashboard cost charts and eval report views.
 - MCP spec conformance pass (stateless servers, `_meta` trace context propagation).

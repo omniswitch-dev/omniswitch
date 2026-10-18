@@ -20,7 +20,7 @@ states exactly what OmniSwitch implements today.
 | Authentication and authorization | Managed project/workspace controls and key management | JWT, API keys, OAuth, CEL RBAC, TLS | **Implemented (core):** hashed API keys, bootstrap owner, OIDC JWT/JWKS identity, CEL allow/deny policies, fixed role gates, workspace scope, and vault encryption. OAuth is available for explicitly delegated MCP OIDC bearer tokens; no mTLS |
 | Observability | Detailed logs, traces, analytics, feedback, OTel ingestion | OTel metrics/logs/traces and agent/protocol telemetry | **Partial:** SQLite logs, per-request trace waterfalls (`_spans`), traces/sessions, feedback, provider metrics, OTLP export (Langfuse/Jaeger/Tempo), Prometheus `/metrics`; no external log store |
 | Prompt management | Templates, partials, releases/publish workflow, experiments | Prompt enrichment at route level | **Partial:** templates, versions, rendering. No approval, rollback/promotion, experiments, or partials |
-| MCP | Remote MCP connectivity | Federation; stdio, HTTP, SSE/streamable HTTP, OpenAPI, OAuth | **Partial:** HTTP federation with streamed SSE/streamable-HTTP responses, persistent stdio targets, server-side headers, OIDC bearer delegation, `tools/list`, policy-gated `tools/call`, and OpenAPI-to-MCP conversion (`openapi_spec`); RFC 8693 token exchange is not exposed in gateway configuration |
+| MCP | Remote MCP connectivity | Federation; stdio, HTTP, SSE/streamable HTTP, OpenAPI, OAuth | **Partial:** HTTP federation with streamed SSE/streamable-HTTP responses, persistent stdio targets, server-side headers, OIDC bearer delegation, RFC 8693 token exchange per target (`token_exchange`), `tools/list`, policy-gated `tools/call`, and OpenAPI-to-MCP conversion (`openapi_spec`) |
 | Agent-to-agent | Agent-framework integrations | Native A2A discovery, negotiation, and task collaboration | **Partial:** public A2A v1 Agent Card discovery plus authenticated JSON-RPC `SendMessage` and `GetExtendedAgentCard`; no task lifecycle, streaming, push notifications, or outbound A2A client |
 | Kubernetes/control plane | Hosted and self-hosted gateway configuration | Standalone plus Kubernetes Gateway API/controller and inference extensions | **Partial:** redacted `/api/config` posture endpoint plus Kustomize manifests for Deployment, Service, ConfigMap, Secret example, PVCs, and Redis; no controller, CRDs, or inference-aware routing |
 | High availability/data plane | Managed platform plus self-hosted gateway | Rust proxy/control plane deployment model | **Partial:** gateway replicas can share Redis request limits; config hot-reload covers routes, guardrails, cache posture, circuit breaker, and shadow provider without restart. Logs/keys remain SQLite-local; no shared database or HA control plane yet |
@@ -123,7 +123,7 @@ endpoints, deterministic and webhook guardrails, Redis-coordinated request
 limits, MCP federation, stdio MCP, and basic A2A discovery/direct messaging. It
 is still not a drop-in replacement for either larger platform. The largest gaps
 are native provider and endpoint breadth, shared database/config reload
-infrastructure, configurable MCP OAuth token exchange, A2A push notifications
+infrastructure, native MCP OAuth provider integrations, A2A push notifications
 and durable tasks, and Kubernetes controller features.
 
 Recommended next investments, in order:

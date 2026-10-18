@@ -230,6 +230,7 @@ func mcpTargetSummaries(settings runtimeSettings) []map[string]any {
 			"headers_configured":     len(target.Headers) > 0,
 			"environment_configured": len(target.Environment) > 0,
 			"forward_bearer_token":   forwardBearer,
+			"token_exchange":         target.TokenExchange != nil,
 		})
 	}
 	return summaries
