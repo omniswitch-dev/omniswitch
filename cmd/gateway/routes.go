@@ -272,7 +272,7 @@ func wrapGatewayMiddleware(settings runtimeSettings, st *store.Store, mux http.H
 	handler := gateway.CORSMiddlewareWithOrigins(settings.corsOrigins, gateway.LoggingMiddleware(auth.Wrap(authorize.Wrap(rateLimiter.Wrap(mux)))))
 	// Strip client-supplied identity headers before anything else runs, in
 	// every auth mode; only the auth middleware may set them.
-	handler = gateway.StripInternalIdentityHeaders(handler)
+	handler = gateway.StripInternalIdentityHeaders(gateway.ControlPlaneBodyLimit(0, 0, handler))
 	return handler, closeRateLimiter, nil
 }
 

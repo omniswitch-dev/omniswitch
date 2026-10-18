@@ -136,3 +136,14 @@ func TestAuthDisabledIgnoresSpoofedRateLimitHeaders(t *testing.T) {
 		t.Fatalf("allowed = %d of 10, want 2", allowed)
 	}
 }
+
+func TestControlPlaneRejectsOversizedBodies(t *testing.T) {
+	h := newSecurityTestServer(t, nil)
+	big := `{"request_id":"r","comment":"` + strings.Repeat("x", 2<<20) + `"}`
+	if rec := doRequest(h, http.MethodPost, "/api/feedback", routeTestKey, big, nil); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized feedback status = %d, want 413", rec.Code)
+	}
+	if rec := doRequest(h, http.MethodPost, "/api/feedback", routeTestKey, `{"request_id":"r","score":1}`, nil); rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
+		t.Fatalf("small feedback status = %d body = %s", rec.Code, rec.Body.String())
+	}
+}

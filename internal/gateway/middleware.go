@@ -439,6 +439,45 @@ func (backend *localRateLimitBackend) size() int {
 	return len(backend.windows)
 }
 
+// Default control-plane request body limits.
+const (
+	// DefaultControlPlaneBodyLimit caps /api/* request bodies.
+	DefaultControlPlaneBodyLimit int64 = 1 << 20
+	// DefaultConfigBodyLimit caps gateway config bodies (/api/configs and
+	// /api/config/raw), which are legitimately larger.
+	DefaultConfigBodyLimit int64 = 8 << 20
+)
+
+// ControlPlaneBodyLimit caps request bodies on /api/* routes. Requests whose
+// declared Content-Length is over the limit get 413 immediately; streamed
+// bodies are wrapped in http.MaxBytesReader so decoding fails once the limit
+// is reached instead of buffering an unbounded body in memory. Config
+// endpoints use configLimit; every other /api/ path uses limit.
+func ControlPlaneBodyLimit(limit, configLimit int64, next http.Handler) http.Handler {
+	if limit <= 0 {
+		limit = DefaultControlPlaneBodyLimit
+	}
+	if configLimit <= 0 {
+		configLimit = DefaultConfigBodyLimit
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") || r.Body == nil || r.Body == http.NoBody {
+			next.ServeHTTP(w, r)
+			return
+		}
+		max := limit
+		if r.URL.Path == "/api/configs" || r.URL.Path == "/api/config/raw" {
+			max = configLimit
+		}
+		if r.ContentLength > max {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, max)
+		next.ServeHTTP(w, r)
+	})
+}
+
 // LoggingMiddleware logs every request.
 func LoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
