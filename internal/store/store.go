@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/omniswitch-dev/omniswitch/internal/cache"
@@ -31,6 +31,13 @@ type Store struct {
 	// On PostgreSQL it is the same pool as db.
 	wdb *sql.DB
 	pg  bool // PostgreSQL dialect when true; SQLite otherwise
+
+	// Background work started by migrate, such as deferred index builds.
+	// Close cancels it and waits for it.
+	bgMu     sync.Mutex
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
+	bgWG     sync.WaitGroup
 }
 
 // RequestLog represents a logged gateway request.
@@ -314,7 +321,7 @@ func OpenPostgres(dsn string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(25)
 	store := &Store{db: db, wdb: db, pg: true}
-	if err := store.migrate(); err != nil {
+	if err := store.migrateWithRetry(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
@@ -558,37 +565,6 @@ var schemaTables = []string{
 		)`,
 }
 
-// schemaIndexes runs after every table and column exists, so an index may
-// reference a column that ensureColumn adds to an older database.
-var schemaIndexes = []string{
-	`CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp)`,
-	`CREATE INDEX IF NOT EXISTS idx_logs_trace ON request_logs(trace_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_logs_session ON request_logs(session_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_logs_api_key_time ON request_logs(api_key_id, timestamp)`,
-	`CREATE INDEX IF NOT EXISTS idx_logs_provider ON request_logs(provider)`,
-	`CREATE INDEX IF NOT EXISTS idx_logs_status ON request_logs(status)`,
-	`CREATE INDEX IF NOT EXISTS idx_guardrail_request ON guardrail_events(request_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_cache_model_created ON semantic_cache(model, created_at)`,
-	`CREATE INDEX IF NOT EXISTS idx_cache_expires ON semantic_cache(expires_at)`,
-	`CREATE INDEX IF NOT EXISTS idx_guardrail_timestamp ON guardrail_events(timestamp)`,
-	`CREATE INDEX IF NOT EXISTS idx_shadow_timestamp ON shadow_requests(timestamp)`,
-	`CREATE INDEX IF NOT EXISTS idx_shadow_request ON shadow_requests(request_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_feedback_request ON feedback(request_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_feedback_trace ON feedback(trace_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_workspaces_org ON workspaces(organization_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_virtual_keys_name ON virtual_keys(name)`,
-	`CREATE INDEX IF NOT EXISTS idx_gateway_configs_name ON gateway_configs(name)`,
-	`CREATE INDEX IF NOT EXISTS idx_datasets_created ON datasets(created_at)`,
-	`CREATE INDEX IF NOT EXISTS idx_experiments_status_created ON experiments(status, created_at)`,
-	`CREATE INDEX IF NOT EXISTS idx_experiments_created ON experiments(created_at)`,
-	`CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_key ON semantic_cache(cache_key) WHERE cache_key IS NOT NULL AND cache_key != ''`,
-	// Superseded by the composite indexes above, which cover the same
-	// prefix and also serve the ORDER BY / range part of the hot queries.
-	`DROP INDEX IF EXISTS idx_logs_api_key`,
-	`DROP INDEX IF EXISTS idx_cache_model`,
-}
-
 // legacyColumns are columns added after the first release. They are added to
 // older databases before any index that references them is created.
 var legacyColumns = []struct{ table, column, definition string }{
@@ -610,117 +586,6 @@ func (s *Store) dialectSQL(stmt string) string {
 		return strings.ReplaceAll(stmt, "{{FLOAT}}", "DOUBLE PRECISION")
 	}
 	return strings.ReplaceAll(stmt, "{{FLOAT}}", "REAL")
-}
-
-// migrate creates or upgrades the schema inside one transaction. On
-// PostgreSQL the transaction holds an advisory lock, so replicas that start
-// at the same time run their migrations one after another instead of racing
-// on CREATE TABLE IF NOT EXISTS. On SQLite the write transaction (BEGIN
-// IMMEDIATE) gives the same guarantee across processes.
-func (s *Store) migrate() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	tx, err := s.wdb.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("migration failed: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if s.pg {
-		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)", migrationLockID); err != nil {
-			return fmt.Errorf("migration failed: advisory lock: %w", err)
-		}
-	}
-	for _, m := range schemaTables {
-		if _, err := tx.ExecContext(ctx, s.dialectSQL(m)); err != nil {
-			return fmt.Errorf("migration failed: %w", err)
-		}
-	}
-	for _, c := range legacyColumns {
-		if err := s.ensureColumn(ctx, tx, c.table, c.column, s.dialectSQL(c.definition)); err != nil {
-			return err
-		}
-	}
-	if s.pg {
-		if err := s.pgWidenRealColumns(ctx, tx); err != nil {
-			return err
-		}
-	}
-	for _, m := range schemaIndexes {
-		if _, err := tx.ExecContext(ctx, s.dialectSQL(m)); err != nil {
-			return fmt.Errorf("migration failed: %w", err)
-		}
-	}
-	if err := optionalIndex(ctx, tx, "idx_prompts_name_version",
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_prompts_name_version ON prompts(name, version)`); err != nil {
-		return err
-	}
-	if err := s.applyDataMigrations(ctx, tx); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("migration failed: commit: %w", err)
-	}
-	return nil
-}
-
-// optionalIndex creates an index that existing data may prevent, such as a
-// unique index over rows that already hold duplicates. A failure is logged
-// and the migration continues: startup must not fail on old data. The
-// savepoint keeps a PostgreSQL error from aborting the whole transaction.
-func optionalIndex(ctx context.Context, tx *sql.Tx, name, stmt string) error {
-	if _, err := tx.ExecContext(ctx, "SAVEPOINT optional_index"); err != nil {
-		return fmt.Errorf("migration failed: savepoint: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, stmt); err != nil {
-		log.Printf("store: warning: could not create index %s, continuing without it: %v", name, err)
-		if _, rbErr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT optional_index"); rbErr != nil {
-			return fmt.Errorf("migration failed: rollback to savepoint: %w", rbErr)
-		}
-	}
-	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT optional_index"); err != nil {
-		return fmt.Errorf("migration failed: release savepoint: %w", err)
-	}
-	return nil
-}
-
-// pgWidenRealColumns converts float4 (REAL) columns created by older
-// releases to DOUBLE PRECISION. The value goes through its text form so a
-// stored 0.01 becomes 0.01, not 0.009999999776482582.
-func (s *Store) pgWidenRealColumns(ctx context.Context, tx *sql.Tx) error {
-	rows, err := tx.QueryContext(ctx, `
-		SELECT table_name, column_name FROM information_schema.columns
-		WHERE table_schema = current_schema() AND data_type = 'real'`)
-	if err != nil {
-		return fmt.Errorf("migration failed: list real columns: %w", err)
-	}
-	type col struct{ table, column string }
-	var cols []col
-	for rows.Next() {
-		var c col
-		if err := rows.Scan(&c.table, &c.column); err != nil {
-			rows.Close()
-			return fmt.Errorf("migration failed: list real columns: %w", err)
-		}
-		cols = append(cols, c)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, c := range cols {
-		table, column := pgQuoteIdent(c.table), pgQuoteIdent(c.column)
-		stmt := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE DOUBLE PRECISION USING CAST(CAST(%s AS TEXT) AS DOUBLE PRECISION)", table, column, column)
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("migration failed: widen %s.%s: %w", c.table, c.column, err)
-		}
-	}
-	return nil
-}
-
-func pgQuoteIdent(name string) string {
-	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
 // requestLogColumns selects a request_logs row in RequestLog scan order.
@@ -2166,6 +2031,7 @@ func (s *Store) DisableVirtualKey(ctx context.Context, name string) error {
 
 // Close closes the database connection.
 func (s *Store) Close() error {
+	s.stopBackground()
 	err := s.db.Close()
 	if s.wdb != nil && s.wdb != s.db {
 		if werr := s.wdb.Close(); err == nil {
@@ -2173,48 +2039,6 @@ func (s *Store) Close() error {
 		}
 	}
 	return err
-}
-
-func (s *Store) ensureColumn(ctx context.Context, tx *sql.Tx, table, column, definition string) error {
-	if s.pg {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s", table, column, definition)); err != nil {
-			return fmt.Errorf("add column %s.%s: %w", table, column, err)
-		}
-		return nil
-	}
-	exists, err := sqliteColumnExists(ctx, tx, table, column)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)); err != nil {
-		return fmt.Errorf("add column %s.%s: %w", table, column, err)
-	}
-	return nil
-}
-
-func sqliteColumnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
-	rows, err := tx.QueryContext(ctx, "PRAGMA table_info("+table+")")
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var cid int
-		var name, columnType string
-		var notNull, pk int
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			return false, err
-		}
-		if name == column {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
 }
 
 // timeLayout is the one layout every timestamp column is written in. It is
