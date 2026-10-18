@@ -191,6 +191,19 @@ func isPublicDiscoveryRoute(r *http.Request) bool {
 	return r.Method == http.MethodGet && r.URL.Path == "/.well-known/agent-card.json"
 }
 
+// isReadMethod reports whether method is a safe, read-only HTTP method.
+// Only these count as reads for role checks; every other method (including
+// unusual ones such as PROPFIND or a GET-like custom verb) is treated as a
+// write so authorization fails closed.
+func isReadMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
+}
+
 func requiredRole(method, path string) string {
 	// Health is intentionally public once the outer authentication middleware
 	// permits it; all other dashboard and control-plane routes need a role.
@@ -200,24 +213,31 @@ func requiredRole(method, path string) string {
 	if !strings.HasPrefix(path, "/api/") {
 		return "viewer"
 	}
+	read := isReadMethod(method)
 	switch path {
-	case "/api/keys", "/api/virtual-keys", "/api/virtual-keys/rotate", "/api/orgs", "/api/workspaces", "/api/users", "/api/workspace-members":
-		if method != http.MethodGet {
-			return "admin"
+	case "/api/keys", "/api/virtual-keys", "/api/virtual-keys/rotate", "/api/users", "/api/workspace-members",
+		"/api/configs", "/api/config/raw":
+		// These expose credentials metadata, user emails, or raw config
+		// bodies that can contain secrets, so even reads need an admin.
+		return "admin"
+	case "/api/orgs", "/api/workspaces":
+		if read {
+			return "viewer"
 		}
-		return "viewer"
-	case "/api/prompts", "/api/prompts/render", "/api/evals/policy":
-		if method != http.MethodGet {
-			return "member"
+		return "admin"
+	case "/api/prompts", "/api/prompts/versions", "/api/prompts/render", "/api/evals/policy":
+		if read {
+			return "viewer"
 		}
-		return "viewer"
-	case "/api/configs", "/api/config/raw":
-		if method != http.MethodGet {
-			return "admin"
-		}
+		return "member"
+	case "/api/feedback":
+		// Workload keys report feedback on their own responses.
 		return "viewer"
 	default:
-		return "viewer"
+		if read {
+			return "viewer"
+		}
+		return "admin"
 	}
 }
 

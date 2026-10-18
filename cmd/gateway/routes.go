@@ -219,7 +219,13 @@ func registerPromptRoutes(mux *http.ServeMux, promptHandler *prompt.Handler) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
-	mux.HandleFunc("/api/prompts/render", promptHandler.RenderPrompt)
+	mux.HandleFunc("/api/prompts/render", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		promptHandler.RenderPrompt(w, r)
+	})
 }
 
 // registerEvalRoutes registers the policy replay endpoint.

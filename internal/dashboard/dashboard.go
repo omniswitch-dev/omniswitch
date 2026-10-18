@@ -39,14 +39,14 @@ func (h *Handler) SetConfigPath(path string) {
 // RegisterRoutes adds dashboard routes to the given mux.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Dashboard API endpoints.
-	mux.HandleFunc("/api/logs", h.getLogs)
-	mux.HandleFunc("/api/metrics", h.getMetrics)
-	mux.HandleFunc("/api/metrics/providers", h.getProviderMetrics)
-	mux.HandleFunc("/api/analytics/cost", h.getCostAnalytics)
-	mux.HandleFunc("/api/traces/", h.getTrace)
+	mux.HandleFunc("/api/logs", readOnly(h.getLogs))
+	mux.HandleFunc("/api/metrics", readOnly(h.getMetrics))
+	mux.HandleFunc("/api/metrics/providers", readOnly(h.getProviderMetrics))
+	mux.HandleFunc("/api/analytics/cost", readOnly(h.getCostAnalytics))
+	mux.HandleFunc("/api/traces/", readOnly(h.getTrace))
 	mux.HandleFunc("/api/config/raw", h.rawConfig)
 	mux.HandleFunc("/api/configs", h.configs)
-	mux.HandleFunc("/api/health", h.health)
+	mux.HandleFunc("/api/health", readOnly(h.health))
 
 	// Serve embedded static files at root.
 	staticFS, _ := fs.Sub(staticFiles, "static")
@@ -63,7 +63,20 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 // RegisterPrometheus registers a lightweight Prometheus text endpoint. It is
 // kept separate from RegisterRoutes so operators can explicitly disable it.
 func (h *Handler) RegisterPrometheus(mux *http.ServeMux) {
-	mux.HandleFunc("/metrics", h.prometheus)
+	mux.HandleFunc("/metrics", readOnly(h.prometheus))
+}
+
+// readOnly rejects every method other than GET and HEAD so read endpoints
+// cannot be reached with a method the authorization layer treats
+// differently.
+func readOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (h *Handler) getLogs(w http.ResponseWriter, r *http.Request) {
