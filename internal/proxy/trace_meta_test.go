@@ -64,3 +64,34 @@ func TestInjectTraceMeta(t *testing.T) {
 		t.Fatalf("notification modified: %s", got)
 	}
 }
+
+// injectTraceMeta applies injectMetaFields to a serialized request, the
+// way forwardBody does for live traffic. Requests
+// without params or without an active span are returned unchanged. Values are
+// passed through as raw JSON, so numbers keep their exact representation.
+func injectTraceMeta(ctx context.Context, body []byte) []byte {
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		return body
+	}
+	var request map[string]json.RawMessage
+	if err := json.Unmarshal(body, &request); err != nil {
+		return body
+	}
+	var params map[string]json.RawMessage
+	if err := json.Unmarshal(request["params"], &params); err != nil || params == nil {
+		return body
+	}
+	if !injectMetaFields(ctx, params) {
+		return body
+	}
+	encoded, err := json.Marshal(params)
+	if err != nil {
+		return body
+	}
+	request["params"] = encoded
+	out, err := json.Marshal(request)
+	if err != nil {
+		return body
+	}
+	return out
+}

@@ -1,16 +1,17 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/omniswitch-dev/omniswitch/internal/adapter/mcp"
@@ -18,6 +19,16 @@ import (
 	"github.com/omniswitch-dev/omniswitch/internal/model"
 	"github.com/omniswitch-dev/omniswitch/internal/policy"
 	oteltrace "go.opentelemetry.io/otel/trace"
+)
+
+const (
+	// maxRequestBytes caps one incoming MCP message.
+	maxRequestBytes = 1 << 20
+	// maxBufferedResponseBytes caps an upstream response the gateway has to
+	// read fully (tools/list federation).
+	maxBufferedResponseBytes = 16 << 20
+	// maxListPages caps tools/list pagination per target.
+	maxListPages = 20
 )
 
 // TargetConfig defines a named upstream MCP server. A configured target is
@@ -34,53 +45,24 @@ type TargetConfig struct {
 	ForwardBearerToken bool
 	Engine             policy.Engine
 	// OpenAPISpec optionally points at an OpenAPI 3.x document (local path or
-	// URL). Its operations are exposed as synthetic MCP tools on this target,
-	// executed as plain HTTP calls with policy and audit enforcement.
+	// URL, JSON or YAML). Its operations are exposed as synthetic MCP tools on
+	// this target, executed as plain HTTP calls with policy and audit
+	// enforcement.
 	OpenAPISpec string
 
+	// Metadata holds operator-trusted attributes for policy input, for
+	// example "environment" or "resource_type". They take precedence over
+	// values inferred from caller arguments and are exposed as
+	// resource.environment, resource.type and metadata in CEL.
+	Metadata map[string]string
+
+	// Timeout bounds one forwarded call. Zero uses defaultCallTimeout.
+	Timeout time.Duration
+
 	// TokenExchange configures RFC 8693 token exchange for this target.
-	// When configured, incoming tokens are exchanged for target-specific tokens
-	// using RFC 8693 with RFC 7523 JWT Bearer Grant.
+	// When configured, the caller's OIDC bearer token is exchanged for a
+	// target-specific token.
 	TokenExchange *TokenExchangeConfig
-}
-
-// TokenExchangeConfig configures RFC 8693 token exchange for a target.
-type TokenExchangeConfig struct {
-	// TokenURL is the token endpoint of the authorization server.
-	TokenURL string `json:"token_url" yaml:"token_url"`
-
-	// ClientID is the OAuth client identifier for the token exchange.
-	ClientID string `json:"client_id" yaml:"client_id"`
-
-	// ClientSecret is the OAuth client secret for the token exchange.
-	ClientSecret string `json:"client_secret" yaml:"client_secret"`
-
-	// SubjectTokenType is the type of the subject token being exchanged.
-	// Defaults to "urn:ietf:params:oauth:token-type:access_token".
-	SubjectTokenType string `json:"subject_token_type,omitempty" yaml:"subject_token_type,omitempty"`
-
-	// RequestedTokenType is the type of token to request.
-	// Defaults to "urn:ietf:params:oauth:token-type:access_token".
-	RequestedTokenType string `json:"requested_token_type,omitempty" yaml:"requested_token_type,omitempty"`
-
-	// Scope is the scope to request for the new token.
-	Scope string `json:"scope,omitempty" yaml:"scope,omitempty"`
-
-	// Audience is the logical name of the target service (RFC 8693 "audience").
-	Audience string `json:"audience,omitempty" yaml:"audience,omitempty"`
-
-	// ActorToken is an optional actor token for On-Behalf-Of flow.
-	ActorToken string `json:"actor_token,omitempty" yaml:"actor_token,omitempty"`
-
-	// ActorTokenType is the type of the actor token.
-	// Defaults to "urn:ietf:params:oauth:token-type:access_token".
-	ActorTokenType string `json:"actor_token_type,omitempty" yaml:"actor_token_type,omitempty"`
-
-	// Resource indicates the target resource (RFC 8707).
-	Resource string `json:"resource,omitempty" yaml:"resource,omitempty"`
-
-	// TokenCacheTTL controls how long exchanged tokens are cached.
-	TokenCacheTTL time.Duration `json:"token_cache_ttl,omitempty" yaml:"token_cache_ttl,omitempty"`
 }
 
 type target struct {
@@ -89,36 +71,28 @@ type target struct {
 	upstream           *url.URL
 	stdio              *stdioClient
 	headers            map[string]string
+	metadata           map[string]string
+	timeout            time.Duration
 	forwardBearerToken bool
 	openAPITools       []openAPITool
 	tokenExchange      *TokenExchangeConfig
-	tokenCache         *tokenCache
 }
 
-type tokenCache struct {
-	mu           sync.Mutex
-	accessToken  string
-	expiresAt    time.Time
-	actorToken   string
-	actorExpires time.Time
+func (t *target) callTimeout() time.Duration {
+	if t.timeout > 0 {
+		return t.timeout
+	}
+	return defaultCallTimeout
 }
-
-type tokenCacheEntry struct {
-	accessToken  string
-	expiresAt    time.Time
-	actorToken   string
-	actorExpires time.Time
-}
-
-var tokenCacheMap sync.Map // key: target name -> *tokenCacheEntry
 
 type Handler struct {
 	engine      policy.Engine
 	auditor     audit.Logger
-	targets     map[string]target
+	targets     map[string]*target
 	targetOrder []string
 	defaultName string
 	client      *http.Client
+	tokens      *tokenCache
 }
 
 func NewHandler(engine policy.Engine, auditor audit.Logger, upstream string) (*Handler, error) {
@@ -135,74 +109,94 @@ func NewMultiHandler(engine policy.Engine, auditor audit.Logger, configs []Targe
 	if len(configs) == 0 {
 		return nil, fmt.Errorf("at least one MCP target is required")
 	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// A hung upstream must not hold a request forever, but a client-wide
+	// timeout would terminate valid long-lived SSE responses, so only the
+	// wait for response headers is bounded here.
+	transport.ResponseHeaderTimeout = defaultCallTimeout
 	handler := &Handler{
 		engine:  engine,
 		auditor: auditor,
-		targets: make(map[string]target, len(configs)),
-		// Request contexts still control cancellation. A client-wide timeout
-		// would terminate valid long-lived MCP SSE/streamable responses.
-		client: &http.Client{},
+		targets: make(map[string]*target, len(configs)),
+		client:  &http.Client{Transport: transport},
+		tokens:  newTokenCache(),
 	}
 	for index, config := range configs {
 		name := strings.TrimSpace(config.Name)
 		if name == "" {
+			handler.Close()
 			return nil, fmt.Errorf("MCP target %d name is required", index)
 		}
 		key := strings.ToLower(name)
 		if _, exists := handler.targets[key]; exists {
+			handler.Close()
 			return nil, fmt.Errorf("duplicate MCP target %q", name)
 		}
-		transport := strings.ToLower(strings.TrimSpace(config.Transport))
-		if transport == "" {
-			transport = "http"
+		configured, err := newTarget(name, config, engine)
+		if err != nil {
+			handler.Close()
+			return nil, err
 		}
-		configuredTarget := target{name: name, headers: cloneHeaders(config.Headers), forwardBearerToken: config.ForwardBearerToken}
-		switch transport {
-		case "http", "streamable_http":
-			parsed, err := url.Parse(config.Upstream)
-			if err != nil {
-				return nil, fmt.Errorf("parse MCP target %q upstream: %w", name, err)
-			}
-			if parsed.Scheme == "" || parsed.Host == "" {
-				return nil, fmt.Errorf("MCP target %q upstream must include scheme and host", name)
-			}
-			configuredTarget.upstream = parsed
-		case "stdio":
-			client, err := newStdioClient(config.Command, config.Args, config.Environment)
-			if err != nil {
-				return nil, fmt.Errorf("configure MCP target %q stdio transport: %w", name, err)
-			}
-			configuredTarget.stdio = client
-		default:
-			return nil, fmt.Errorf("MCP target %q uses unsupported transport %q", name, config.Transport)
-		}
-		engineForTarget := config.Engine
-		if engineForTarget == nil {
-			engineForTarget = engine
-		}
-		configuredTarget.engine = engineForTarget
-		if strings.TrimSpace(config.OpenAPISpec) != "" {
-			tools, err := loadOpenAPISpec(strings.TrimSpace(config.OpenAPISpec))
-			if err != nil {
-				return nil, fmt.Errorf("load OpenAPI spec for MCP target %q: %w", name, err)
-			}
-			configuredTarget.openAPITools = tools
-			log.Printf("MCP target %q exposes %d OpenAPI-derived tools", name, len(tools))
-		}
-
-		// Configure token exchange if enabled
-		if config.TokenExchange != nil {
-			configuredTarget.tokenExchange = config.TokenExchange
-			configuredTarget.tokenCache = &tokenCache{}
-		}
-
-		handler.targets[key] = configuredTarget
+		handler.targets[key] = configured
 		handler.targetOrder = append(handler.targetOrder, key)
 		if index == 0 {
 			handler.defaultName = key
 		}
 	}
 	return handler, nil
+}
+
+func newTarget(name string, config TargetConfig, engine policy.Engine) (*target, error) {
+	configured := &target{
+		name:               name,
+		headers:            cloneHeaders(config.Headers),
+		metadata:           cloneHeaders(config.Metadata),
+		timeout:            config.Timeout,
+		forwardBearerToken: config.ForwardBearerToken,
+		tokenExchange:      config.TokenExchange,
+		engine:             config.Engine,
+	}
+	if configured.engine == nil {
+		configured.engine = engine
+	}
+	transport := strings.ToLower(strings.TrimSpace(config.Transport))
+	if transport == "" {
+		transport = "http"
+	}
+	switch transport {
+	case "http", "streamable_http":
+		parsed, err := url.Parse(config.Upstream)
+		if err != nil {
+			return nil, fmt.Errorf("parse MCP target %q upstream: %w", name, err)
+		}
+		if parsed.Scheme == "" || parsed.Host == "" {
+			return nil, fmt.Errorf("MCP target %q upstream must include scheme and host", name)
+		}
+		configured.upstream = parsed
+	case "stdio":
+		client, err := newStdioClient(config.Command, config.Args, config.Environment)
+		if err != nil {
+			return nil, fmt.Errorf("configure MCP target %q stdio transport: %w", name, err)
+		}
+		if config.Timeout > 0 {
+			client.timeout = config.Timeout
+		}
+		configured.stdio = client
+	default:
+		return nil, fmt.Errorf("MCP target %q uses unsupported transport %q", name, config.Transport)
+	}
+	if spec := strings.TrimSpace(config.OpenAPISpec); spec != "" {
+		tools, err := loadOpenAPISpec(spec)
+		if err != nil {
+			if configured.stdio != nil {
+				configured.stdio.close()
+			}
+			return nil, fmt.Errorf("load OpenAPI spec for MCP target %q: %w", name, err)
+		}
+		configured.openAPITools = tools
+		log.Printf("MCP target %q exposes %d OpenAPI-derived tools", name, len(tools))
+	}
+	return configured, nil
 }
 
 // Close stops persistent transports owned by the handler.
@@ -212,90 +206,192 @@ func (h *Handler) Close() {
 	}
 	for _, target := range h.targets {
 		if target.stdio != nil {
-			target.stdio.stop()
+			target.stdio.close()
 		}
 	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, mcp.ErrorResponse(nil, -32600, "Invalid Request", fmt.Errorf("only POST is supported")))
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSON(w, http.StatusMethodNotAllowed, mcp.ErrorResponse(nil, mcp.CodeInvalidRequest, "Invalid Request", fmt.Errorf("only POST is supported")))
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, mcp.ErrorResponse(nil, -32700, "Parse error", err))
+		status := http.StatusBadRequest
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, status, mcp.ErrorResponse(nil, mcp.CodeParseError, "Parse error", err))
 		return
 	}
-	rpcReq, err := mcp.Decode(bytes.NewReader(body))
+	rpcReq, err := mcp.Parse(body)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, mcp.ErrorResponse(nil, -32700, "Parse error", err))
+		var parseErr *mcp.ParseError
+		if !errors.As(err, &parseErr) {
+			parseErr = &mcp.ParseError{Code: mcp.CodeInvalidRequest, Message: "Invalid Request", Err: err}
+		}
+		// JSON-RPC errors for well-formed JSON are application-level and use
+		// HTTP 200; only unparseable bodies are an HTTP-level failure.
+		status := http.StatusOK
+		if parseErr.Code == mcp.CodeParseError {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, mcp.ErrorResponse(parseErr.ID, parseErr.Code, parseErr.Message, parseErr.Err))
 		return
 	}
+
+	ctx, span := startServerSpan(r, rpcReq)
+	defer span.End()
+	r = r.WithContext(ctx)
 
 	switch rpcReq.Method {
 	case "tools/call":
-		h.handleToolCall(w, r, rpcReq, body)
+		h.handleToolCall(w, r, rpcReq)
 	case "tools/list":
-		h.handleToolList(w, r, rpcReq, body)
+		h.handleToolList(w, r, rpcReq)
 	default:
-		// Initialization, notifications, prompts, and resources are forwarded to
-		// the default target intact. Tool calls/listing are the operations that
-		// require virtual-target routing and policy mediation.
-		h.forwardToTarget(w, r.Context(), h.targets[h.defaultName], injectTraceMeta(r.Context(), body), r.Header)
+		h.handlePassthrough(w, r, rpcReq)
 	}
 }
 
-func (h *Handler) handleToolCall(w http.ResponseWriter, r *http.Request, rpcReq mcp.Request, body []byte) {
-	target, toolName := h.targetForTool(rpcReq.Params.Name)
-	rpcReq.Params.Name = toolName
+// handlePassthrough forwards initialization, notifications, prompts,
+// resources and client responses to the default target. Tool calls and tool
+// listing are the operations that need virtual-target routing and policy
+// mediation; everything else is audited and forwarded intact.
+func (h *Handler) handlePassthrough(w http.ResponseWriter, r *http.Request, rpcReq mcp.Request) {
+	tgt := h.targets[h.defaultName]
+	method := rpcReq.Method
+	if method == "" {
+		method = "response"
+	}
+	h.audit(r, method, model.ToolRequest{
+		Agent:   requestIdentity(r),
+		Tool:    model.Tool{Name: tgt.name},
+		Action:  model.Action{Name: method},
+		Target:  model.Target{Name: tgt.name},
+		Session: model.Session{ID: r.Header.Get("Mcp-Session-Id")},
+	}, model.Decision{Allowed: true, Rule: "passthrough", Reason: "forwarded without tool policy evaluation"})
 
-	// Synthetic OpenAPI-derived tool: execute as plain HTTP with policy+audit.
-	if len(target.openAPITools) > 0 {
-		if tool := findOpenAPITool(target.openAPITools, toolName); tool != nil {
-			h.handleOpenAPICall(w, r, target, tool, body, rpcReq.ID)
+	if tgt.stdio != nil {
+		switch {
+		case rpcReq.Method == "":
+			// Responses to server-initiated requests are answered by the
+			// stdio bridge itself, so the client's reply is acknowledged.
+			w.WriteHeader(http.StatusAccepted)
+			return
+		case rpcReq.Method == "initialize" && rpcReq.HasID:
+			// The bridge owns the stdio lifecycle and has already performed
+			// the handshake; answer with the server's cached result.
+			result, err := tgt.stdio.InitializeResult(r.Context())
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, mcp.ErrorResponse(rpcReq.ID, mcp.CodeInternalError, "Forwarding failed", err))
+				return
+			}
+			writeJSON(w, http.StatusOK, mcp.Response{JSONRPC: "2.0", ID: rpcReq.ID, Result: result})
+			return
+		case rpcReq.Method == "notifications/initialized":
+			// Already sent by the bridge during its own handshake.
+			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 	}
-	toolReq, err := rpcReq.ToToolRequestWithIdentity(requestIdentity(r), r.Header.Get("Mcp-Session-Id"))
-	if err != nil {
-		writeJSON(w, http.StatusOK, mcp.ErrorResponse(rpcReq.ID, -32602, "Invalid params", err))
+	h.forwardToTarget(w, r, tgt, rpcReq, h.forwardBody(r.Context(), rpcReq, ""))
+}
+
+func (h *Handler) handleToolCall(w http.ResponseWriter, r *http.Request, rpcReq mcp.Request) {
+	tgt, toolName := h.targetForTool(rpcReq.Params.Name)
+	rpcReq.Params.Name = toolName
+
+	// Synthetic OpenAPI-derived tool: execute as plain HTTP with policy+audit.
+	if tool := findOpenAPITool(tgt.openAPITools, toolName); tool != nil {
+		h.handleOpenAPICall(w, r, tgt, tool, rpcReq)
 		return
 	}
-	if toolReq.Metadata == nil {
-		toolReq.Metadata = map[string]string{}
-	}
-	toolReq.Metadata["mcp.target"] = target.name
-	decision, evalErr := target.engine.Evaluate(r.Context(), toolReq)
-	if h.auditor != nil {
-		_ = h.auditor.Log(r.Context(), audit.NewEvent(toolReq, decision))
-	}
+	toolReq := mcp.BuildToolRequest(toolName, rpcReq.Params.Arguments, h.toolContext(r, tgt))
+	decision, evalErr := tgt.engine.Evaluate(r.Context(), toolReq)
+	h.audit(r, rpcReq.Method, toolReq, decision)
 	if evalErr != nil || !decision.Allowed {
 		writeJSON(w, http.StatusOK, mcp.DeniedResponse(rpcReq.ID, decision))
 		return
 	}
-	body, err = replaceToolName(body, toolName)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, mcp.ErrorResponse(rpcReq.ID, -32700, "Parse error", err))
-		return
-	}
-	h.forwardToTarget(w, r.Context(), target, injectTraceMeta(r.Context(), body), r.Header)
+	h.forwardToTarget(w, r, tgt, rpcReq, h.forwardBody(r.Context(), rpcReq, toolName))
 }
 
-func (h *Handler) handleToolList(w http.ResponseWriter, r *http.Request, rpcReq mcp.Request, body []byte) {
-	tools := make([]map[string]any, 0)
-	for _, key := range h.targetOrder {
-		target := h.targets[key]
-		// Synthetic OpenAPI tools need no upstream tools/list round-trip.
-		for _, synthetic := range target.openAPITools {
-			listRequest := model.ToolRequest{
-				Agent:    requestIdentity(r),
-				Tool:     model.Tool{Name: synthetic.Name},
-				Action:   model.Action{Name: "list"},
-				Session:  model.Session{ID: r.Header.Get("Mcp-Session-Id")},
-				Metadata: map[string]string{"mcp.target": target.name},
+// toolContext returns the trusted, gateway-derived context for policy input.
+func (h *Handler) toolContext(r *http.Request, tgt *target) mcp.ToolContext {
+	return mcp.ToolContext{
+		Agent:          requestIdentity(r),
+		SessionID:      r.Header.Get("Mcp-Session-Id"),
+		Target:         tgt.name,
+		TargetMetadata: tgt.metadata,
+	}
+}
+
+// forwardBody re-serializes the parsed message for the upstream. Members are
+// copied as raw JSON, so unknown fields survive and numbers keep their exact
+// text; toolName (when set) replaces params.name, and the active trace
+// context is added to params._meta.
+func (h *Handler) forwardBody(ctx context.Context, rpcReq mcp.Request, toolName string) []byte {
+	fields := make(map[string]json.RawMessage, len(rpcReq.Fields))
+	for key, value := range rpcReq.Fields {
+		fields[key] = value
+	}
+	if rpcReq.ParamFields != nil {
+		params := make(map[string]json.RawMessage, len(rpcReq.ParamFields)+1)
+		for key, value := range rpcReq.ParamFields {
+			params[key] = value
+		}
+		changed := false
+		if toolName != "" {
+			encoded, _ := json.Marshal(toolName)
+			params["name"] = encoded
+			changed = true
+		}
+		if injectMetaFields(ctx, params) {
+			changed = true
+		}
+		if changed {
+			encoded, err := json.Marshal(params)
+			if err == nil {
+				fields["params"] = encoded
 			}
-			decision, err := target.engine.Evaluate(r.Context(), listRequest)
+		}
+	}
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// audit records one gateway decision. Audit failures are logged, not fatal.
+func (h *Handler) audit(r *http.Request, method string, req model.ToolRequest, decision model.Decision) {
+	if h.auditor == nil {
+		return
+	}
+	event := audit.NewEvent(req, decision)
+	event.Method = method
+	event.KeyID = r.Header.Get("x-omniswitch-key-id")
+	event.Workspace = r.Header.Get("x-omniswitch-workspace-id")
+	if sc := oteltrace.SpanContextFromContext(r.Context()); sc.IsValid() {
+		event.TraceID = sc.TraceID().String()
+	}
+	if err := h.auditor.Log(r.Context(), event); err != nil {
+		log.Printf("mcp audit log failed (method=%s target=%s): %v", method, event.Target, err)
+	}
+}
+
+func (h *Handler) handleToolList(w http.ResponseWriter, r *http.Request, rpcReq mcp.Request) {
+	tools := make([]map[string]json.RawMessage, 0)
+	for _, key := range h.targetOrder {
+		tgt := h.targets[key]
+		// Synthetic OpenAPI tools need no upstream tools/list round-trip.
+		for _, synthetic := range tgt.openAPITools {
+			listRequest := h.listRequest(r, tgt, synthetic.Name)
+			decision, err := tgt.engine.Evaluate(r.Context(), listRequest)
 			if err != nil || !decision.Allowed {
 				continue
 			}
@@ -303,42 +399,27 @@ func (h *Handler) handleToolList(w http.ResponseWriter, r *http.Request, rpcReq 
 			if err != nil {
 				continue
 			}
-			var entry map[string]any
+			var entry map[string]json.RawMessage
 			if err := json.Unmarshal(encoded, &entry); err != nil {
 				continue
 			}
-			entry["name"] = key + "__" + synthetic.Name
+			entry["name"], _ = json.Marshal(key + "__" + synthetic.Name)
 			tools = append(tools, entry)
 		}
-		listRequest := model.ToolRequest{
-			Agent:    requestIdentity(r),
-			Tool:     model.Tool{Name: target.name},
-			Action:   model.Action{Name: "list"},
-			Session:  model.Session{ID: r.Header.Get("Mcp-Session-Id")},
-			Metadata: map[string]string{"mcp.target": target.name},
-		}
-		decision, err := target.engine.Evaluate(r.Context(), listRequest)
-		if h.auditor != nil {
-			_ = h.auditor.Log(r.Context(), audit.NewEvent(listRequest, decision))
-		}
+		listRequest := h.listRequest(r, tgt, tgt.name)
+		decision, err := tgt.engine.Evaluate(r.Context(), listRequest)
+		h.audit(r, rpcReq.Method, listRequest, decision)
 		if err != nil || !decision.Allowed {
 			continue
 		}
-		status, _, response, err := h.callTarget(r.Context(), target, body, r.Header)
-		if err != nil || status < 200 || status >= 300 {
-			continue
+		upstreamTools, err := h.listTargetTools(r, tgt, rpcReq, key == h.defaultName)
+		if err != nil {
+			log.Printf("mcp tools/list: target %q failed: %v", tgt.name, err)
 		}
-		var result struct {
-			Result struct {
-				Tools []map[string]any `json:"tools"`
-			} `json:"result"`
-		}
-		if err := json.Unmarshal(response, &result); err != nil {
-			continue
-		}
-		for _, tool := range result.Result.Tools {
-			if name, ok := tool["name"].(string); ok {
-				tool["name"] = target.name + "__" + name
+		for _, tool := range upstreamTools {
+			var name string
+			if json.Unmarshal(tool["name"], &name) == nil {
+				tool["name"], _ = json.Marshal(tgt.name + "__" + name)
 			}
 			tools = append(tools, tool)
 		}
@@ -346,7 +427,135 @@ func (h *Handler) handleToolList(w http.ResponseWriter, r *http.Request, rpcReq 
 	writeJSON(w, http.StatusOK, mcp.Response{JSONRPC: "2.0", ID: rpcReq.ID, Result: map[string]any{"tools": tools}})
 }
 
-func (h *Handler) targetForTool(name string) (target, string) {
+func (h *Handler) listRequest(r *http.Request, tgt *target, toolName string) model.ToolRequest {
+	return model.ToolRequest{
+		Agent:    requestIdentity(r),
+		Tool:     model.Tool{Name: toolName, FullName: toolName},
+		Action:   model.Action{Name: "list", Operation: "list"},
+		Target:   model.Target{Name: tgt.name},
+		Session:  model.Session{ID: r.Header.Get("Mcp-Session-Id")},
+		Metadata: map[string]string{"mcp.target": tgt.name},
+	}
+}
+
+// listTargetTools collects every page of an upstream tools/list. The client's
+// Mcp-Session-Id belongs to the default target and is only sent there.
+func (h *Handler) listTargetTools(r *http.Request, tgt *target, rpcReq mcp.Request, isDefault bool) ([]map[string]json.RawMessage, error) {
+	id := rpcReq.ID
+	if len(id) == 0 || string(id) == "null" {
+		id = json.RawMessage(`"omniswitch-tools-list"`)
+	}
+	var tools []map[string]json.RawMessage
+	cursor := ""
+	for page := 0; page < maxListPages; page++ {
+		params := map[string]json.RawMessage{}
+		if cursor != "" {
+			params["cursor"], _ = json.Marshal(cursor)
+		}
+		injectMetaFields(r.Context(), params)
+		encodedParams, _ := json.Marshal(params)
+		body, _ := json.Marshal(map[string]json.RawMessage{
+			"jsonrpc": json.RawMessage(`"2.0"`),
+			"id":      id,
+			"method":  json.RawMessage(`"tools/list"`),
+			"params":  encodedParams,
+		})
+		status, headers, payload, err := h.callTarget(r.Context(), tgt, body, r.Header, isDefault)
+		if err != nil {
+			return tools, err
+		}
+		if status < 200 || status >= 300 {
+			return tools, fmt.Errorf("upstream returned HTTP %d", status)
+		}
+		message, err := decodeRPCResponse(payload, headers.Get("Content-Type"), id)
+		if err != nil {
+			return tools, err
+		}
+		var response struct {
+			Result *struct {
+				Tools      []map[string]json.RawMessage `json:"tools"`
+				NextCursor string                       `json:"nextCursor"`
+			} `json:"result"`
+			Error *mcp.Error `json:"error"`
+		}
+		if err := json.Unmarshal(message, &response); err != nil {
+			return tools, fmt.Errorf("decode tools/list response: %w", err)
+		}
+		if response.Error != nil {
+			return tools, fmt.Errorf("upstream error %d: %s", response.Error.Code, response.Error.Message)
+		}
+		if response.Result == nil {
+			return tools, fmt.Errorf("tools/list response has no result")
+		}
+		tools = append(tools, response.Result.Tools...)
+		if response.Result.NextCursor == "" || response.Result.NextCursor == cursor {
+			return tools, nil
+		}
+		cursor = response.Result.NextCursor
+	}
+	return tools, fmt.Errorf("stopped after %d tools/list pages", maxListPages)
+}
+
+// decodeRPCResponse returns the JSON-RPC response in payload. Streamable
+// HTTP servers may answer with text/event-stream, in which case the data
+// frame whose id matches is returned.
+func decodeRPCResponse(payload []byte, contentType string, id json.RawMessage) ([]byte, error) {
+	if !strings.Contains(strings.ToLower(contentType), "text/event-stream") {
+		return payload, nil
+	}
+	wantID := compactJSON(id)
+	var data bytes.Buffer
+	check := func() []byte {
+		defer data.Reset()
+		if data.Len() == 0 {
+			return nil
+		}
+		var message struct {
+			ID json.RawMessage `json:"id"`
+		}
+		if json.Unmarshal(data.Bytes(), &message) != nil || message.ID == nil {
+			return nil
+		}
+		if wantID != "" && compactJSON(message.ID) != wantID {
+			return nil
+		}
+		return append([]byte(nil), data.Bytes()...)
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(payload))
+	scanner.Buffer(make([]byte, 64*1024), maxBufferedResponseBytes)
+	for scanner.Scan() {
+		line := strings.TrimSuffix(scanner.Text(), "\r")
+		if line == "" {
+			if message := check(); message != nil {
+				return message, nil
+			}
+			continue
+		}
+		if value, ok := strings.CutPrefix(line, "data:"); ok {
+			if data.Len() > 0 {
+				data.WriteByte('\n')
+			}
+			data.WriteString(strings.TrimPrefix(value, " "))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read event stream: %w", err)
+	}
+	if message := check(); message != nil {
+		return message, nil
+	}
+	return nil, fmt.Errorf("event stream has no response for id %s", wantID)
+}
+
+func compactJSON(raw json.RawMessage) string {
+	var buffer bytes.Buffer
+	if err := json.Compact(&buffer, raw); err != nil {
+		return string(raw)
+	}
+	return buffer.String()
+}
+
+func (h *Handler) targetForTool(name string) (*target, string) {
 	if targetName, toolName, ok := strings.Cut(name, "__"); ok {
 		if target, exists := h.targets[strings.ToLower(targetName)]; exists && strings.TrimSpace(toolName) != "" {
 			return target, toolName
@@ -355,25 +564,30 @@ func (h *Handler) targetForTool(name string) (target, string) {
 	return h.targets[h.defaultName], name
 }
 
-func (h *Handler) forwardToTarget(w http.ResponseWriter, ctx context.Context, target target, body []byte, headers http.Header) {
-	if target.stdio != nil {
-		status, responseHeaders, response, err := h.callTarget(ctx, target, body, headers)
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, mcp.ErrorResponse(nil, -32603, "Forwarding failed", err))
+func (h *Handler) forwardToTarget(w http.ResponseWriter, r *http.Request, tgt *target, rpcReq mcp.Request, body []byte) {
+	isDefault := tgt == h.targets[h.defaultName]
+	if tgt.stdio != nil {
+		if !rpcReq.HasID {
+			if err := tgt.stdio.Notify(r.Context(), body); err != nil {
+				writeJSON(w, http.StatusBadGateway, mcp.ErrorResponse(nil, mcp.CodeInternalError, "Forwarding failed", err))
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		for key, values := range responseHeaders {
-			for _, value := range values {
-				w.Header().Add(key, value)
-			}
+		payload, err := tgt.stdio.Call(r.Context(), body)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, mcp.ErrorResponse(rpcReq.ID, mcp.CodeInternalError, "Forwarding failed", err))
+			return
 		}
-		w.WriteHeader(status)
-		_, _ = w.Write(response)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
 		return
 	}
-	response, err := h.targetRequest(ctx, target, body, headers)
+	response, err := h.targetRequest(r.Context(), tgt, body, r.Header, isDefault)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, mcp.ErrorResponse(nil, -32603, "Forwarding failed", err))
+		writeJSON(w, http.StatusBadGateway, mcp.ErrorResponse(rpcReq.ID, mcp.CodeInternalError, "Forwarding failed", err))
 		return
 	}
 	defer response.Body.Close()
@@ -386,52 +600,67 @@ func (h *Handler) forwardToTarget(w http.ResponseWriter, ctx context.Context, ta
 	streamTargetResponse(w, response.Body, response.Header.Get("Content-Type"))
 }
 
-func (h *Handler) callTarget(ctx context.Context, target target, body []byte, incoming http.Header) (int, http.Header, []byte, error) {
-	if target.stdio != nil {
-		payload, err := target.stdio.Call(ctx, body)
+// callTarget performs one buffered request/response exchange with a target.
+func (h *Handler) callTarget(ctx context.Context, tgt *target, body []byte, incoming http.Header, forwardSession bool) (int, http.Header, []byte, error) {
+	if tgt.stdio != nil {
+		payload, err := tgt.stdio.Call(ctx, body)
 		if err != nil {
 			return 0, nil, nil, err
 		}
 		return http.StatusOK, http.Header{"Content-Type": {"application/json"}}, payload, nil
 	}
-	response, err := h.targetRequest(ctx, target, body, incoming)
+	ctx, cancel := context.WithTimeout(ctx, tgt.callTimeout())
+	defer cancel()
+	response, err := h.targetRequest(ctx, tgt, body, incoming, forwardSession)
 	if err != nil {
 		return 0, nil, nil, err
 	}
 	defer response.Body.Close()
-	payload, err := io.ReadAll(response.Body)
+	payload, err := io.ReadAll(io.LimitReader(response.Body, maxBufferedResponseBytes+1))
 	if err != nil {
 		return 0, nil, nil, err
+	}
+	if len(payload) > maxBufferedResponseBytes {
+		return 0, nil, nil, fmt.Errorf("upstream response exceeds %d bytes", maxBufferedResponseBytes)
 	}
 	return response.StatusCode, response.Header, payload, nil
 }
 
-func (h *Handler) targetRequest(ctx context.Context, target target, body []byte, incoming http.Header) (*http.Response, error) {
-	if target.upstream == nil {
+func (h *Handler) targetRequest(ctx context.Context, tgt *target, body []byte, incoming http.Header, forwardSession bool) (*http.Response, error) {
+	if tgt.upstream == nil {
 		return nil, fmt.Errorf("HTTP target is not configured")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.upstream.String(), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tgt.upstream.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	for _, key := range []string{"Accept", "Mcp-Protocol-Version", "Mcp-Session-Id", "Last-Event-ID"} {
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	forwarded := []string{"Accept", "Mcp-Protocol-Version", "Last-Event-ID"}
+	if forwardSession {
+		// The client's MCP session was negotiated with the default target;
+		// it means nothing to (and must not leak to) other targets.
+		forwarded = append(forwarded, "Mcp-Session-Id")
+	}
+	for _, key := range forwarded {
 		if value := incoming.Get(key); value != "" {
 			req.Header.Set(key, value)
 		}
 	}
-	// A target can receive an OIDC bearer token only when explicitly enabled.
-	// OmniSwitch API keys are never forwarded to avoid leaking a gateway secret
-	// to an MCP server.
-	if target.forwardBearerToken && incoming.Get("x-omniswitch-auth-method") == "oidc" {
-		if authorization := incoming.Get("Authorization"); authorization != "" {
-			req.Header.Set("Authorization", authorization)
-		}
-	}
+	injectTraceHeaders(ctx, req.Header)
 
-	// Handle token exchange if configured
-	if target.tokenExchange != nil {
-		token, err := h.getExchangeToken(ctx, target)
+	// Bearer tokens are only ever taken from OIDC-authenticated callers.
+	// OmniSwitch API keys are never forwarded or exchanged, so a gateway
+	// secret cannot leak to an MCP server.
+	oidcToken := ""
+	if incoming.Get("x-omniswitch-auth-method") == "oidc" {
+		oidcToken = bearerToken(incoming.Get("Authorization"))
+	}
+	if tgt.forwardBearerToken && oidcToken != "" {
+		req.Header.Set("Authorization", "Bearer "+oidcToken)
+	}
+	if tgt.tokenExchange != nil {
+		token, err := h.exchangeToken(ctx, tgt, oidcToken)
 		if err != nil {
 			return nil, fmt.Errorf("token exchange failed: %w", err)
 		}
@@ -440,14 +669,10 @@ func (h *Handler) targetRequest(ctx context.Context, target target, body []byte,
 		}
 	}
 
-	for key, value := range target.headers {
+	for key, value := range tgt.headers {
 		req.Header.Set(key, value)
 	}
-	response, err := h.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	return response, nil
+	return h.client.Do(req)
 }
 
 func streamTargetResponse(w http.ResponseWriter, body io.Reader, contentType string) {
@@ -477,194 +702,6 @@ func requestIdentity(r *http.Request) model.Agent {
 		Department: r.Header.Get("x-omniswitch-workspace-id"),
 		Role:       r.Header.Get("x-omniswitch-role"),
 	}
-}
-
-func replaceToolName(body []byte, name string) ([]byte, error) {
-	var request map[string]any
-	if err := json.Unmarshal(body, &request); err != nil {
-		return nil, err
-	}
-	params, ok := request["params"].(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("params is required")
-	}
-	params["name"] = name
-	return json.Marshal(request)
-}
-
-// injectTraceMeta implements MCP distributed trace context propagation
-// (SEP-414): the active OpenTelemetry span is written into params._meta as a
-// W3C traceparent so downstream MCP servers can continue the trace. Requests
-// without params or without an active span are returned unchanged.
-func injectTraceMeta(ctx context.Context, body []byte) []byte {
-	sc := oteltrace.SpanContextFromContext(ctx)
-	if !sc.IsValid() {
-		return body
-	}
-	flags := "01"
-	if !sc.IsSampled() {
-		flags = "00"
-	}
-	traceparent := fmt.Sprintf("00-%s-%s-%s", sc.TraceID().String(), sc.SpanID().String(), flags)
-
-	var request map[string]any
-	if err := json.Unmarshal(body, &request); err != nil {
-		return body
-	}
-	params, ok := request["params"].(map[string]any)
-	if !ok {
-		// Do not fabricate params for notifications or malformed requests.
-		return body
-	}
-	meta, ok := params["_meta"].(map[string]any)
-	if !ok {
-		meta = map[string]any{}
-		params["_meta"] = meta
-	}
-	if _, exists := meta["traceparent"]; exists {
-		return body // caller-supplied context wins
-	}
-	meta["traceparent"] = traceparent
-	if state := sc.TraceState(); state.String() != "" {
-		meta["tracestate"] = state.String()
-	}
-	out, err := json.Marshal(request)
-	if err != nil {
-		return body
-	}
-	return out
-}
-
-// extractSubjectTokenFromContext extracts the bearer token from the request context.
-func extractSubjectTokenFromContext(ctx context.Context) string {
-	if auth := ctx.Value("authorization"); auth != nil {
-		if authStr, ok := auth.(string); ok {
-			if strings.HasPrefix(authStr, "Bearer ") {
-				return strings.TrimPrefix(authStr, "Bearer ")
-			}
-		}
-	}
-	return ""
-}
-
-// getOrExchangeToken retrieves a cached token or performs RFC 8693 token exchange
-// using RFC 7523 JWT Bearer Grant. Supports On-Behalf-Of flow via actor_token.
-func (h *Handler) getExchangeToken(ctx context.Context, target target) (string, error) {
-	if target.tokenExchange == nil {
-		return "", nil
-	}
-
-	te := target.tokenExchange
-
-	// Check cache first
-	if entry, ok := tokenCacheMap.Load(target.name); ok {
-		if entry, ok := entry.(*tokenCacheEntry); ok {
-			if time.Now().Before(entry.expiresAt) {
-				return entry.accessToken, nil
-			}
-		}
-	}
-
-	// Prepare token exchange request
-	subjectToken := extractSubjectTokenFromContext(ctx)
-	if subjectToken == "" {
-		return "", nil // No subject token available
-	}
-
-	form := url.Values{}
-	form.Set("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")
-	form.Set("subject_token", subjectToken)
-
-	subjectTokenType := te.SubjectTokenType
-	if subjectTokenType == "" {
-		subjectTokenType = "urn:ietf:params:oauth:token-type:access_token"
-	}
-	form.Set("subject_token_type", subjectTokenType)
-
-	requestedTokenType := te.RequestedTokenType
-	if requestedTokenType == "" {
-		requestedTokenType = "urn:ietf:params:oauth:token-type:access_token"
-	}
-	form.Set("requested_token_type", requestedTokenType)
-
-	if te.Scope != "" {
-		form.Set("scope", te.Scope)
-	}
-
-	if te.Audience != "" {
-		form.Set("audience", te.Audience)
-	}
-
-	if te.Resource != "" {
-		form.Set("resource", te.Resource)
-	}
-
-	if te.ActorToken != "" {
-		form.Set("actor_token", te.ActorToken)
-		actorTokenType := te.ActorTokenType
-		if actorTokenType == "" {
-			actorTokenType = "urn:ietf:params:oauth:token-type:access_token"
-		}
-		form.Set("actor_token_type", actorTokenType)
-	}
-
-	form.Set("client_id", te.ClientID)
-	form.Set("client_secret", te.ClientSecret)
-
-	// Create token exchange request
-	tokenReq, err := http.NewRequestWithContext(context.Background(), http.MethodPost, te.TokenURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", err
-	}
-	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	tokenReq.Header.Set("Accept", "application/json")
-
-	resp, err := h.client.Do(tokenReq)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("token exchange failed: %s - %s", resp.Status, string(body))
-	}
-
-	var tokenResp struct {
-		AccessToken  string `json:"access_token"`
-		TokenType    string `json:"token_type"`
-		ExpiresIn    int    `json:"expires_in"`
-		IssuedToken  string `json:"issued_token"`
-		RefreshToken string `json:"refresh_token"`
-		Scope        string `json:"scope"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return "", err
-	}
-
-	accessToken := tokenResp.AccessToken
-	if accessToken == "" {
-		accessToken = tokenResp.IssuedToken
-	}
-	if accessToken == "" {
-		return "", fmt.Errorf("no access token in response")
-	}
-
-	expiresIn := tokenResp.ExpiresIn
-	if expiresIn <= 0 {
-		expiresIn = 3600 // default 1 hour
-	}
-	expiresAt := time.Now().Add(time.Duration(expiresIn-60) * time.Second) // 1 min buffer
-
-	// Cache the token
-	cacheEntry := &tokenCacheEntry{
-		accessToken: accessToken,
-		expiresAt:   expiresAt,
-	}
-	tokenCacheMap.Store(target.name, cacheEntry)
-
-	return accessToken, nil
 }
 
 func cloneHeaders(source map[string]string) map[string]string {
