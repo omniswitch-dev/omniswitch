@@ -152,10 +152,18 @@ claims:
 - capability: responses-api
   gateway: omniswitch
   status: partial
-  detail: /v1/responses text subset only (no image/audio/tool-streaming parity with OpenAI).
-  source_url: docs/PORTKEY_COMPARISON.md
-  verified_on: '2026-09-11'
-  version: v0.2.0-beta (commit 88a27c0)
+  detail: 'POST /v1/responses translates to the chat pipeline. Input is a string or an array of message items
+    with input_text/output_text and input_image content; instructions, temperature, top_p, max_output_tokens,
+    function tools and tool_choice (auto, none, required or a named function) are forwarded. Responses return
+    message and function_call output items, and streaming emits response.output_text.delta plus
+    response.output_item.added, response.function_call_arguments.delta/done and response.output_item.done for
+    each function call. Built-in tools (for example web_search, file_search), non-message input items (including
+    function_call_output, so tool results cannot be sent back through this endpoint), and audio or file content
+    are rejected with 400. Other fields (previous_response_id, store, background, text.format, reasoning) are
+    ignored: there is no stored response state or background mode.'
+  source_url: internal/gateway/compat.go
+  verified_on: '2026-10-18'
+  version: v0.2.0-beta (commit cd48291)
 - capability: anthropic-messages-api
   gateway: omniswitch
   status: partial
@@ -176,11 +184,14 @@ claims:
 - capability: custom-openai-endpoint
   gateway: omniswitch
   status: 'yes'
-  detail: Generic custom provider adapter with presets for Azure OpenAI, Ollama, vLLM, LiteLLM, DeepSeek,
-    Together, Fireworks, and aliases.
-  source_url: CHANGELOG.md
-  verified_on: '2026-09-11'
-  version: v0.2.0-beta (commit 88a27c0)
+  detail: 'Generic OpenAI-compatible custom adapter (type custom with base_url, api_key_env, models and
+    extra_headers, or a vault virtual key with a base URL) for Ollama, vLLM, LiteLLM and other OpenAI-compatible
+    servers. 8 env-var presets use the same adapter: Mistral, xAI, DeepSeek, Together, Fireworks, Perplexity,
+    Cerebras and OpenRouter (MISTRAL_API_KEY, XAI_API_KEY, and so on). Provider accounts of a preset type can
+    override its base URL. Azure OpenAI is a native adapter, not a preset.'
+  source_url: cmd/gateway/providers.go
+  verified_on: '2026-10-18'
+  version: v0.2.0-beta (commit cd48291)
 - capability: fallbacks-retries
   gateway: omniswitch
   status: 'yes'
@@ -214,11 +225,12 @@ claims:
 - capability: exact-cache
   gateway: omniswitch
   status: 'yes'
-  detail: SHA-256 request-fingerprint cache key, tenant-scoped (api_key/workspace/organization/global),
-    SQLite-backed.
-  source_url: internal/cache/cache.go
-  verified_on: '2026-09-11'
-  version: v0.2.0-beta (commit 88a27c0)
+  detail: 'SHA-256 request-fingerprint cache key, isolated per tenant scope (gateway.cache_scope: api_key,
+    workspace, organization or global) and provider. Entries are stored in the semantic_cache table of the
+    configured store (SQLite or PostgreSQL); in PostgreSQL mode all replicas share them.'
+  source_url: internal/store/store.go
+  verified_on: '2026-10-18'
+  version: v0.2.0-beta (commit cd48291)
 - capability: semantic-cache
   gateway: omniswitch
   status: 'yes'
@@ -336,12 +348,15 @@ claims:
 - capability: mcp-oauth-token-exchange
   gateway: omniswitch
   status: partial
-  detail: RFC 8693 token exchange (with an RFC 7523 JWT Bearer option) exists in the MCP proxy library
-    (TargetConfig.TokenExchange) for Go embedders, but gateway configuration does not expose it. Config-only
-    deployments can forward an OIDC caller's bearer token to a target (forward_bearer_token).
-  source_url: internal/proxy/token_exchange.go
+  detail: 'RFC 8693 token exchange per HTTP target (mcp.targets[].token_exchange: token_url, client_id,
+    client_secret, audience, scope, resource, actor_token, token_cache_ttl). Only the
+    urn:ietf:params:oauth:grant-type:token-exchange grant is sent; exchanged tokens are cached in process. Only
+    OIDC callers are exchanged; API-key callers get no exchanged token. There is no client-credentials flow, no
+    exchange for stdio or OpenAPI targets (config validation rejects them), and no OAuth authorization flows.
+    forward_bearer_token forwards the OIDC caller''s token as an alternative.'
+  source_url: cmd/gateway/mcp_targets.go
   verified_on: '2026-10-18'
-  version: v0.2.0-beta (commit 5ee337f)
+  version: v0.2.0-beta (commit cd48291)
 - capability: a2a-agent-card
   gateway: omniswitch
   status: 'yes'
@@ -353,13 +368,13 @@ claims:
   gateway: omniswitch
   status: partial
   detail: 'SendMessage / SendMessageStream, GetTask, CancelTask implemented (JSON-RPC methods and REST
-    aliases). SendMessageStream is single-shot SSE (status and artifact frames for one completed response,
-    no token streaming or resubscribe). Tasks are in memory (10,000 max, 1h TTL) and not shared across
-    replicas. Agent card advertises pushNotifications: false, so push-notification task updates are not
-    supported.'
+    aliases). SendMessageStream is single-shot SSE (status and artifact frames for one completed response, no
+    token streaming or resubscribe). Tasks are in memory (10,000 max, 1,000 per API key and workspace, 1h TTL),
+    visible only to the API key and workspace that created them, and not shared across replicas. Agent card
+    advertises pushNotifications: false, so push-notification task updates are not supported.'
   source_url: internal/gateway/a2a_tasks.go
   verified_on: '2026-10-18'
-  version: v0.2.0-beta (commit 5ee337f)
+  version: v0.2.0-beta (commit cd48291)
 - capability: prompt-management
   gateway: omniswitch
   status: partial
@@ -384,10 +399,13 @@ claims:
 - capability: prometheus
   gateway: omniswitch
   status: 'yes'
-  detail: /metrics endpoint, gated by OMNISWITCH_PROMETHEUS_ENABLED.
-  source_url: internal/gatewayconfig/config.go
-  verified_on: '2026-09-11'
-  version: v0.2.0-beta (commit 88a27c0)
+  detail: /metrics serves Prometheus text counters (last 24 hours) when OMNISWITCH_PROMETHEUS_ENABLED /
+    observability.prometheus_enabled is on (default true). It follows gateway authentication, and workspace- or
+    organization-scoped callers get 403. OMNISWITCH_METRICS_PUBLIC=true serves /metrics without authentication
+    and to every caller.
+  source_url: internal/dashboard/tenant.go
+  verified_on: '2026-10-18'
+  version: v0.2.0-beta (commit cd48291)
 - capability: dashboard
   gateway: omniswitch
   status: 'yes'
