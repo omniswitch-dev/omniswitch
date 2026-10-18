@@ -645,10 +645,23 @@ func applyHotConfig(cfg gatewayconfig.Config, rtr *router.Router, gw *gateway.Ha
 	if cfg.Gateway.CircuitBreakerCooldown != nil {
 		cooldown = cfg.Gateway.CircuitBreakerCooldown.Duration
 	}
-	if failures > 0 && cooldown > 0 {
+	// Swap the breaker only when its settings change: a new breaker starts
+	// with every circuit closed, so swapping on each reload would reset
+	// circuits that are open for a failing provider.
+	if failures > 0 && cooldown > 0 && !breakerHasSettings(rtr.CircuitBreaker(), failures, cooldown) {
 		rtr.SetCircuitBreaker(router.NewCircuitBreaker(failures, cooldown))
 	}
 	return fileRoutes, gr
+}
+
+// breakerHasSettings reports whether breaker uses the given failure
+// threshold and cooldown.
+func breakerHasSettings(breaker *router.CircuitBreaker, failures int, cooldown time.Duration) bool {
+	if breaker == nil {
+		return false
+	}
+	threshold, current := breaker.Settings()
+	return threshold == failures && current == cooldown
 }
 
 func prevRouteOwnedByFile(prev map[string]router.Route, model string) bool {
