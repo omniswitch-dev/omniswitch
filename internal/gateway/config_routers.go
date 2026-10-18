@@ -27,7 +27,8 @@ const (
 	// remembered, so repeated requests for it do not each read the database.
 	configRouterNegativeTTL = 2 * time.Second
 	// maxCachedConfigKeys bounds the resolved configs kept in memory. Each
-	// config is stored under its name and its id.
+	// config is stored under its name, its id and the reference used; the
+	// LRU evicts all keys of a config together.
 	maxCachedConfigKeys = 512
 	// maxNegativeConfigRefs bounds the remembered unknown config names.
 	maxNegativeConfigRefs = 1024
@@ -145,6 +146,8 @@ func (c *configRouterCache) lookup(ctx context.Context, ref string, st *store.St
 			c.mu.Unlock()
 			return entry, nil
 		}
+		// All keys of an entry expire together.
+		c.positive.removeEntry(entry)
 		c.positive.remove(ref)
 	}
 	if entry, ok := c.negative.get(ref); ok {
@@ -288,9 +291,17 @@ func (l *configLRU) put(key string, entry *configRouterEntry, capacity int) {
 	}
 	l.items[key] = l.order.PushFront(&configLRUItem{key: key, entry: entry})
 	for len(l.items) > capacity {
-		oldest := l.order.Back()
-		l.order.Remove(oldest)
-		delete(l.items, oldest.Value.(*configLRUItem).key)
+		oldest := l.order.Back().Value.(*configLRUItem)
+		if oldest.entry == entry {
+			// Only possible when capacity is smaller than one entry's keys.
+			l.remove(oldest.key)
+			continue
+		}
+		// Evict the whole entry, not just its least recently used key: an
+		// entry is either cached under all its keys or not at all, so
+		// invalidate by any of its names or ids always finds it.
+		l.remove(oldest.key)
+		l.removeEntry(oldest.entry)
 	}
 }
 
