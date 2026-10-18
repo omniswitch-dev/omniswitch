@@ -9,14 +9,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/google/cel-go/cel"
+	celast "github.com/google/cel-go/common/ast"
+	"github.com/google/cel-go/common/operators"
 	"github.com/google/cel-go/common/types"
 
+	"github.com/omniswitch-dev/omniswitch/internal/adapter/mcp"
 	"github.com/omniswitch-dev/omniswitch/internal/model"
 	"github.com/omniswitch-dev/omniswitch/internal/spec"
 )
@@ -36,13 +40,15 @@ type Rule struct {
 }
 
 type CELEngine struct {
-	env   *cel.Env
-	rules []compiledRule
+	env      *cel.Env
+	rules    []compiledRule
+	warnings []string
 }
 
 type compiledRule struct {
 	rule    Rule
 	program cel.Program
+	ast     *cel.Ast
 }
 
 func NewEngine(rules ...Rule) (*CELEngine, error) {
@@ -58,6 +64,10 @@ func NewEngine(rules ...Rule) (*CELEngine, error) {
 			return nil, err
 		}
 		engine.rules = append(engine.rules, compiled)
+		if warning := compiled.legacyActionWarning(); warning != "" {
+			log.Printf("policy warning: %s", warning)
+			engine.warnings = append(engine.warnings, warning)
+		}
 	}
 
 	return engine, nil
@@ -270,7 +280,99 @@ func (e *CELEngine) compileRule(rule Rule) (compiledRule, error) {
 	return compiledRule{
 		rule:    rule,
 		program: program,
+		ast:     ast,
 	}, nil
+}
+
+// Warnings returns the load-time warnings for the engine's rules, one per
+// rule at most.
+func (e *CELEngine) Warnings() []string {
+	return append([]string(nil), e.warnings...)
+}
+
+// legacyActionWarning flags a rule that compares action.name with a
+// destructive verb other than "delete" (for example "drop_table"). The MCP
+// adapter classifies every destructive tool as action.name "delete", so
+// such a comparison never matches; the rule should test action.operation
+// or action.name == "delete" instead. A rule that also compares
+// action.operation with the same literal (the migrated form, often kept
+// alongside the old one) is not flagged.
+func (c compiledRule) legacyActionWarning() string {
+	if c.ast == nil {
+		return ""
+	}
+	var literals []string
+	operations := map[string]bool{}
+	celast.PreOrderVisit(c.ast.NativeRep().Expr(), celast.NewExprVisitor(func(expr celast.Expr) {
+		if expr.Kind() != celast.CallKind {
+			return
+		}
+		call := expr.AsCall()
+		switch call.FunctionName() {
+		case operators.Equals, operators.NotEquals, operators.In:
+		default:
+			return
+		}
+		args := call.Args()
+		if len(args) != 2 {
+			return
+		}
+		for index, arg := range args {
+			switch actionField(arg) {
+			case "name":
+				literals = append(literals, stringLiterals(args[1-index])...)
+			case "operation":
+				for _, literal := range stringLiterals(args[1-index]) {
+					operations[literal] = true
+				}
+			}
+		}
+	}))
+	for _, literal := range literals {
+		if literal != "delete" && !operations[literal] && mcp.IsDestructiveVerb(literal) {
+			return fmt.Sprintf("policy %q compares action.name with %q, but destructive MCP tools are classified as action.name \"delete\"; match action.operation == %q (or action.name == \"delete\") instead", c.rule.Name, literal, literal)
+		}
+	}
+	return ""
+}
+
+// actionField returns "name" for action.name or action["name"] (and
+// likewise for any other field), or "" when expr is not an action field.
+func actionField(expr celast.Expr) string {
+	isAction := func(operand celast.Expr) bool {
+		return operand.Kind() == celast.IdentKind && operand.AsIdent() == "action"
+	}
+	switch expr.Kind() {
+	case celast.SelectKind:
+		if sel := expr.AsSelect(); isAction(sel.Operand()) {
+			return sel.FieldName()
+		}
+	case celast.CallKind:
+		call := expr.AsCall()
+		args := call.Args()
+		if call.FunctionName() == operators.Index && len(args) == 2 && isAction(args[0]) && args[1].Kind() == celast.LiteralKind {
+			if key, ok := args[1].AsLiteral().Value().(string); ok {
+				return key
+			}
+		}
+	}
+	return ""
+}
+
+func stringLiterals(expr celast.Expr) []string {
+	switch expr.Kind() {
+	case celast.LiteralKind:
+		if text, ok := expr.AsLiteral().Value().(string); ok {
+			return []string{text}
+		}
+	case celast.ListKind:
+		var out []string
+		for _, element := range expr.AsList().Elements() {
+			out = append(out, stringLiterals(element)...)
+		}
+		return out
+	}
+	return nil
 }
 
 func ruleFromSpecFile(path string) (Rule, error) {

@@ -377,7 +377,7 @@ func BuildToolRequest(name string, arguments map[string]any, tc ToolContext) mod
 	toolName, operation, dotted := splitToolName(name)
 
 	actionName := inferAction(operation, dotted, tc.HTTPMethod)
-	if actionName != "delete" && isDestructiveVerb(firstString(arguments, "action", "operation")) {
+	if actionName != "delete" && IsDestructiveVerb(firstString(arguments, "action", "operation")) {
 		actionName = "delete"
 	}
 
@@ -516,7 +516,7 @@ var destructiveVerbs = map[string]bool{
 // (delete_, remove_, drop_, destroy_, deleteRepo, ...) map to "delete". For
 // OpenAPI tools the HTTP method decides otherwise.
 func inferAction(operation string, dotted bool, httpMethod string) string {
-	if isDestructiveVerb(operation) {
+	if IsDestructiveVerb(operation) {
 		return "delete"
 	}
 	switch strings.ToUpper(strings.TrimSpace(httpMethod)) {
@@ -535,9 +535,10 @@ func inferAction(operation string, dotted bool, httpMethod string) string {
 	return operation
 }
 
-// isDestructiveVerb reports whether the first word of an identifier
-// (snake_case, kebab-case or camelCase) is a destructive verb.
-func isDestructiveVerb(identifier string) bool {
+// IsDestructiveVerb reports whether the first word of an identifier
+// (snake_case, kebab-case or camelCase) is a destructive verb. Such tool
+// names are classified with action.name "delete".
+func IsDestructiveVerb(identifier string) bool {
 	return destructiveVerbs[firstWord(identifier)]
 }
 
