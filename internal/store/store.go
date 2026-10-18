@@ -654,6 +654,9 @@ func (s *Store) migrate() error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_prompts_name_version ON prompts(name, version)`); err != nil {
 		return err
 	}
+	if err := s.applyDataMigrations(ctx, tx); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("migration failed: commit: %w", err)
 	}
@@ -1192,7 +1195,7 @@ func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
 			metadata = excluded.metadata`,
 		key.ID, key.Name, key.KeyHash, key.KeyPrefix,
 		formatTime(key.CreatedAt), expiresAt, key.RateLimit,
-		firstPositive(key.BudgetUSD, key.MonthlyCostBudget), key.SpendUSD, key.MonthlyCostBudget, key.MonthlyTokenBudget,
+		key.BudgetUSD, key.SpendUSD, key.MonthlyCostBudget, key.MonthlyTokenBudget,
 		boolToInt(key.Enabled), key.WorkspaceID, key.Role, string(meta),
 	)
 	return err
@@ -1501,12 +1504,16 @@ func (s *Store) IncrementAPIKeySpend(ctx context.Context, id string, amount floa
 	return err
 }
 
+// GetBudgetUsage sums the cost and tokens a key used since the given time.
+// Every upstream call that incurred cost counts, including a response that
+// an output guardrail later blocked, the same as spend_usd. Cache hits are
+// free and do not count.
 func (s *Store) GetBudgetUsage(ctx context.Context, apiKeyID string, since time.Time) (BudgetUsage, error) {
 	var usage BudgetUsage
 	err := s.queryRow(ctx, `
 		SELECT COALESCE(SUM(cost), 0), COALESCE(SUM(total_tokens), 0)
 		FROM request_logs
-		WHERE api_key_id = ? AND timestamp >= ? AND decision = 'ALLOW'`,
+		WHERE api_key_id = ? AND timestamp >= ? AND COALESCE(cached, 0) = 0`,
 		apiKeyID,
 		formatTime(since),
 	).Scan(&usage.Cost, &usage.Tokens)
@@ -2235,15 +2242,6 @@ func parseTime(value string) time.Time {
 func boolToInt(b bool) int {
 	if b {
 		return 1
-	}
-	return 0
-}
-
-func firstPositive(values ...float64) float64 {
-	for _, value := range values {
-		if value > 0 {
-			return value
-		}
 	}
 	return 0
 }

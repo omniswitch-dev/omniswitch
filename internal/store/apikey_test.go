@@ -20,7 +20,8 @@ func TestInsertAPIKeyKeepsSpend(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.BudgetUSD != 10 || got.MonthlyCostBudget != 10 || got.MonthlyTokenBudget != 1000 || got.SpendUSD != 0 {
+		// A monthly budget is not copied into the lifetime budget (STORE-02).
+		if got.BudgetUSD != 0 || got.MonthlyCostBudget != 10 || got.MonthlyTokenBudget != 1000 || got.SpendUSD != 0 {
 			t.Fatalf("new key budgets = %+v", got)
 		}
 		if err := st.IncrementAPIKeySpend(ctx, key.ID, 4.5); err != nil {
@@ -39,7 +40,7 @@ func TestInsertAPIKeyKeepsSpend(t *testing.T) {
 		if got.SpendUSD != 4.5 {
 			t.Fatalf("spend after re-upsert = %v, want 4.5", got.SpendUSD)
 		}
-		if got.Name != "Renamed" || got.MonthlyCostBudget != 20 || got.BudgetUSD != 20 {
+		if got.Name != "Renamed" || got.MonthlyCostBudget != 20 || got.BudgetUSD != 0 {
 			t.Fatalf("re-upsert did not update config: %+v", got)
 		}
 	})

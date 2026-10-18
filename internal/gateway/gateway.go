@@ -1325,6 +1325,10 @@ func (h *Handler) recordGuardrailResults(ctx context.Context, requestID string, 
 	}
 }
 
+// budgetExceeded checks a key's budgets. budget_usd is a lifetime cap on
+// spend_usd. monthly_cost_budget and monthly_token_budget cap the usage
+// since the start of the current UTC month. Each budget is compared only to
+// its own measure, so a monthly budget resets every month.
 func (h *Handler) budgetExceeded(ctx context.Context, apiKeyID string) (bool, string) {
 	if h.store == nil || apiKeyID == "" {
 		return false, ""
@@ -1333,11 +1337,10 @@ func (h *Handler) budgetExceeded(ctx context.Context, apiKeyID string) (bool, st
 	if err != nil {
 		return false, ""
 	}
-	costBudget := apiKey.BudgetUSD
-	if costBudget <= 0 {
-		costBudget = apiKey.MonthlyCostBudget
+	if apiKey.BudgetUSD > 0 && apiKey.SpendUSD >= apiKey.BudgetUSD {
+		return true, fmt.Sprintf("cost budget exceeded: %.4f of %.4f USD used", apiKey.SpendUSD, apiKey.BudgetUSD)
 	}
-	if costBudget <= 0 && apiKey.MonthlyTokenBudget <= 0 {
+	if apiKey.MonthlyCostBudget <= 0 && apiKey.MonthlyTokenBudget <= 0 {
 		return false, ""
 	}
 	now := time.Now().UTC()
@@ -1347,12 +1350,8 @@ func (h *Handler) budgetExceeded(ctx context.Context, apiKeyID string) (bool, st
 		log.Printf("failed to check budget: %v", err)
 		return false, ""
 	}
-	spendUSD := apiKey.SpendUSD
-	if usage.Cost > spendUSD {
-		spendUSD = usage.Cost
-	}
-	if costBudget > 0 && spendUSD >= costBudget {
-		return true, fmt.Sprintf("monthly cost budget exceeded: %.4f of %.4f used", spendUSD, costBudget)
+	if apiKey.MonthlyCostBudget > 0 && usage.Cost >= apiKey.MonthlyCostBudget {
+		return true, fmt.Sprintf("monthly cost budget exceeded: %.4f of %.4f USD used", usage.Cost, apiKey.MonthlyCostBudget)
 	}
 	if apiKey.MonthlyTokenBudget > 0 && usage.Tokens >= apiKey.MonthlyTokenBudget {
 		return true, fmt.Sprintf("monthly token budget exceeded: %d of %d used", usage.Tokens, apiKey.MonthlyTokenBudget)

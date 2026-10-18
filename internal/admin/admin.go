@@ -99,7 +99,7 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		Role:               req.Role,
 		CreatedAt:          time.Now().UTC(),
 		RateLimit:          req.RateLimit,
-		BudgetUSD:          firstPositive(req.BudgetUSD, req.MonthlyCostBudget),
+		BudgetUSD:          req.BudgetUSD,
 		MonthlyCostBudget:  req.MonthlyCostBudget,
 		MonthlyTokenBudget: req.MonthlyTokenBudget,
 		Enabled:            true,
@@ -195,13 +195,4 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"message": msg}})
-}
-
-func firstPositive(values ...float64) float64 {
-	for _, value := range values {
-		if value > 0 {
-			return value
-		}
-	}
-	return 0
 }
