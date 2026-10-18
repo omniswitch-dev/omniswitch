@@ -691,6 +691,10 @@ func (h *Handler) logRequest(ctx context.Context, logCtx logContext) {
 		Decision:  "ALLOW",
 		Cached:    logCtx.Cached,
 	}
+	// Record the caller's tenant so tenant-scoped dashboard reads can
+	// filter on it.
+	tenant := ScopeFromContext(ctx)
+	entry.WorkspaceID, entry.OrganizationID = tenant.WorkspaceID, tenant.OrganizationID
 	if cfg.logPayloads {
 		entry.RequestBody = marshalLogBody(logCtx.Request)
 	}
