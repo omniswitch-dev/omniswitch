@@ -62,3 +62,41 @@ func TestCanonicalAWSURIDoubleEncodes(t *testing.T) {
 		t.Fatal("empty path must canonicalize to /")
 	}
 }
+
+func TestConverseRequestMergesParallelToolResults(t *testing.T) {
+	b := NewBedrock("bedrock", "us-east-1", "AKID", "SECRET", "", nil)
+	out, err := b.toConverseRequest(ChatRequest{Model: "amazon.nova-pro-v1:0", Messages: []Message{
+		{Role: "system", Content: "sys"},
+		{Role: "developer", Content: "dev"},
+		{Role: "user", Content: "weather?"},
+		{Role: "assistant", ToolCalls: []ToolCall{
+			{ID: "a", Type: "function", Function: FunctionCall{Name: "w", Arguments: `{"c":"x"}`}},
+			{ID: "b", Type: "function", Function: FunctionCall{Name: "w", Arguments: `{"c":"y"}`}},
+		}},
+		{Role: "tool", ToolCallID: "a", Content: "1"},
+		{Role: "tool", ToolCallID: "b", Content: "2"},
+		{Role: "user", Content: "thanks"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.System) != 2 {
+		t.Fatalf("system blocks = %d, want 2", len(out.System))
+	}
+	roles := make([]string, len(out.Messages))
+	for i, m := range out.Messages {
+		roles[i] = m.Role
+	}
+	if len(out.Messages) != 3 || roles[0] != "user" || roles[1] != "assistant" || roles[2] != "user" {
+		t.Fatalf("roles = %v, want strictly alternating [user assistant user]", roles)
+	}
+	results := 0
+	for _, block := range out.Messages[2].Content {
+		if block.ToolResult != nil {
+			results++
+		}
+	}
+	if results != 2 || len(out.Messages[2].Content) != 3 {
+		t.Fatalf("final user turn = %+v, want 2 toolResult blocks + text", out.Messages[2].Content)
+	}
+}

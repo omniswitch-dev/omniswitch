@@ -329,7 +329,7 @@ func (b *Bedrock) toConverseRequest(req ChatRequest) (bedrockConverseRequest, er
 		out.ToolConfig.ToolChoice = mapBedrockToolChoice(req.ToolChoice)
 	}
 	for _, msg := range req.Messages {
-		if msg.Role == "system" {
+		if msg.Role == "system" || msg.Role == "developer" {
 			if text := msg.Text(); text != "" {
 				out.System = append(out.System, bedrockContentBlock{Text: text})
 			}
@@ -345,6 +345,13 @@ func (b *Bedrock) toConverseRequest(req ChatRequest) (bedrockConverseRequest, er
 		content := toBedrockContent(msg)
 		if len(content) == 0 {
 			content = []bedrockContentBlock{{Text: msg.Text()}}
+		}
+		// Converse requires strictly alternating user/assistant turns.
+		// Parallel tool results (one OpenAI "tool" message each) and any
+		// other run of same-role messages are merged into one turn.
+		if n := len(out.Messages); n > 0 && out.Messages[n-1].Role == role {
+			out.Messages[n-1].Content = append(out.Messages[n-1].Content, content...)
+			continue
 		}
 		out.Messages = append(out.Messages, bedrockMessage{Role: role, Content: content})
 	}
