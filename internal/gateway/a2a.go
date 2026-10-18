@@ -36,7 +36,7 @@ func (h *Handler) A2A(w http.ResponseWriter, r *http.Request) {
 		writeA2AError(w, nil, -32600, "Invalid Request")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, h.maxRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, h.requestBodyLimit())
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeA2AError(w, nil, -32700, "Parse error")

@@ -298,3 +298,23 @@ func TestA2ATaskStoreIsBounded(t *testing.T) {
 		t.Fatalf("expired task is still returned")
 	}
 }
+
+// TestA2AFollowsReloadedBodyLimit: /a2a read the body limit from the first
+// SetMaxRequestBytes call, so a hot-reloaded max_request_bytes did not
+// apply to it.
+func TestA2AFollowsReloadedBodyLimit(t *testing.T) {
+	h := newA2ATestHandler(t)
+	payload := `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"parts":[{"text":"` +
+		strings.Repeat("a", 2048) + `"}]},"metadata":{"model":"test-model"}}}`
+
+	h.SetMaxRequestBytes(1 << 20)
+	if rec := a2aCall(t, h, payload); strings.Contains(rec.Body.String(), `"error"`) {
+		t.Fatalf("payload under the first limit failed: %s", rec.Body.String())
+	}
+
+	h.SetMaxRequestBytes(1024)
+	rec := a2aCall(t, h, payload)
+	if !strings.Contains(rec.Body.String(), `"code":-32700`) {
+		t.Fatalf("payload over the reloaded limit = %d %s, want a parse error", rec.Code, rec.Body.String())
+	}
+}

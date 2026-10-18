@@ -80,14 +80,6 @@ type Handler struct {
 	settings   atomic.Pointer[handlerSettings]
 	settingsMu sync.Mutex
 
-	// maxRequestBytes mirrors the request body limit that was configured
-	// before the handler started serving (the first SetMaxRequestBytes call).
-	// It is never written after that, so handlers that read it without
-	// synchronisation stay race-free. Request handlers in this file use
-	// requestBodyLimit, which also follows hot reloads.
-	maxRequestBytes  int64
-	initialLimitOnce sync.Once
-
 	configRouters sync.Map
 
 	shadowSlots   chan struct{}
@@ -102,12 +94,11 @@ type cachedConfigRouter struct {
 // New creates a new gateway handler.
 func New(registry *provider.Registry, rtr *router.Router, st *store.Store, gr *guardrail.Engine) *Handler {
 	h := &Handler{
-		registry:        registry,
-		router:          rtr,
-		store:           st,
-		maxRequestBytes: 10 << 20,
-		shadowSlots:     make(chan struct{}, maxConcurrentShadowRequests),
-		shadowBreaker:   router.NewCircuitBreaker(5, 60*time.Second),
+		registry:      registry,
+		router:        rtr,
+		store:         st,
+		shadowSlots:   make(chan struct{}, maxConcurrentShadowRequests),
+		shadowBreaker: router.NewCircuitBreaker(5, 60*time.Second),
 	}
 	h.settings.Store(&handlerSettings{
 		cacheThreshold: 0.95,
@@ -210,7 +201,6 @@ func (h *Handler) SetMaxRequestBytes(limit int64) {
 	if limit <= 0 {
 		return
 	}
-	h.initialLimitOnce.Do(func() { h.maxRequestBytes = limit })
 	h.updateSettings(func(s *handlerSettings) { s.maxRequestBytes = limit })
 }
 
