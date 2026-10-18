@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/omniswitch-dev/omniswitch/internal/gateway"
 	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
@@ -44,6 +45,10 @@ func (h *Handler) CreateFeedback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "score must be -1, 0, or 1")
 		return
 	}
+	tenant := gateway.ScopeFromContext(r.Context())
+	if !h.referencesInScope(w, r, tenant, req) {
+		return
+	}
 
 	entry := store.Feedback{
 		ID:        newID("fb"),
@@ -55,6 +60,9 @@ func (h *Handler) CreateFeedback(w http.ResponseWriter, r *http.Request) {
 		Comment:   req.Comment,
 		UserID:    req.UserID,
 		Metadata:  req.Metadata,
+
+		WorkspaceID:    tenant.WorkspaceID,
+		OrganizationID: tenant.OrganizationID,
 	}
 	if err := h.store.InsertFeedback(r.Context(), entry); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -65,7 +73,8 @@ func (h *Handler) CreateFeedback(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ListFeedback(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	entries, err := h.store.ListFeedback(r.Context(), limit, r.URL.Query().Get("request_id"), r.URL.Query().Get("trace_id"))
+	entries, err := h.store.ListFeedbackInScope(r.Context(), feedbackScope(gateway.ScopeFromContext(r.Context())),
+		limit, r.URL.Query().Get("request_id"), r.URL.Query().Get("trace_id"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
