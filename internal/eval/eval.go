@@ -91,8 +91,7 @@ func (h *Handler) GetDataset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListDatasets(w http.ResponseWriter, r *http.Request) {
-	limit := parseInt(r.URL.Query().Get("limit"), 50)
-	offset := parseInt(r.URL.Query().Get("offset"), 0)
+	limit, offset := store.ClampPage(parseInt(r.URL.Query().Get("limit"), store.DefaultPageSize), parseInt(r.URL.Query().Get("offset"), 0))
 
 	datasets, total, err := h.store.ListDatasets(r.Context(), limit, offset)
 	if err != nil {
@@ -233,8 +232,7 @@ func (h *Handler) GetExperiment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListExperiments(w http.ResponseWriter, r *http.Request) {
-	limit := parseInt(r.URL.Query().Get("limit"), 50)
-	offset := parseInt(r.URL.Query().Get("offset"), 0)
+	limit, offset := store.ClampPage(parseInt(r.URL.Query().Get("limit"), store.DefaultPageSize), parseInt(r.URL.Query().Get("offset"), 0))
 	status := r.URL.Query().Get("status")
 
 	experiments, total, err := h.store.ListExperiments(r.Context(), limit, offset, status)

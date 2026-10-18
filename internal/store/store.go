@@ -729,7 +729,31 @@ func (s *Store) ListLogsForAPIKey(ctx context.Context, apiKeyID string, limit, o
 	return s.listLogs(ctx, limit, offset, provider, status, apiKeyID)
 }
 
+// Page size bounds applied by every paginated store method.
+const (
+	DefaultPageSize = 50
+	MaxPageSize     = 1000
+)
+
+// ClampPage normalises pagination input so every backend sees valid values:
+// a non-positive limit becomes DefaultPageSize, a limit above MaxPageSize is
+// capped, and a negative offset becomes 0 (PostgreSQL rejects a negative
+// OFFSET, SQLite silently treats it as 0).
+func ClampPage(limit, offset int) (int, int) {
+	if limit <= 0 {
+		limit = DefaultPageSize
+	}
+	if limit > MaxPageSize {
+		limit = MaxPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
 func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, status, apiKeyID string) ([]RequestLog, int, error) {
+	limit, offset = ClampPage(limit, offset)
 	where := "1=1"
 	args := []any{}
 	if apiKeyID != "" {
@@ -2364,6 +2388,7 @@ func (s *Store) GetDataset(ctx context.Context, id string) (*Dataset, error) {
 
 // ListDatasets lists datasets with pagination.
 func (s *Store) ListDatasets(ctx context.Context, limit, offset int) ([]*Dataset, int, error) {
+	limit, offset = ClampPage(limit, offset)
 	var total int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM datasets`).Scan(&total)
 	if err != nil {
@@ -2496,6 +2521,7 @@ func (s *Store) GetExperiment(ctx context.Context, id string) (*Experiment, erro
 
 // ListExperiments lists experiments with pagination.
 func (s *Store) ListExperiments(ctx context.Context, limit, offset int, status string) ([]*Experiment, int, error) {
+	limit, offset = ClampPage(limit, offset)
 	query := `SELECT COUNT(*) FROM experiments`
 	args := []any{}
 	if status != "" {

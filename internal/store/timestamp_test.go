@@ -95,3 +95,43 @@ func logIDs(logs []RequestLog) []string {
 	}
 	return ids
 }
+
+// TestPaginationIsClamped covers STORE-14: a negative offset failed only on
+// PostgreSQL ("OFFSET must not be negative").
+func TestPaginationIsClamped(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, st *Store) {
+		ctx := context.Background()
+		for i := 0; i < 3; i++ {
+			if err := st.InsertLog(ctx, RequestLog{ID: string(rune('a' + i)), Timestamp: time.Now().UTC()}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, tc := range []struct{ limit, offset, want int }{{10, -5, 3}, {-1, -1, 3}, {0, 0, 3}, {2, 0, 2}, {1 << 30, 1, 2}} {
+			logs, total, err := st.ListLogs(ctx, tc.limit, tc.offset, "", "")
+			if err != nil {
+				t.Fatalf("ListLogs(%d, %d) error = %v", tc.limit, tc.offset, err)
+			}
+			if total != 3 || len(logs) != tc.want {
+				t.Fatalf("ListLogs(%d, %d) = %d rows (total %d), want %d", tc.limit, tc.offset, len(logs), total, tc.want)
+			}
+			if _, _, err := st.ListLogsForAPIKey(ctx, "k", tc.limit, tc.offset, "", ""); err != nil {
+				t.Fatalf("ListLogsForAPIKey(%d, %d) error = %v", tc.limit, tc.offset, err)
+			}
+		}
+	})
+}
+
+func TestClampPage(t *testing.T) {
+	cases := []struct{ limit, offset, wantLimit, wantOffset int }{
+		{0, 0, DefaultPageSize, 0},
+		{-3, -7, DefaultPageSize, 0},
+		{25, 10, 25, 10},
+		{MaxPageSize + 1, 0, MaxPageSize, 0},
+	}
+	for _, tc := range cases {
+		l, o := ClampPage(tc.limit, tc.offset)
+		if l != tc.wantLimit || o != tc.wantOffset {
+			t.Fatalf("ClampPage(%d, %d) = %d, %d; want %d, %d", tc.limit, tc.offset, l, o, tc.wantLimit, tc.wantOffset)
+		}
+	}
+}
