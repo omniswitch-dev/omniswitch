@@ -112,6 +112,57 @@ func TestCaseVariantDuplicateMembersAreRejected(t *testing.T) {
 	}
 }
 
+// TestCaseVariantProtocolMembersCannotBypassPolicy uses an upstream that
+// decodes with encoding/json (case-insensitive member matching, like
+// mark3labs/mcp-go). A message that spells a protocol member in another case
+// must not reach it.
+func TestCaseVariantProtocolMembersCannotBypassPolicy(t *testing.T) {
+	var mu sync.Mutex
+	var executed []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var msg struct {
+			Method string `json:"method"`
+			Params struct {
+				Name      string            `json:"name"`
+				Arguments map[string]string `json:"arguments"`
+			} `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&msg)
+		mu.Lock()
+		executed = append(executed, msg.Method+" "+msg.Params.Name+" repo="+msg.Params.Arguments["repo"])
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"EXECUTED"}]}}`))
+	}))
+	t.Cleanup(server.Close)
+	h, err := NewMultiHandler(loadEngine(t, "../../policies/production-delete.yaml"), nil, []TargetConfig{
+		{Name: "github", Upstream: server.URL},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"baseline":          `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"github__delete_repo","arguments":{"repo":"prod-api"}}}`,
+		"Arguments variant": `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"github__delete_repo","Arguments":{"repo":"prod-api"}}}`,
+		"Method with error": `{"jsonrpc":"2.0","id":3,"Method":"tools/call","params":{"name":"delete_repo","arguments":{"repo":"prod-api"}},"error":{"code":0,"message":""}}`,
+		"argument key Repo": `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"github__delete_repo","arguments":{"Repo":"prod-api"}}}`,
+		"argument key REPO": `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"delete_repo","arguments":{"REPO":"prod-api"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := serve(h, body)
+			text := rec.Body.String()
+			if !strings.Contains(text, `"isError":true`) && !strings.Contains(text, `"code":-32600`) {
+				t.Fatalf("not denied or rejected: %d %s", rec.Code, text)
+			}
+		})
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(executed) != 0 {
+		t.Fatalf("upstream executed %v", executed)
+	}
+}
+
 func TestFederatedBareDestructiveNameIsDenied(t *testing.T) {
 	upstream := &recordingUpstream{}
 	server := upstream.server(t)

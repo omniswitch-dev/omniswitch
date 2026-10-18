@@ -32,6 +32,14 @@ func TestParseErrorCodes(t *testing.T) {
 		{name: "params array", body: `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":["x"]}`, wantCode: CodeInvalidParams, wantID: "11"},
 		{name: "arguments not object", body: `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"x","arguments":[1]}}`, wantCode: CodeInvalidParams, wantID: "12"},
 		{name: "name not string", body: `{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":1}}`, wantCode: CodeInvalidParams, wantID: "13"},
+		{name: "lone Arguments variant", body: `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"github__delete_repo","Arguments":{"repo":"prod-api"}}}`, wantCode: CodeInvalidRequest, wantID: "1"},
+		{name: "lone Method variant with error", body: `{"jsonrpc":"2.0","id":3,"Method":"tools/call","params":{"name":"delete_repo","arguments":{"repo":"prod-api"}},"error":{"code":0,"message":""}}`, wantCode: CodeInvalidRequest, wantID: "3"},
+		{name: "lone Params variant", body: `{"jsonrpc":"2.0","id":2,"method":"tools/call","PARAMS":{"name":"x"}}`, wantCode: CodeInvalidRequest, wantID: "2"},
+		{name: "lone JSONRPC variant", body: `{"JSONRPC":"2.0","jsonrpc":"2.0","id":2,"method":"ping"}`, wantCode: CodeInvalidRequest, wantID: "2"},
+		{name: "lone Result variant", body: `{"jsonrpc":"2.0","id":"s","Result":{}}`, wantCode: CodeInvalidRequest, wantID: `"s"`},
+		{name: "lone Name variant", body: `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"NAME":"x","name":"y"}}`, wantCode: CodeInvalidRequest, wantID: "4"},
+		{name: "lone _Meta variant", body: `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"x","_META":{}}}`, wantCode: CodeInvalidRequest, wantID: "4"},
+		{name: "lone requestid variant", body: `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestid":1}}`, wantCode: CodeInvalidRequest},
 		{name: "missing name", body: `{"jsonrpc":"2.0","id":"a","method":"tools/call","params":{}}`, wantCode: CodeInvalidParams, wantID: `"a"`},
 	}
 	for _, tt := range tests {
@@ -106,6 +114,9 @@ func TestBuildToolRequestTrustedAttributesWin(t *testing.T) {
 		{name: "http delete", tool: "petById", tc: ToolContext{HTTPMethod: "DELETE"}, wantAct: "delete", wantEnv: "unknown", wantTool: "petById"},
 		{name: "http get", tool: "listPets", tc: ToolContext{HTTPMethod: "GET"}, wantAct: "read", wantEnv: "unknown", wantTool: "listPets"},
 		{name: "operator metadata wins", tool: "github.delete_repo", args: map[string]any{"repo": "acme-staging"}, tc: ToolContext{TargetMetadata: map[string]string{"environment": "production"}}, wantAct: "delete", wantEnv: "production", wantTool: "github"},
+		{name: "case variant resource key", tool: "delete_repo", args: map[string]any{"Repo": "prod-api"}, tc: ToolContext{Target: "github"}, wantAct: "delete", wantEnv: "production", wantTool: "delete_repo"},
+		{name: "case variant env key", tool: "run", args: map[string]any{"ENV": "prod"}, wantAct: "call", wantEnv: "production", wantTool: "run"},
+		{name: "case variant action key", tool: "github.repo", args: map[string]any{"Operation": "delete"}, wantAct: "delete", wantEnv: "unknown", wantTool: "github"},
 		{name: "target name signals production", tool: "delete_repo", args: map[string]any{"repo": "acme"}, tc: ToolContext{Target: "github-prod"}, wantAct: "delete", wantEnv: "production", wantTool: "delete_repo"},
 	}
 	for _, tt := range tests {

@@ -15,7 +15,9 @@ import (
 )
 
 // Request is one MCP JSON-RPC message, parsed with exact (case-sensitive)
-// member lookup. Fields and ParamFields keep every member byte-for-byte so a
+// member lookup. Parse rejects members that differ from a protocol member
+// name only in case, so exact lookup never misses a member that a
+// case-insensitive upstream decoder would read. Fields and ParamFields keep every member byte-for-byte so a
 // forwarded request carries exactly the values the policy evaluated.
 type Request struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -131,6 +133,9 @@ func Parse(body []byte) (Request, error) {
 	if err := checkDuplicateKeys(trimmed); err != nil {
 		return Request{}, invalidRequest(req.ID, err)
 	}
+	if err := checkReservedNames(fields, topLevelMembers, ""); err != nil {
+		return Request{}, invalidRequest(req.ID, err)
+	}
 	if err := decodeString(fields, "jsonrpc", &req.JSONRPC); err != nil || req.JSONRPC != "2.0" {
 		return Request{}, invalidRequest(req.ID, errors.New(`jsonrpc must be "2.0"`))
 	}
@@ -152,6 +157,9 @@ func Parse(body []byte) (Request, error) {
 	if hasParams && len(rawParams) > 0 && rawParams[0] == '{' {
 		if err := json.Unmarshal(rawParams, &req.ParamFields); err != nil {
 			return Request{}, invalidParams(req.ID, err)
+		}
+		if err := checkReservedNames(req.ParamFields, paramMembers, "params."); err != nil {
+			return Request{}, invalidRequest(req.ID, err)
 		}
 	}
 	if req.Method == "tools/call" {
@@ -198,6 +206,34 @@ func decodeString(fields map[string]json.RawMessage, key string, out *string) er
 	return json.Unmarshal(raw, out)
 }
 
+// topLevelMembers and paramMembers are the protocol member names the gateway
+// reads by exact name. A member that differs from one of them only in case
+// is rejected: the gateway would not see it, but upstream decoders that match
+// names case-insensitively (Go encoding/json, for example) would, so the
+// policy and the upstream server would act on different data.
+var (
+	topLevelMembers = []string{"jsonrpc", "id", "method", "params", "result", "error"}
+	paramMembers    = []string{"name", "arguments", "_meta", "requestId", "cursor", "uri"}
+)
+
+func checkReservedNames(fields map[string]json.RawMessage, reserved []string, prefix string) error {
+	for key := range fields {
+		folded := foldName(key)
+		for _, name := range reserved {
+			if key != name && folded == foldName(name) {
+				return fmt.Errorf("member %q must be spelled %q", prefix+key, prefix+name)
+			}
+		}
+	}
+	return nil
+}
+
+// foldName returns the case-folded form of a member name. It matches the
+// folding used by checkDuplicateKeys.
+func foldName(name string) string {
+	return strings.ToLower(strings.ToUpper(name))
+}
+
 // checkDuplicateKeys walks the whole document and fails when an object has
 // two member names that are equal under Unicode case folding.
 func checkDuplicateKeys(body []byte) error {
@@ -224,7 +260,7 @@ func walkJSON(decoder *json.Decoder) error {
 				return err
 			}
 			key, _ := keyToken.(string)
-			folded := strings.ToLower(strings.ToUpper(key))
+			folded := foldName(key)
 			if previous, exists := seen[folded]; exists {
 				return fmt.Errorf("duplicate member names %q and %q", previous, key)
 			}
@@ -498,9 +534,26 @@ func inferEnvironment(resourceName string) string {
 	}
 }
 
+// lookupFolded returns the argument whose name equals key under case
+// folding. Parse rejects arguments with two names that fold to the same
+// value, so the match is unambiguous; matching like a case-insensitive
+// upstream decoder keeps the policy from missing a value the upstream uses.
+func lookupFolded(values map[string]any, key string) (any, bool) {
+	if value, ok := values[key]; ok {
+		return value, true
+	}
+	folded := foldName(key)
+	for name, value := range values {
+		if foldName(name) == folded {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
 func firstString(values map[string]any, keys ...string) string {
 	for _, key := range keys {
-		if value, ok := values[key]; ok {
+		if value, ok := lookupFolded(values, key); ok {
 			if text, ok := stringify(value); ok {
 				return text
 			}
@@ -526,7 +579,7 @@ func stringify(value any) (string, bool) {
 
 func hasAny(values map[string]any, keys ...string) bool {
 	for _, key := range keys {
-		if _, ok := values[key]; ok {
+		if _, ok := lookupFolded(values, key); ok {
 			return true
 		}
 	}
