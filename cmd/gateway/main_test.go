@@ -409,6 +409,7 @@ func clearGatewayEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"OMNISWITCH_CONFIG",
+		"OMNISWITCH_LOG_RETENTION_DAYS",
 		"OMNISWITCH_LISTEN",
 		"OMNISWITCH_METRICS_PUBLIC",
 		"OMNISWITCH_POLICY_DIR",

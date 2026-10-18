@@ -97,6 +97,13 @@ func runServe() {
 		}
 	}
 	defer st.Close()
+	// Runs until main returns; the deferred stop runs before st.Close.
+	maintenanceCtx, stopMaintenance := context.WithCancel(context.Background())
+	maintenanceDone := startMaintenance(maintenanceCtx, st, settings.logRetentionDays, maintenanceInterval)
+	defer func() {
+		stopMaintenance()
+		<-maintenanceDone
+	}()
 	if err := ensureBootstrapKey(context.Background(), st, settings); err != nil {
 		log.Fatalf("failed to initialize authentication: %v", err)
 	}

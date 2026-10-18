@@ -81,6 +81,9 @@ type runtimeSettings struct {
 	bootstrapRole         string
 	shutdownTimeout       time.Duration
 	allowNoProviders      bool
+	// logRetentionDays deletes request logs, guardrail events and shadow
+	// requests older than this many days. Zero keeps them forever.
+	logRetentionDays int
 }
 
 // defaultInsecureListenAddr is the listen address used when authentication is
@@ -242,6 +245,7 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 	settings.prometheusEnabled = e.bool("OMNISWITCH_PROMETHEUS_ENABLED", settings.prometheusEnabled)
 	settings.shutdownTimeout = e.duration("OMNISWITCH_SHUTDOWN_TIMEOUT", settings.shutdownTimeout)
 	settings.allowNoProviders = e.bool("OMNISWITCH_ALLOW_NO_PROVIDERS", settings.allowNoProviders)
+	settings.logRetentionDays = e.nonNegativeInt("OMNISWITCH_LOG_RETENTION_DAYS", settings.logRetentionDays)
 	settings.vaultKey = env("OMNISWITCH_VAULT_KEY", settings.vaultKey)
 	// Bootstrap credentials must not live in config-as-code, so they are only
 	// accepted through the process environment or a secret manager injection.
@@ -694,6 +698,21 @@ func (e *envReader) int(key string, fallback int) int {
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed <= 0 {
 		e.fail(key, value, "a positive integer")
+		return fallback
+	}
+	return parsed
+}
+
+// nonNegativeInt is like int but also accepts 0, for settings where 0
+// turns a feature off.
+func (e *envReader) nonNegativeInt(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		e.fail(key, value, "a non-negative integer")
 		return fallback
 	}
 	return parsed

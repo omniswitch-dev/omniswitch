@@ -566,6 +566,7 @@ is treated as unset.
 - `OMNISWITCH_MCP_UPSTREAM`
 - `OMNISWITCH_SHUTDOWN_TIMEOUT` - defaults to `30s`. On SIGINT/SIGTERM, `omniswitch serve` stops accepting new connections, waits up to this long for in-flight requests (including SSE streams) to finish, then exits `0`.
 - `OMNISWITCH_ALLOW_NO_PROVIDERS` - defaults to `false`. When `false`, `GET /readyz` reports not-ready if no provider is registered; set to `true` for local smoke-testing without any provider configured.
+- `OMNISWITCH_LOG_RETENTION_DAYS` - defaults to `0` (keep forever). When positive, the gateway deletes request logs, guardrail events and shadow requests older than this many days, once at startup and then every hour. Records from the current UTC month are always kept, because monthly key budgets are computed from them. Lifetime key spend is stored on the key and is not affected. Expired semantic-cache entries are deleted on the same hourly schedule whatever this value is.
 - `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`
 - `GOOGLE_API_KEY`
