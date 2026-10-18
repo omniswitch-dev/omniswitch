@@ -18,7 +18,8 @@ func (h *Handler) Rerank(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, h.maxRequestBytes)
+	r, cfg := h.withSettings(r)
+	r.Body = http.MaxBytesReader(w, r.Body, cfg.maxRequestBytes)
 	var request provider.RerankRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -53,7 +54,13 @@ func (h *Handler) Rerank(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	response, meta, err := h.router.Rerank(r.Context(), request, r.Header.Get("x-omniswitch-provider"))
+	activeRouter, _, err := h.requestRouter(r.Context(), r)
+	if err != nil {
+		w.Header().Set("x-omniswitch-trace-id", traceID)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	response, meta, err := activeRouter.Rerank(r.Context(), request, r.Header.Get("x-omniswitch-provider"))
 	if err != nil {
 		h.logRequest(r.Context(), logContext{ID: requestID, TraceID: traceID, SessionID: sessionID, Request: logRequest, Meta: &meta, APIKeyID: keyID, Status: "error", ErrorMessage: err.Error()})
 		w.Header().Set("x-omniswitch-trace-id", traceID)

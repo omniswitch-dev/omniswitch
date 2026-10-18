@@ -3,16 +3,19 @@ package gateway
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -27,12 +30,35 @@ import (
 	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
-// Handler serves the OpenAI-compatible /v1/chat/completions API.
-type Handler struct {
-	registry              *provider.Registry
-	router                *router.Router
-	store                 *store.Store
-	guardrails            atomic.Pointer[guardrail.Engine]
+const (
+	// persistTimeout bounds store writes made after (or independently of) the
+	// client request. They run on a context detached from the request so that
+	// a client disconnect cannot drop the request log or the spend update.
+	persistTimeout = 5 * time.Second
+
+	// maxConcurrentShadowRequests bounds in-flight shadow traffic. Shadow
+	// requests beyond the bound are dropped rather than queued.
+	maxConcurrentShadowRequests = 16
+
+	// cachedStreamChunkRunes is the size of each content delta when a cached
+	// or redacted response is replayed as a stream.
+	cachedStreamChunkRunes = 16
+
+	redactedContent = "[REDACTED BY OMNISWITCH]"
+
+	statusSuccess  = "success"
+	statusRedacted = "redacted"
+	statusDenied   = "denied"
+	statusError    = "error"
+
+	settingsContextKey contextKey = "gateway_settings"
+)
+
+// handlerSettings is the hot-reloadable part of the handler configuration.
+// A published value is never mutated: setters copy it, change the copy and
+// swap the pointer, and each request loads it once so it never sees a mix
+// of old and new values.
+type handlerSettings struct {
 	cacheThreshold        float64
 	cacheTTL              time.Duration
 	cacheScope            string
@@ -40,9 +66,32 @@ type Handler struct {
 	streamGuardrailBuffer bool
 	maxRequestBytes       int64
 	shadowProvider        string
-	configRouters         sync.Map
 	alerts                *AlertManager
 	logBroadcaster        func(store.RequestLog)
+}
+
+// Handler serves the OpenAI-compatible /v1/chat/completions API.
+type Handler struct {
+	registry   *provider.Registry
+	router     *router.Router
+	store      *store.Store
+	guardrails atomic.Pointer[guardrail.Engine]
+
+	settings   atomic.Pointer[handlerSettings]
+	settingsMu sync.Mutex
+
+	// maxRequestBytes mirrors the request body limit that was configured
+	// before the handler started serving (the first SetMaxRequestBytes call).
+	// It is never written after that, so handlers that read it without
+	// synchronisation stay race-free. Request handlers in this file use
+	// requestBodyLimit, which also follows hot reloads.
+	maxRequestBytes  int64
+	initialLimitOnce sync.Once
+
+	configRouters sync.Map
+
+	shadowSlots   chan struct{}
+	shadowBreaker *router.CircuitBreaker
 }
 
 type cachedConfigRouter struct {
@@ -53,9 +102,14 @@ type cachedConfigRouter struct {
 // New creates a new gateway handler.
 func New(registry *provider.Registry, rtr *router.Router, st *store.Store, gr *guardrail.Engine) *Handler {
 	h := &Handler{
-		registry:       registry,
-		router:         rtr,
-		store:          st,
+		registry:        registry,
+		router:          rtr,
+		store:           st,
+		maxRequestBytes: 10 << 20,
+		shadowSlots:     make(chan struct{}, maxConcurrentShadowRequests),
+		shadowBreaker:   router.NewCircuitBreaker(5, 60*time.Second),
+	}
+	h.settings.Store(&handlerSettings{
 		cacheThreshold: 0.95,
 		cacheTTL:       24 * time.Hour,
 		cacheScope:     "api_key",
@@ -64,11 +118,46 @@ func New(registry *provider.Registry, rtr *router.Router, st *store.Store, gr *g
 		logPayloads:           true,
 		streamGuardrailBuffer: true,
 		maxRequestBytes:       10 << 20,
-	}
+	})
 	if gr != nil {
 		h.guardrails.Store(gr)
 	}
 	return h
+}
+
+// updateSettings publishes a modified copy of the current settings.
+func (h *Handler) updateSettings(change func(*handlerSettings)) {
+	h.settingsMu.Lock()
+	defer h.settingsMu.Unlock()
+	next := *h.settings.Load()
+	change(&next)
+	h.settings.Store(&next)
+}
+
+// loadSettings returns the settings snapshot for the request in ctx, or the
+// current settings when the request has not loaded a snapshot yet.
+func (h *Handler) loadSettings(ctx context.Context) *handlerSettings {
+	if ctx != nil {
+		if cfg, ok := ctx.Value(settingsContextKey).(*handlerSettings); ok && cfg != nil {
+			return cfg
+		}
+	}
+	return h.settings.Load()
+}
+
+// withSettings pins one settings snapshot to a request so every stage of the
+// request (including nested compat calls) uses the same values.
+func (h *Handler) withSettings(r *http.Request) (*http.Request, *handlerSettings) {
+	if cfg, ok := r.Context().Value(settingsContextKey).(*handlerSettings); ok && cfg != nil {
+		return r, cfg
+	}
+	cfg := h.settings.Load()
+	return r.WithContext(context.WithValue(r.Context(), settingsContextKey, cfg)), cfg
+}
+
+// requestBodyLimit returns the current maximum request body size.
+func (h *Handler) requestBodyLimit() int64 {
+	return h.settings.Load().maxRequestBytes
 }
 
 // SetGuardrails atomically swaps the guardrail engine; in-flight requests keep
@@ -82,57 +171,85 @@ func (h *Handler) SetGuardrails(engine *guardrail.Engine) {
 }
 
 func (h *Handler) SetSemanticCache(threshold float64) {
-	h.cacheThreshold = threshold
+	h.updateSettings(func(s *handlerSettings) { s.cacheThreshold = threshold })
 }
 
 func (h *Handler) SetCacheTTL(ttl time.Duration) {
-	h.cacheTTL = ttl
+	h.updateSettings(func(s *handlerSettings) { s.cacheTTL = ttl })
 }
 
 func (h *Handler) SetCacheScope(scope string) {
-	switch strings.TrimSpace(scope) {
-	case "workspace", "organization", "global", "api_key":
-		h.cacheScope = scope
-	default:
-		h.cacheScope = "api_key"
-	}
+	h.updateSettings(func(s *handlerSettings) {
+		switch strings.TrimSpace(scope) {
+		case "workspace", "organization", "global", "api_key":
+			s.cacheScope = strings.TrimSpace(scope)
+		default:
+			s.cacheScope = "api_key"
+		}
+	})
 }
 
 func (h *Handler) SetLogPayloads(enabled bool) {
-	h.logPayloads = enabled
+	h.updateSettings(func(s *handlerSettings) { s.logPayloads = enabled })
 }
 
 // SetStreamGuardrailBuffer prevents output from being emitted before output
 // guardrails have inspected it. Disabling it trades protection for lower
 // first-token latency and is therefore only appropriate for trusted traffic.
 func (h *Handler) SetStreamGuardrailBuffer(enabled bool) {
-	h.streamGuardrailBuffer = enabled
+	h.updateSettings(func(s *handlerSettings) { s.streamGuardrailBuffer = enabled })
 }
 
 func (h *Handler) SetMaxRequestBytes(limit int64) {
-	if limit > 0 {
-		h.maxRequestBytes = limit
+	if limit <= 0 {
+		return
 	}
+	h.initialLimitOnce.Do(func() { h.maxRequestBytes = limit })
+	h.updateSettings(func(s *handlerSettings) { s.maxRequestBytes = limit })
 }
 
 func (h *Handler) SetShadowProvider(providerName string) {
-	h.shadowProvider = providerName
+	h.updateSettings(func(s *handlerSettings) { s.shadowProvider = providerName })
 }
 
 func (h *Handler) SetAlerts(config AlertConfig) {
-	if len(config.Thresholds) == 0 && config.WebhookURL == "" && config.SlackURL == "" {
-		h.alerts = nil
-		return
+	var manager *AlertManager
+	if len(config.Thresholds) != 0 || config.WebhookURL != "" || config.SlackURL != "" {
+		manager = NewAlertManager(config)
 	}
-	h.alerts = NewAlertManager(config)
+	h.updateSettings(func(s *handlerSettings) { s.alerts = manager })
 }
 
 func (h *Handler) SetLogBroadcaster(broadcast func(store.RequestLog)) {
-	h.logBroadcaster = broadcast
+	h.updateSettings(func(s *handlerSettings) { s.logBroadcaster = broadcast })
+}
+
+// requestRouter returns the router for the request: the base router, or the
+// per-request dynamic config named by the x-omniswitch-config header.
+func (h *Handler) requestRouter(ctx context.Context, r *http.Request) (*router.Router, string, error) {
+	configRef := strings.TrimSpace(r.Header.Get("x-omniswitch-config"))
+	if configRef == "" {
+		return h.router, "", nil
+	}
+	configRouter, err := h.routerForConfig(ctx, configRef)
+	if err != nil {
+		return nil, configRef, err
+	}
+	return configRouter, configRef, nil
+}
+
+// persistContext detaches store writes from request cancellation while
+// keeping request-scoped values, and bounds them with a short timeout.
+func persistContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
 }
 
 // ChatCompletions handles POST /v1/chat/completions.
 func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
+	r, cfg := h.withSettings(r)
 	ctx, span := otel.Tracer("sentinel/gateway").Start(
 		r.Context(),
 		"POST /v1/chat/completions",
@@ -151,7 +268,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, h.maxRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, cfg.maxRequestBytes)
 	var req provider.ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
@@ -159,17 +276,14 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-	activeRouter := h.router
-	configRef := strings.TrimSpace(r.Header.Get("x-omniswitch-config"))
+	activeRouter, configRef, err := h.requestRouter(ctx, r)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "invalid dynamic config")
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if configRef != "" {
-		configRouter, err := h.routerForConfig(ctx, configRef)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "invalid dynamic config")
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		activeRouter = configRouter
 		span.SetAttributes(attribute.String("sentinel.config", configRef))
 	}
 	transformed, err := activeRouter.TransformRequest(req)
@@ -186,9 +300,9 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.Header.Get("x-omniswitch-session-id")
 	userID := r.Header.Get("x-omniswitch-user-id")
 	providerHint := r.Header.Get("x-omniswitch-provider")
-	shadowHint := firstNonEmpty(r.Header.Get("x-omniswitch-shadow-provider"), activeRouter.ShadowProviderForModel(req.Model), h.shadowProvider)
+	shadowHint := firstNonEmpty(r.Header.Get("x-omniswitch-shadow-provider"), activeRouter.ShadowProviderForModel(req.Model), cfg.shadowProvider)
 	apiKeyID := r.Header.Get("x-omniswitch-key-id")
-	tenantCacheScope := h.tenantCacheScope(r)
+	tenantCacheScope := h.tenantCacheScope(r, cfg)
 	traceRecorder := newTraceRecorder()
 	ctx = WithRequestID(r.Context(), reqID)
 	ctx = WithTraceID(ctx, traceID)
@@ -215,7 +329,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		)
 		h.logRequest(ctx, logContext{
 			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, APIKeyID: apiKeyID,
-			Status: "denied", ErrorMessage: reason,
+			Status: statusDenied, ErrorMessage: reason,
 		})
 		w.Header().Set("x-omniswitch-trace-id", traceID)
 		w.Header().Set("x-omniswitch-session-id", sessionID)
@@ -227,37 +341,44 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	recordTraceSpan(ctx, "budget", "", "ok", stageStart, nil)
 
 	// Input guardrails.
+	var inputRedaction string
 	if gr := h.guardrails.Load(); gr != nil {
 		stageStart = time.Now()
 		results := gr.EvaluateInputContext(ctx, req.Messages)
 		h.recordGuardrailResults(ctx, reqID, results)
 		var rerouteProvider string
 		var fallbackTarget string
-		for _, gr := range results {
-			if gr.Action == "deny" {
-				recordTraceSpan(ctx, "guardrail_input", "", "denied", stageStart, map[string]any{"type": gr.Type, "message": gr.Message})
+		for _, result := range results {
+			if result.Action == "deny" {
+				recordTraceSpan(ctx, "guardrail_input", "", "denied", stageStart, map[string]any{"type": result.Type, "message": result.Message})
 				span.SetAttributes(
 					attribute.String("sentinel.decision", "DENY"),
-					attribute.String("sentinel.guardrail.type", gr.Type),
-					attribute.String("sentinel.decision_reason", gr.Message),
+					attribute.String("sentinel.guardrail.type", result.Type),
+					attribute.String("sentinel.decision_reason", result.Message),
 				)
 				h.logRequest(ctx, logContext{
 					ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, APIKeyID: apiKeyID,
-					Status: "denied", ErrorMessage: gr.Message,
+					Status: statusDenied, ErrorMessage: result.Message,
 				})
 				w.Header().Set("x-omniswitch-trace-id", traceID)
 				w.Header().Set("x-omniswitch-session-id", sessionID)
 				writeJSON(w, http.StatusForbidden, map[string]any{
-					"error": map[string]string{"message": gr.Message, "type": gr.Type, "code": "guardrail_triggered"},
+					"error": map[string]string{"message": result.Message, "type": result.Type, "code": "guardrail_triggered"},
 				})
 				return
 			}
-			if gr.Action == "reroute" && rerouteProvider == "" && gr.RerouteProvider != "" {
-				rerouteProvider = gr.RerouteProvider
+			if result.Action == "reroute" && rerouteProvider == "" && result.RerouteProvider != "" {
+				rerouteProvider = result.RerouteProvider
 			}
-			if gr.Action == "fallback" && fallbackTarget == "" && gr.Fallback != "" {
-				fallbackTarget = gr.Fallback
+			if result.Action == "fallback" && fallbackTarget == "" && result.Fallback != "" {
+				fallbackTarget = result.Fallback
 			}
+		}
+		if redacted, types := redactInputMessages(ctx, gr, req.Messages, results); len(types) > 0 {
+			req.Messages = redacted
+			inputRedaction = "input redacted by guardrail: " + strings.Join(types, ", ")
+			recordTraceSpan(ctx, "guardrail_redact", "", "redacted", stageStart, map[string]any{"types": types})
+			span.SetAttributes(attribute.String("sentinel.guardrail.redacted", strings.Join(types, ",")))
 		}
 		if rerouteProvider != "" {
 			providerHint = rerouteProvider
@@ -282,25 +403,38 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	backendReq := req
 	backendReq.Stream = false
+	// The cache entry describes the completion, not the transport, so the
+	// stream options never take part in the cache key.
+	cacheReq := backendReq
+	cacheReq.StreamOptions = nil
 	cacheProvider := firstNonEmpty(providerHint, "auto")
 	if configRef != "" {
 		cacheProvider = "config:" + configRef + "|" + cacheProvider
 	}
+	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 	stageStart = time.Now()
-	cachedResp, cacheHit := h.cachedResponse(ctx, tenantCacheScope, cacheProvider, backendReq)
+	cachedResp, cacheHit := h.cachedResponse(ctx, cfg, tenantCacheScope, cacheProvider, cacheReq)
 	recordTraceSpan(ctx, "cache_lookup", cacheProvider, map[bool]string{true: "hit", false: "miss"}[cacheHit], stageStart, nil)
+	var cacheDisp guardrailDisposition
 	if cacheHit {
-		disp := h.outputGuardrailDisposition(ctx, reqID, &cachedResp)
+		cacheDisp = h.outputGuardrailDisposition(ctx, reqID, &cachedResp)
+		if cacheDisp.violation() && !cacheDisp.Denied {
+			// The cached answer violates a retry/reroute guardrail (the
+			// guardrails changed after it was stored): ask the provider again.
+			cacheHit = false
+		}
+	}
+	if cacheHit {
+		disp := cacheDisp
 		if disp.Denied {
+			reason := disp.denyReason()
 			h.logRequest(ctx, logContext{
 				ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &cachedResp,
-				APIKeyID: apiKeyID, Status: "denied", ErrorMessage: disp.Reason, Cached: true,
+				APIKeyID: apiKeyID, Status: statusDenied, ErrorMessage: reason, Cached: true,
 			})
 			w.Header().Set("x-omniswitch-trace-id", traceID)
 			w.Header().Set("x-omniswitch-session-id", sessionID)
-			writeJSON(w, http.StatusForbidden, map[string]any{
-				"error": map[string]string{"message": disp.Reason, "type": "guardrail", "code": "guardrail_triggered"},
-			})
+			writeGuardrailDenied(w, reason)
 			return
 		}
 		meta := provider.ProviderMeta{Provider: "semantic-cache", Model: req.Model, Cached: true, Timestamp: time.Now().UTC()}
@@ -309,15 +443,16 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			attribute.Bool("sentinel.cache_hit", true),
 			attribute.String("llm.response.provider", meta.Provider),
 		)
+		status, reason := allowStatus(inputRedaction, disp)
 		h.logRequest(ctx, logContext{
 			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &cachedResp, Meta: &meta,
-			APIKeyID: apiKeyID, Status: "success", Cached: true,
+			APIKeyID: apiKeyID, Status: status, DecisionReason: reason, Cached: true,
 		})
 		w.Header().Set("x-omniswitch-trace-id", traceID)
 		w.Header().Set("x-omniswitch-session-id", sessionID)
 		w.Header().Set("x-omniswitch-cache", "HIT")
 		if req.Stream {
-			writeStream(w, cachedResp)
+			writeStream(w, cachedResp, includeUsage)
 			return
 		}
 		writeJSON(w, http.StatusOK, cachedResp)
@@ -326,14 +461,17 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	if req.Stream {
 		h.streamProviderResponse(w, ctx, streamContext{
-			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, BackendRequest: backendReq,
+			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, BackendRequest: backendReq, CacheRequest: cacheReq,
 			Router: activeRouter, ProviderHint: providerHint, ShadowHint: shadowHint, APIKeyID: apiKeyID, CacheProvider: cacheProvider, CacheScope: tenantCacheScope,
+			InputRedaction: inputRedaction, IncludeUsage: includeUsage,
 		})
 		return
 	}
 
 	var resp provider.ChatResponse
 	var meta provider.ProviderMeta
+	var totals attemptTotals
+	var disp guardrailDisposition
 
 	maxAttempts := 1
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -344,9 +482,12 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "provider error")
 			span.SetAttributes(attribute.String("llm.response.provider", meta.Provider))
+			totals.add(meta.Cost, provider.Usage{})
+			logMeta := totals.meta(meta)
+			usage := totals.usage
 			h.logRequest(ctx, logContext{
-				ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Meta: &meta,
-				APIKeyID: apiKeyID, Status: "error", ErrorMessage: err.Error(),
+				ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Meta: &logMeta, Usage: &usage,
+				APIKeyID: apiKeyID, Status: statusError, ErrorMessage: err.Error(),
 			})
 			w.Header().Set("x-omniswitch-trace-id", traceID)
 			w.Header().Set("x-omniswitch-session-id", sessionID)
@@ -358,59 +499,49 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		recordTraceSpan(ctx, "provider_call", meta.Provider, "ok", stageStart, nil)
+		totals.add(meta.Cost, resp.Usage)
 
 		// Output guardrails inspect every completion choice.
-		disp := h.outputGuardrailDisposition(ctx, reqID, &resp)
+		disp = h.outputGuardrailDisposition(ctx, reqID, &resp)
 		if disp.Denied {
-			span.SetAttributes(
-				attribute.String("sentinel.decision", "DENY"),
-				attribute.String("sentinel.decision_reason", disp.Reason),
-				attribute.String("llm.response.provider", meta.Provider),
-			)
-			h.logRequest(ctx, logContext{
-				ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &resp, Meta: &meta,
-				APIKeyID: apiKeyID, Status: "denied", ErrorMessage: disp.Reason,
-			})
-			w.Header().Set("x-omniswitch-trace-id", traceID)
-			w.Header().Set("x-omniswitch-session-id", sessionID)
-			writeJSON(w, http.StatusForbidden, map[string]any{
-				"error": map[string]string{"message": disp.Reason, "type": "guardrail", "code": "guardrail_triggered"},
-			})
-			return
+			break
 		}
-
-		if disp.Retry || disp.RerouteProvider != "" || disp.Fallback != "" {
-			if disp.MaxRetries > 0 && maxAttempts == 1 {
-				maxAttempts = 1 + disp.MaxRetries
-			} else if maxAttempts == 1 {
-				maxAttempts = 2 // default 1 retry
-			}
-
+		if disp.violation() {
+			maxAttempts = retryAttempts(maxAttempts, disp)
 			if attempt+1 < maxAttempts {
-				if disp.RerouteProvider != "" {
-					providerHint = disp.RerouteProvider
-				}
-				if disp.Fallback != "" {
-					if pn, mod := parseFallbackTarget(disp.Fallback); pn != "" || mod != "" {
-						if pn != "" {
-							providerHint = pn
-						}
-						if mod != "" {
-							backendReq.Model = mod
-						}
-					}
-				}
+				providerHint, backendReq.Model = applyRetryTarget(disp, providerHint, backendReq.Model)
 				continue
 			}
 		}
-
 		break
 	}
 
-	h.storeCache(ctx, tenantCacheScope, cacheProvider, backendReq, resp)
+	logMeta := totals.meta(meta)
+	usage := totals.usage
+	if disp.Denied || disp.violation() {
+		// Either a deny rule matched, or every retry/reroute attempt still
+		// violated the output guardrails. Never return a violating response.
+		reason := disp.denyReason()
+		span.SetAttributes(
+			attribute.String("sentinel.decision", "DENY"),
+			attribute.String("sentinel.decision_reason", reason),
+			attribute.String("llm.response.provider", meta.Provider),
+		)
+		h.logRequest(ctx, logContext{
+			ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &resp, Meta: &logMeta, Usage: &usage,
+			APIKeyID: apiKeyID, Status: statusDenied, ErrorMessage: reason,
+		})
+		w.Header().Set("x-omniswitch-trace-id", traceID)
+		w.Header().Set("x-omniswitch-session-id", sessionID)
+		writeGuardrailDenied(w, reason)
+		return
+	}
+
+	h.storeCache(ctx, cfg, tenantCacheScope, cacheProvider, cacheReq, resp)
+	status, reason := allowStatus(inputRedaction, disp)
 	h.logRequest(ctx, logContext{
-		ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &resp, Meta: &meta,
-		APIKeyID: apiKeyID, Status: "success", Cached: meta.Cached,
+		ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Response: &resp, Meta: &logMeta, Usage: &usage,
+		APIKeyID: apiKeyID, Status: status, DecisionReason: reason, Cached: meta.Cached,
 	})
 	span.SetStatus(codes.Ok, "")
 	span.SetAttributes(
@@ -418,20 +549,16 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		attribute.Bool("sentinel.cache_hit", meta.Cached),
 		attribute.String("llm.response.provider", meta.Provider),
 		attribute.String("llm.response.model", meta.Model),
-		attribute.Int("llm.usage.prompt_tokens", resp.Usage.PromptTokens),
-		attribute.Int("llm.usage.completion_tokens", resp.Usage.CompletionTokens),
-		attribute.Int("llm.usage.total_tokens", resp.Usage.TotalTokens),
-		attribute.Float64("llm.usage.cost_usd", meta.Cost),
+		attribute.Int("llm.usage.prompt_tokens", usage.PromptTokens),
+		attribute.Int("llm.usage.completion_tokens", usage.CompletionTokens),
+		attribute.Int("llm.usage.total_tokens", usage.TotalTokens),
+		attribute.Float64("llm.usage.cost_usd", logMeta.Cost),
 	)
-	h.shadow(ctx, activeRouter, reqID, traceID, meta.Provider, backendReq, shadowHint)
+	h.shadow(activeRouter, reqID, traceID, meta.Provider, backendReq, shadowHint)
 
 	w.Header().Set("x-omniswitch-trace-id", traceID)
 	w.Header().Set("x-omniswitch-session-id", sessionID)
 	w.Header().Set("x-omniswitch-cache", "MISS")
-	if req.Stream {
-		writeStream(w, resp)
-		return
-	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -441,12 +568,87 @@ type streamContext struct {
 	SessionID      string
 	Request        provider.ChatRequest
 	BackendRequest provider.ChatRequest
+	CacheRequest   provider.ChatRequest
 	Router         *router.Router
 	ProviderHint   string
 	ShadowHint     string
 	APIKeyID       string
 	CacheProvider  string
 	CacheScope     string
+	InputRedaction string
+	IncludeUsage   bool
+}
+
+// attemptTotals sums upstream cost and token usage across every provider
+// attempt of one request (guardrail retries and reroutes included), so the
+// request log and the API-key spend reflect everything that was billed.
+type attemptTotals struct {
+	cost  float64
+	usage provider.Usage
+}
+
+func (t *attemptTotals) add(cost float64, usage provider.Usage) {
+	t.cost += cost
+	t.usage.PromptTokens += usage.PromptTokens
+	t.usage.CompletionTokens += usage.CompletionTokens
+	t.usage.TotalTokens += usage.TotalTokens
+}
+
+// meta returns the last attempt's metadata with the summed cost.
+func (t *attemptTotals) meta(last provider.ProviderMeta) provider.ProviderMeta {
+	last.Cost = t.cost
+	return last
+}
+
+// retryAttempts returns the attempt budget for a retry/reroute/fallback
+// disposition: 1 + max_retries, or one retry by default.
+func retryAttempts(current int, disp guardrailDisposition) int {
+	if current != 1 {
+		return current
+	}
+	if disp.MaxRetries > 0 {
+		return 1 + disp.MaxRetries
+	}
+	return 2
+}
+
+// applyRetryTarget returns the provider hint and model for the next attempt.
+func applyRetryTarget(disp guardrailDisposition, providerHint, model string) (string, string) {
+	if disp.RerouteProvider != "" {
+		providerHint = disp.RerouteProvider
+	}
+	if disp.Fallback != "" {
+		pn, mod := parseFallbackTarget(disp.Fallback)
+		if pn != "" {
+			providerHint = pn
+		}
+		if mod != "" {
+			model = mod
+		}
+	}
+	return providerHint, model
+}
+
+// allowStatus returns the log status for an allowed response: "redacted"
+// when the input or the output was redacted, otherwise "success".
+func allowStatus(inputRedaction string, disp guardrailDisposition) (string, string) {
+	reasons := make([]string, 0, 2)
+	if inputRedaction != "" {
+		reasons = append(reasons, inputRedaction)
+	}
+	if disp.Redacted {
+		reasons = append(reasons, "output redacted by guardrail")
+	}
+	if len(reasons) == 0 {
+		return statusSuccess, ""
+	}
+	return statusRedacted, strings.Join(reasons, "; ")
+}
+
+func writeGuardrailDenied(w http.ResponseWriter, reason string) {
+	writeJSON(w, http.StatusForbidden, map[string]any{
+		"error": map[string]string{"message": reason, "type": "guardrail", "code": "guardrail_triggered"},
+	})
 }
 
 // ListModels handles GET /v1/models.
@@ -466,22 +668,27 @@ func parseFallbackTarget(target string) (providerName, modelID string) {
 }
 
 type logContext struct {
-	ID           string
-	TraceID      string
-	SessionID    string
-	Request      provider.ChatRequest
-	Response     *provider.ChatResponse
-	Meta         *provider.ProviderMeta
-	APIKeyID     string
-	Status       string
-	ErrorMessage string
-	Cached       bool
+	ID        string
+	TraceID   string
+	SessionID string
+	Request   provider.ChatRequest
+	Response  *provider.ChatResponse
+	Meta      *provider.ProviderMeta
+	// Usage overrides Response.Usage for the logged token counts (for
+	// example the sum over several attempts).
+	Usage          *provider.Usage
+	APIKeyID       string
+	Status         string
+	ErrorMessage   string
+	DecisionReason string
+	Cached         bool
 }
 
 func (h *Handler) logRequest(ctx context.Context, logCtx logContext) {
 	if h.store == nil {
 		return
 	}
+	cfg := h.loadSettings(ctx)
 
 	entry := store.RequestLog{
 		ID:        logCtx.ID,
@@ -494,16 +701,18 @@ func (h *Handler) logRequest(ctx context.Context, logCtx logContext) {
 		Decision:  "ALLOW",
 		Cached:    logCtx.Cached,
 	}
-	if h.logPayloads {
+	if cfg.logPayloads {
 		entry.RequestBody = marshalLogBody(logCtx.Request)
 	}
-
-	if logCtx.Status == "denied" {
+	switch logCtx.Status {
+	case statusDenied:
 		entry.Decision = "DENY"
 		entry.DecisionReason = logCtx.ErrorMessage
-	}
-	if logCtx.Status == "error" {
+	case statusError:
 		entry.ErrorMessage = logCtx.ErrorMessage
+	}
+	if entry.DecisionReason == "" {
+		entry.DecisionReason = logCtx.DecisionReason
 	}
 
 	if logCtx.Meta != nil {
@@ -519,9 +728,14 @@ func (h *Handler) logRequest(ctx context.Context, logCtx logContext) {
 		entry.InputTokens = logCtx.Response.Usage.PromptTokens
 		entry.OutputTokens = logCtx.Response.Usage.CompletionTokens
 		entry.TotalTokens = logCtx.Response.Usage.TotalTokens
-		if h.logPayloads {
+		if cfg.logPayloads {
 			entry.ResponseBody = marshalLogBody(logCtx.Response)
 		}
+	}
+	if logCtx.Usage != nil {
+		entry.InputTokens = logCtx.Usage.PromptTokens
+		entry.OutputTokens = logCtx.Usage.CompletionTokens
+		entry.TotalTokens = logCtx.Usage.TotalTokens
 	}
 
 	if spans := spansFromContext(ctx); len(spans) > 0 {
@@ -530,11 +744,16 @@ func (h *Handler) logRequest(ctx context.Context, logCtx logContext) {
 		entry.Metadata = meta
 	}
 
-	if err := h.store.InsertLog(ctx, entry); err != nil {
+	writeCtx, cancel := persistContext(ctx)
+	defer cancel()
+	if err := h.store.InsertLog(writeCtx, entry); err != nil {
 		log.Printf("failed to log request: %v", err)
 	}
-	if entry.APIKeyID != "" && entry.Status == "success" && entry.Cost > 0 && !entry.Cached {
-		if err := h.store.IncrementAPIKeySpend(ctx, entry.APIKeyID, entry.Cost); err != nil {
+	// Charge every upstream cost that was actually incurred, including
+	// responses that were later denied by an output guardrail or cut short
+	// by a stream error or client disconnect. Cache hits cost nothing.
+	if entry.APIKeyID != "" && entry.Cost > 0 && !entry.Cached {
+		if err := h.store.IncrementAPIKeySpend(writeCtx, entry.APIKeyID, entry.Cost); err != nil {
 			log.Printf("failed to increment API key spend: %v", err)
 		}
 	}
@@ -566,9 +785,9 @@ func (h *Handler) routerForConfig(ctx context.Context, ref string) (*router.Rout
 	return configRouter, nil
 }
 
-func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Context, streamCtx streamContext) {
+func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Context, sc streamContext) {
 	span := oteltrace.SpanFromContext(ctx)
-	activeRouter := streamCtx.Router
+	activeRouter := sc.Router
 	if activeRouter == nil {
 		activeRouter = h.router
 	}
@@ -577,26 +796,42 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 		writeError(w, http.StatusInternalServerError, "streaming is not supported by this server")
 		return
 	}
-	bufferOutput := h.streamGuardrailBuffer && h.guardrails.Load() != nil
+	cfg := h.loadSettings(ctx)
+	bufferOutput := cfg.streamGuardrailBuffer && h.guardrails.Load() != nil
+
+	// upstreamCtx is cancelled as soon as the client goes away or a write to
+	// it fails, so the provider stops generating instead of being drained.
+	upstreamCtx, cancelUpstream := context.WithCancel(ctx)
+	defer cancelUpstream()
+
+	var (
+		totals      attemptTotals
+		meta        provider.ProviderMeta
+		aggregated  provider.ChatResponse
+		disp        guardrailDisposition
+		headersSent bool
+	)
+	logStream := func(status, message, reason string, resp *provider.ChatResponse) {
+		logMeta := totals.meta(meta)
+		usage := totals.usage
+		h.logRequest(ctx, logContext{
+			ID: sc.ID, TraceID: sc.TraceID, SessionID: sc.SessionID, Request: sc.Request, Response: resp, Meta: &logMeta, Usage: &usage,
+			APIKeyID: sc.APIKeyID, Status: status, ErrorMessage: message, DecisionReason: reason,
+		})
+	}
 
 	maxAttempts := 1
-	var aggregated provider.ChatResponse
-	var meta provider.ProviderMeta
-
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		var err error
-		var chunks <-chan provider.ChatResponseChunk
-		chunks, meta, err = activeRouter.ExecuteStream(ctx, streamCtx.BackendRequest, streamCtx.ProviderHint)
+		chunks, attemptMeta, err := activeRouter.ExecuteStream(upstreamCtx, sc.BackendRequest, sc.ProviderHint)
+		meta = attemptMeta
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "provider stream error")
 			span.SetAttributes(attribute.String("llm.response.provider", meta.Provider))
-			h.logRequest(ctx, logContext{
-				ID: streamCtx.ID, TraceID: streamCtx.TraceID, SessionID: streamCtx.SessionID, Request: streamCtx.Request, Meta: &meta,
-				APIKeyID: streamCtx.APIKeyID, Status: "error", ErrorMessage: err.Error(),
-			})
-			w.Header().Set("x-omniswitch-trace-id", streamCtx.TraceID)
-			w.Header().Set("x-omniswitch-session-id", streamCtx.SessionID)
+			totals.add(meta.Cost, provider.Usage{})
+			logStream(statusError, err.Error(), "", nil)
+			w.Header().Set("x-omniswitch-trace-id", sc.TraceID)
+			w.Header().Set("x-omniswitch-session-id", sc.SessionID)
 			if upErr, ok := asUnsupportedParameterError(err); ok {
 				writeUnsupportedParameterError(w, upErr)
 				return
@@ -606,132 +841,289 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 		}
 
 		if !bufferOutput {
-			setStreamHeaders(w, streamCtx.TraceID, streamCtx.SessionID)
+			setStreamHeaders(w, sc.TraceID, sc.SessionID)
 			w.WriteHeader(http.StatusOK)
+			headersSent = true
 		}
 
-		aggregated = provider.ChatResponse{
-			ID:      newID("chat"),
-			Object:  "chat.completion",
-			Created: time.Now().Unix(),
-			Model:   firstNonEmpty(meta.Model, streamCtx.BackendRequest.Model),
-			Choices: []provider.Choice{{
-				Index:        0,
-				Message:      provider.Message{Role: "assistant"},
-				FinishReason: "stop",
-			}},
+		result := consumeStream(ctx, w, flusher, chunks, sc, meta, bufferOutput)
+		aggregated = result.response
+		totals.add(result.cost, result.usage)
+		if result.clientGone || result.err != nil {
+			cancelUpstream()
+			go drainChunks(chunks)
 		}
-		var buffered []provider.ChatResponseChunk
-		for chunk := range chunks {
-			if chunk.ID != "" {
-				aggregated.ID = chunk.ID
-			}
-			if chunk.Model != "" {
-				aggregated.Model = chunk.Model
-			}
-			for _, choice := range chunk.Choices {
-				if choice.Index == 0 {
-					if choice.Delta.Role != "" {
-						aggregated.Choices[0].Message.Role = choice.Delta.Role
-					}
-					aggregated.Choices[0].Message.Content += choice.Delta.Content
-					if len(choice.Delta.ToolCalls) > 0 {
-						mergeToolCallDeltas(&aggregated.Choices[0].Message.ToolCalls, choice.Delta.ToolCalls)
-					}
-					if choice.FinishReason != "" {
-						aggregated.Choices[0].FinishReason = choice.FinishReason
-					}
-				}
-			}
-			if chunk.Usage != nil {
-				aggregated.Usage = *chunk.Usage
-				meta.Cost = provider.EstimateCost(firstNonEmpty(meta.ProviderType, meta.Provider), aggregated.Model, aggregated.Usage)
-			}
-			if bufferOutput {
-				buffered = append(buffered, chunk)
-			} else {
-				writeSSE(w, chunk)
-				flusher.Flush()
-			}
+		if result.clientGone {
+			span.SetStatus(codes.Error, "client disconnected")
+			logStream(statusError, "client disconnected before the stream completed", "", &aggregated)
+			return
 		}
-
-		if bufferOutput {
-			disp := h.outputGuardrailDisposition(ctx, streamCtx.ID, &aggregated)
-			if disp.Denied {
-				span.SetStatus(codes.Error, "stream output guardrail denied")
-				h.logRequest(ctx, logContext{
-					ID: streamCtx.ID, TraceID: streamCtx.TraceID, SessionID: streamCtx.SessionID, Request: streamCtx.Request, Response: &aggregated, Meta: &meta,
-					APIKeyID: streamCtx.APIKeyID, Status: "denied", ErrorMessage: disp.Reason,
-				})
-				w.Header().Set("x-omniswitch-trace-id", streamCtx.TraceID)
-				w.Header().Set("x-omniswitch-session-id", streamCtx.SessionID)
-				writeJSON(w, http.StatusForbidden, map[string]any{
-					"error": map[string]string{"message": disp.Reason, "type": "guardrail", "code": "guardrail_triggered"},
-				})
-				return
-			}
-
-			if disp.Retry || disp.RerouteProvider != "" || disp.Fallback != "" {
-				if disp.MaxRetries > 0 && maxAttempts == 1 {
-					maxAttempts = 1 + disp.MaxRetries
-				} else if maxAttempts == 1 {
-					maxAttempts = 2 // default 1 retry
-				}
-
-				if attempt+1 < maxAttempts {
-					if disp.RerouteProvider != "" {
-						streamCtx.ProviderHint = disp.RerouteProvider
-					}
-					if disp.Fallback != "" {
-						if pn, mod := parseFallbackTarget(disp.Fallback); pn != "" || mod != "" {
-							if pn != "" {
-								streamCtx.ProviderHint = pn
-							}
-							if mod != "" {
-								streamCtx.BackendRequest.Model = mod
-							}
-						}
-					}
-					continue
-				}
-			}
-
-			setStreamHeaders(w, streamCtx.TraceID, streamCtx.SessionID)
-			if disp.Redacted {
-				writeStream(w, aggregated)
-			} else {
+		if result.err != nil {
+			span.RecordError(result.err)
+			span.SetStatus(codes.Error, "provider stream error")
+			span.SetAttributes(attribute.String("llm.response.provider", meta.Provider))
+			logStream(statusError, "provider stream error: "+result.err.Error(), "", &aggregated)
+			// Nothing that was buffered for the guardrails is replayed.
+			if !headersSent {
+				setStreamHeaders(w, sc.TraceID, sc.SessionID)
 				w.WriteHeader(http.StatusOK)
-				for _, chunk := range buffered {
-					writeSSE(w, chunk)
-					flusher.Flush()
+			}
+			writeStreamError(w, flusher, result.err)
+			return
+		}
+
+		if !bufferOutput {
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			break
+		}
+
+		disp = h.outputGuardrailDisposition(ctx, sc.ID, &aggregated)
+		if disp.Denied {
+			break
+		}
+		if disp.violation() {
+			maxAttempts = retryAttempts(maxAttempts, disp)
+			if attempt+1 < maxAttempts {
+				sc.ProviderHint, sc.BackendRequest.Model = applyRetryTarget(disp, sc.ProviderHint, sc.BackendRequest.Model)
+				continue
+			}
+			break
+		}
+
+		setStreamHeaders(w, sc.TraceID, sc.SessionID)
+		if disp.Redacted {
+			writeStream(w, aggregated, sc.IncludeUsage)
+		} else {
+			w.WriteHeader(http.StatusOK)
+			for _, chunk := range result.buffered {
+				if err := writeSSE(w, chunk); err != nil {
+					break
 				}
-				fmt.Fprint(w, "data: [DONE]\n\n")
 				flusher.Flush()
 			}
-		} else {
-			fmt.Fprint(w, "data: [DONE]\n\n")
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 			flusher.Flush()
 		}
-
 		break
 	}
 
-	h.storeCache(ctx, streamCtx.CacheScope, streamCtx.CacheProvider, streamCtx.BackendRequest, aggregated)
-	h.logRequest(ctx, logContext{
-		ID: streamCtx.ID, TraceID: streamCtx.TraceID, SessionID: streamCtx.SessionID, Request: streamCtx.Request, Response: &aggregated, Meta: &meta,
-		APIKeyID: streamCtx.APIKeyID, Status: "success",
-	})
+	if disp.Denied || disp.violation() {
+		// A deny rule matched, or every retry/reroute attempt still violated
+		// the output guardrails. Nothing has been sent to the client yet.
+		reason := disp.denyReason()
+		span.SetStatus(codes.Error, "stream output guardrail denied")
+		logStream(statusDenied, reason, "", &aggregated)
+		w.Header().Set("x-omniswitch-trace-id", sc.TraceID)
+		w.Header().Set("x-omniswitch-session-id", sc.SessionID)
+		writeGuardrailDenied(w, reason)
+		return
+	}
+
+	h.storeCache(ctx, cfg, sc.CacheScope, sc.CacheProvider, sc.CacheRequest, aggregated)
+	status, reason := allowStatus(sc.InputRedaction, disp)
+	logStream(status, "", reason, &aggregated)
 	span.SetStatus(codes.Ok, "")
 	span.SetAttributes(
 		attribute.String("sentinel.decision", "ALLOW"),
 		attribute.String("llm.response.provider", meta.Provider),
 		attribute.String("llm.response.model", aggregated.Model),
-		attribute.Int("llm.usage.prompt_tokens", aggregated.Usage.PromptTokens),
-		attribute.Int("llm.usage.completion_tokens", aggregated.Usage.CompletionTokens),
-		attribute.Int("llm.usage.total_tokens", aggregated.Usage.TotalTokens),
-		attribute.Float64("llm.usage.cost_usd", meta.Cost),
+		attribute.Int("llm.usage.prompt_tokens", totals.usage.PromptTokens),
+		attribute.Int("llm.usage.completion_tokens", totals.usage.CompletionTokens),
+		attribute.Int("llm.usage.total_tokens", totals.usage.TotalTokens),
+		attribute.Float64("llm.usage.cost_usd", totals.cost),
 	)
-	h.shadow(ctx, activeRouter, streamCtx.ID, streamCtx.TraceID, meta.Provider, streamCtx.BackendRequest, streamCtx.ShadowHint)
+	h.shadow(activeRouter, sc.ID, sc.TraceID, meta.Provider, sc.BackendRequest, sc.ShadowHint)
+}
+
+// streamResult is the outcome of reading one provider stream.
+type streamResult struct {
+	response   provider.ChatResponse
+	usage      provider.Usage
+	cost       float64
+	buffered   []provider.ChatResponseChunk
+	err        error
+	clientGone bool
+}
+
+// consumeStream reads a provider stream until it ends, fails, or the client
+// goes away. Without buffering, chunks are forwarded as they arrive. The
+// final usage-only chunk is always used for accounting but is only
+// forwarded when the client asked for it with stream_options.include_usage.
+func consumeStream(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, chunks <-chan provider.ChatResponseChunk, sc streamContext, meta provider.ProviderMeta, buffer bool) streamResult {
+	agg := newStreamAggregator(firstNonEmpty(meta.Model, sc.BackendRequest.Model))
+	var res streamResult
+	done := ctx.Done()
+loop:
+	for {
+		select {
+		case <-done:
+			res.clientGone = true
+			break loop
+		case chunk, ok := <-chunks:
+			if !ok {
+				// A producer that honours cancellation closes the channel
+				// when the client leaves; that is not a complete stream.
+				res.clientGone = ctx.Err() != nil
+				break loop
+			}
+			if chunk.Err != nil {
+				agg.add(chunk)
+				res.err = chunk.Err
+				break loop
+			}
+			agg.add(chunk)
+			if isUsageOnlyChunk(chunk) && !sc.IncludeUsage {
+				continue
+			}
+			if buffer {
+				res.buffered = append(res.buffered, chunk)
+				continue
+			}
+			if err := writeSSE(w, chunk); err != nil {
+				res.clientGone = true
+				break loop
+			}
+			flusher.Flush()
+		}
+	}
+	res.response = agg.response()
+	usage := agg.usage
+	if !agg.hasUsage {
+		// Upstreams are asked for usage on every stream; if none arrived,
+		// estimate it so the request is never recorded as free.
+		usage = estimateUsage(sc.BackendRequest, res.response)
+	}
+	res.response.Usage = usage
+	res.usage = usage
+	res.cost = provider.EstimateCost(firstNonEmpty(meta.ProviderType, meta.Provider), res.response.Model, usage)
+	return res
+}
+
+func drainChunks(chunks <-chan provider.ChatResponseChunk) {
+	for range chunks { //nolint:revive // draining unblocks a producer that ignores cancellation
+	}
+}
+
+func isUsageOnlyChunk(chunk provider.ChatResponseChunk) bool {
+	return len(chunk.Choices) == 0 && chunk.Usage != nil
+}
+
+// writeStreamError tells a streaming client that the upstream stream failed.
+// No [DONE] marker follows, so clients cannot mistake the partial output for
+// a complete response.
+func writeStreamError(w http.ResponseWriter, flusher http.Flusher, err error) {
+	message := "upstream stream failed"
+	if err != nil {
+		message = err.Error()
+	}
+	_ = writeSSE(w, map[string]any{
+		"error": map[string]string{"message": message, "type": "upstream_stream_error"},
+	})
+	flusher.Flush()
+}
+
+// streamAggregator rebuilds a complete chat response from stream chunks,
+// keeping every choice index separately.
+type streamAggregator struct {
+	id       string
+	model    string
+	choices  map[int]*choiceBuilder
+	usage    provider.Usage
+	hasUsage bool
+}
+
+type choiceBuilder struct {
+	role         string
+	content      strings.Builder
+	toolCalls    []provider.ToolCall
+	finishReason string
+}
+
+func newStreamAggregator(model string) *streamAggregator {
+	return &streamAggregator{model: model, choices: map[int]*choiceBuilder{}}
+}
+
+func (a *streamAggregator) add(chunk provider.ChatResponseChunk) {
+	if chunk.ID != "" {
+		a.id = chunk.ID
+	}
+	if chunk.Model != "" {
+		a.model = chunk.Model
+	}
+	for _, choice := range chunk.Choices {
+		builder, ok := a.choices[choice.Index]
+		if !ok {
+			builder = &choiceBuilder{role: "assistant"}
+			a.choices[choice.Index] = builder
+		}
+		if choice.Delta.Role != "" {
+			builder.role = choice.Delta.Role
+		}
+		builder.content.WriteString(choice.Delta.Content)
+		if len(choice.Delta.ToolCalls) > 0 {
+			mergeToolCallDeltas(&builder.toolCalls, choice.Delta.ToolCalls)
+		}
+		if choice.FinishReason != "" {
+			builder.finishReason = choice.FinishReason
+		}
+	}
+	if chunk.Usage != nil {
+		a.usage = *chunk.Usage
+		a.hasUsage = true
+	}
+}
+
+func (a *streamAggregator) response() provider.ChatResponse {
+	resp := provider.ChatResponse{
+		ID:      firstNonEmpty(a.id, newID("chat")),
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   a.model,
+		Usage:   a.usage,
+	}
+	indices := make([]int, 0, len(a.choices))
+	for index := range a.choices {
+		indices = append(indices, index)
+	}
+	sort.Ints(indices)
+	for _, index := range indices {
+		builder := a.choices[index]
+		resp.Choices = append(resp.Choices, provider.Choice{
+			Index:        index,
+			Message:      provider.Message{Role: builder.role, Content: builder.content.String(), ToolCalls: builder.toolCalls},
+			FinishReason: firstNonEmpty(builder.finishReason, "stop"),
+		})
+	}
+	if len(resp.Choices) == 0 {
+		resp.Choices = []provider.Choice{{Index: 0, Message: provider.Message{Role: "assistant"}, FinishReason: "stop"}}
+	}
+	return resp
+}
+
+// estimateUsage approximates token usage (about four bytes per token) for a
+// stream that ended without a usage report.
+func estimateUsage(req provider.ChatRequest, resp provider.ChatResponse) provider.Usage {
+	promptBytes := 0
+	for _, message := range req.Messages {
+		promptBytes += len(message.Text())
+		for _, call := range message.ToolCalls {
+			promptBytes += len(call.Function.Name) + len(call.Function.Arguments)
+		}
+	}
+	completionBytes := 0
+	for _, choice := range resp.Choices {
+		completionBytes += len(choice.Message.Content)
+		for _, call := range choice.Message.ToolCalls {
+			completionBytes += len(call.Function.Name) + len(call.Function.Arguments)
+		}
+	}
+	usage := provider.Usage{
+		PromptTokens:     (promptBytes + 3) / 4,
+		CompletionTokens: (completionBytes + 3) / 4,
+	}
+	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	return usage
 }
 
 func setStreamHeaders(w http.ResponseWriter, traceID, sessionID string) {
@@ -751,6 +1143,25 @@ type guardrailDisposition struct {
 	RerouteProvider string
 	Fallback        string
 	Reason          string
+	// ViolationReason is the message of the first retry/reroute/fallback
+	// result, used when the attempts are exhausted and the response is denied.
+	ViolationReason string
+}
+
+// violation reports whether the response must not be returned as is and
+// should be regenerated (retry, reroute or fallback).
+func (d guardrailDisposition) violation() bool {
+	return d.Retry || d.RerouteProvider != "" || d.Fallback != ""
+}
+
+func (d guardrailDisposition) denyReason() string {
+	if d.Reason != "" {
+		return d.Reason
+	}
+	if d.ViolationReason != "" {
+		return d.ViolationReason
+	}
+	return "response blocked by output guardrail"
 }
 
 // outputGuardrailDisposition evaluates every generated choice. A redaction
@@ -775,25 +1186,113 @@ func (h *Handler) outputGuardrailDisposition(ctx context.Context, requestID stri
 					disp.Reason = result.Message
 				}
 			case "redact":
-				resp.Choices[index].Message.Content = "[REDACTED BY OMNISWITCH]"
+				resp.Choices[index].Message.Content = redactedContent
+				resp.Choices[index].Message.ContentParts = nil
 				disp.Redacted = true
 			case "retry":
 				disp.Retry = true
 				if result.MaxRetries > disp.MaxRetries {
 					disp.MaxRetries = result.MaxRetries
 				}
+				disp.noteViolation(result)
 			case "reroute":
 				if disp.RerouteProvider == "" && result.RerouteProvider != "" {
 					disp.RerouteProvider = result.RerouteProvider
+					disp.noteViolation(result)
 				}
 			case "fallback":
 				if disp.Fallback == "" && result.Fallback != "" {
 					disp.Fallback = result.Fallback
+					disp.noteViolation(result)
 				}
 			}
 		}
 	}
 	return disp
+}
+
+func (d *guardrailDisposition) noteViolation(result guardrail.Result) {
+	if d.ViolationReason != "" {
+		return
+	}
+	d.ViolationReason = firstNonEmpty(result.Message, "output guardrail triggered: "+result.Type)
+}
+
+// redactInputMessages applies input-stage "redact" results to the request
+// before it leaves the gateway. The guardrail engine reports which checks
+// fired but not where, so each message with text is re-checked on its own
+// and the text of every message that triggers a redact result is replaced.
+// If no single message triggers (the match spans messages), every message
+// with text is redacted. Non-text parts (images, audio) are kept.
+// It returns the redacted copy and the triggered redact types.
+func redactInputMessages(ctx context.Context, gr *guardrail.Engine, messages []provider.Message, results []guardrail.Result) ([]provider.Message, []string) {
+	var types []string
+	wanted := map[string]bool{}
+	for _, result := range results {
+		if result.Triggered && result.Action == "redact" && !wanted[result.Type] {
+			wanted[result.Type] = true
+			types = append(types, result.Type)
+		}
+	}
+	if len(types) == 0 {
+		return messages, nil
+	}
+	out := make([]provider.Message, len(messages))
+	copy(out, messages)
+	var withText []int
+	for index := range out {
+		if messageHasText(out[index]) {
+			withText = append(withText, index)
+		}
+	}
+	targets := withText
+	if len(withText) > 1 {
+		targets = nil
+		for _, index := range withText {
+			for _, result := range gr.EvaluateInputContext(ctx, []provider.Message{out[index]}) {
+				if result.Triggered && result.Action == "redact" && wanted[result.Type] {
+					targets = append(targets, index)
+					break
+				}
+			}
+		}
+		if len(targets) == 0 {
+			targets = withText
+		}
+	}
+	for _, index := range targets {
+		out[index] = redactMessageText(out[index])
+	}
+	return out, types
+}
+
+func messageHasText(message provider.Message) bool {
+	if message.Content != "" {
+		return true
+	}
+	for _, part := range message.ContentParts {
+		if part.Text != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func redactMessageText(message provider.Message) provider.Message {
+	if message.Content != "" {
+		message.Content = redactedContent
+	}
+	if len(message.ContentParts) > 0 {
+		parts := make([]provider.ContentPart, len(message.ContentParts))
+		copy(parts, message.ContentParts)
+		for index := range parts {
+			if parts[index].Text != "" {
+				parts[index].Text = redactedContent
+			}
+		}
+		message.ContentParts = parts
+	}
+	return message
 }
 
 // recordGuardrailResults keeps a structured audit trail for both enforced and
@@ -802,11 +1301,17 @@ func (h *Handler) recordGuardrailResults(ctx context.Context, requestID string, 
 	if h.store == nil || requestID == "" {
 		return
 	}
+	var writeCtx context.Context
 	for _, result := range results {
 		if !result.Triggered {
 			continue
 		}
-		if err := h.store.InsertGuardrailEvent(ctx, store.GuardrailEvent{
+		if writeCtx == nil {
+			var cancel context.CancelFunc
+			writeCtx, cancel = persistContext(ctx)
+			defer cancel()
+		}
+		if err := h.store.InsertGuardrailEvent(writeCtx, store.GuardrailEvent{
 			ID:        newID("gr"),
 			RequestID: requestID,
 			Timestamp: time.Now().UTC(),
@@ -855,8 +1360,8 @@ func (h *Handler) budgetExceeded(ctx context.Context, apiKeyID string) (bool, st
 	return false, ""
 }
 
-func (h *Handler) cachedResponse(ctx context.Context, tenantScope, providerName string, req provider.ChatRequest) (provider.ChatResponse, bool) {
-	if h.store == nil || h.cacheThreshold <= 0 || len(req.Messages) == 0 {
+func (h *Handler) cachedResponse(ctx context.Context, cfg *handlerSettings, tenantScope, providerName string, req provider.ChatRequest) (provider.ChatResponse, bool) {
+	if h.store == nil || cfg.cacheThreshold <= 0 || len(req.Messages) == 0 {
 		return provider.ChatResponse{}, false
 	}
 	key, err := cache.KeyWithScope(tenantScope, providerName, req)
@@ -868,8 +1373,13 @@ func (h *Handler) cachedResponse(ctx context.Context, tenantScope, providerName 
 		return entry.Response, true
 	}
 
+	scope, err := semanticCacheScope(tenantScope, providerName, req)
+	if err != nil {
+		log.Printf("semantic cache scope failed: %v", err)
+		return provider.ChatResponse{}, false
+	}
 	vector := cache.Vectorize(cache.PromptText(req.Messages))
-	entry, ok, err := h.store.FindSemanticCache(ctx, semanticCacheScope(tenantScope, providerName, req), vector, h.cacheThreshold)
+	entry, ok, err := h.store.FindSemanticCache(ctx, scope, vector, cfg.cacheThreshold)
 	if err != nil {
 		log.Printf("semantic cache lookup failed: %v", err)
 		return provider.ChatResponse{}, false
@@ -880,26 +1390,33 @@ func (h *Handler) cachedResponse(ctx context.Context, tenantScope, providerName 
 	return entry.Response, true
 }
 
-func (h *Handler) storeCache(ctx context.Context, tenantScope, providerName string, req provider.ChatRequest, resp provider.ChatResponse) {
-	if h.store == nil || h.cacheThreshold <= 0 || len(req.Messages) == 0 || len(resp.Choices) == 0 {
+func (h *Handler) storeCache(ctx context.Context, cfg *handlerSettings, tenantScope, providerName string, req provider.ChatRequest, resp provider.ChatResponse) {
+	if h.store == nil || cfg.cacheThreshold <= 0 || len(req.Messages) == 0 || len(resp.Choices) == 0 {
 		return
 	}
 	key, err := cache.KeyWithScope(tenantScope, providerName, req)
 	if err != nil {
 		log.Printf("exact cache key failed: %v", err)
 	}
+	scope, err := semanticCacheScope(tenantScope, providerName, req)
+	if err != nil {
+		log.Printf("semantic cache scope failed: %v", err)
+		return
+	}
 	promptText := cache.PromptText(req.Messages)
 	var expiresAt *time.Time
-	if h.cacheTTL > 0 {
-		value := time.Now().UTC().Add(h.cacheTTL)
+	if cfg.cacheTTL > 0 {
+		value := time.Now().UTC().Add(cfg.cacheTTL)
 		expiresAt = &value
 	}
-	if err := h.store.InsertSemanticCache(ctx, store.CacheEntry{
+	writeCtx, cancel := persistContext(ctx)
+	defer cancel()
+	if err := h.store.InsertSemanticCache(writeCtx, store.CacheEntry{
 		ID:        newID("cache"),
 		Key:       key,
 		CreatedAt: time.Now().UTC(),
 		ExpiresAt: expiresAt,
-		Model:     semanticCacheScope(tenantScope, providerName, req),
+		Model:     scope,
 		Prompt:    promptText,
 		Vector:    cache.Vectorize(promptText),
 		Response:  resp,
@@ -908,31 +1425,32 @@ func (h *Handler) storeCache(ctx context.Context, tenantScope, providerName stri
 	}
 }
 
-func semanticCacheScope(tenantScope, providerName string, req provider.ChatRequest) string {
-	parts := []string{tenantScope, providerName}
-	parts = append(parts, requestCacheScope(req))
-	return strings.Join(parts, "|")
+func semanticCacheScope(tenantScope, providerName string, req provider.ChatRequest) (string, error) {
+	requestScope, err := requestCacheScope(req)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join([]string{tenantScope, providerName, requestScope}, "|"), nil
 }
 
-func requestCacheScope(req provider.ChatRequest) string {
-	parts := []string{req.Model}
-	if req.Temperature != nil {
-		parts = append(parts, fmt.Sprintf("temperature=%.4f", *req.Temperature))
+// requestCacheScope identifies every request field other than the messages:
+// the semantic lookup only compares prompts, so all other parameters (tools,
+// tool_choice, response_format, n, seed, logit_bias, sampling settings and
+// unknown passthrough fields) must match exactly.
+func requestCacheScope(req provider.ChatRequest) (string, error) {
+	req.Messages = nil
+	req.Stream = false
+	req.StreamOptions = nil
+	data, err := json.Marshal(req)
+	if err != nil {
+		return "", err
 	}
-	if req.TopP != nil {
-		parts = append(parts, fmt.Sprintf("top_p=%.4f", *req.TopP))
-	}
-	if req.MaxTokens != nil {
-		parts = append(parts, fmt.Sprintf("max_tokens=%d", *req.MaxTokens))
-	}
-	if len(req.Stop) > 0 {
-		parts = append(parts, "stop="+strings.Join(req.Stop, ","))
-	}
-	return strings.Join(parts, "|")
+	sum := sha256.Sum256(data)
+	return req.Model + "|params=" + hex.EncodeToString(sum[:16]), nil
 }
 
-func (h *Handler) tenantCacheScope(r *http.Request) string {
-	switch h.cacheScope {
+func (h *Handler) tenantCacheScope(r *http.Request, cfg *handlerSettings) string {
+	switch cfg.cacheScope {
 	case "global":
 		return "global"
 	case "organization":
@@ -950,27 +1468,42 @@ func (h *Handler) tenantCacheScope(r *http.Request) string {
 	return "anonymous"
 }
 
-func (h *Handler) shadow(ctx context.Context, activeRouter *router.Router, requestID, traceID, primaryProvider string, req provider.ChatRequest, shadowProvider string) {
+// shadow mirrors a completed request to a shadow provider in the background.
+// At most maxConcurrentShadowRequests run at once; further shadow requests
+// are dropped. Shadow calls use their own circuit breaker so a failing
+// shadow provider cannot open the circuit for production traffic.
+func (h *Handler) shadow(activeRouter *router.Router, requestID, traceID, primaryProvider string, req provider.ChatRequest, shadowProvider string) {
 	if h.store == nil || strings.TrimSpace(shadowProvider) == "" || shadowProvider == primaryProvider {
 		return
 	}
 	if activeRouter == nil {
 		activeRouter = h.router
 	}
+	select {
+	case h.shadowSlots <- struct{}{}:
+	default:
+		log.Printf("shadow request to %s dropped: %d shadow requests already in flight", shadowProvider, cap(h.shadowSlots))
+		return
+	}
+	shadowRouter := activeRouter.CloneWithRoutes(nil)
+	shadowRouter.SetCircuitBreaker(h.shadowBreaker)
 	go func() {
+		defer func() { <-h.shadowSlots }()
 		shadowCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		resp, meta, err := activeRouter.Execute(shadowCtx, req, shadowProvider)
+		_, meta, err := shadowRouter.Execute(shadowCtx, req, shadowProvider)
 		if meta.Provider == "" {
 			meta.Provider = shadowProvider
 		}
-		status := "success"
+		status := statusSuccess
 		errMsg := ""
 		if err != nil {
-			status = "error"
+			status = statusError
 			errMsg = err.Error()
 		}
-		if err := h.store.InsertShadowLog(context.Background(), store.ShadowLog{
+		writeCtx, cancelWrite := context.WithTimeout(context.Background(), persistTimeout)
+		defer cancelWrite()
+		if err := h.store.InsertShadowLog(writeCtx, store.ShadowLog{
 			ID:              newID("shadow"),
 			RequestID:       requestID,
 			TraceID:         traceID,
@@ -985,15 +1518,13 @@ func (h *Handler) shadow(ctx context.Context, activeRouter *router.Router, reque
 		}); err != nil {
 			log.Printf("failed to log shadow request: %v", err)
 		}
-		_ = resp
-		_ = ctx
 	}()
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
@@ -1026,7 +1557,11 @@ func asUnsupportedParameterError(err error) (*provider.UnsupportedParameterError
 	return nil, false
 }
 
-func writeStream(w http.ResponseWriter, resp provider.ChatResponse) {
+// writeStream replays a complete response (a cache hit or a redacted
+// response) as an SSE stream. Every choice is replayed, content is split at
+// rune boundaries without touching whitespace, and the usage chunk is sent
+// only when the client asked for it.
+func writeStream(w http.ResponseWriter, resp provider.ChatResponse, includeUsage bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming is not supported by this server")
@@ -1037,76 +1572,79 @@ func writeStream(w http.ResponseWriter, resp provider.ChatResponse) {
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
-	content := ""
-	finishReason := "stop"
-	var toolCalls []provider.ToolCall
-	if len(resp.Choices) > 0 {
-		content = resp.Choices[0].Message.Content
-		toolCalls = resp.Choices[0].Message.ToolCalls
-		finishReason = resp.Choices[0].FinishReason
+	created := time.Now().Unix()
+	newChunk := func(choices []provider.ChunkChoice) provider.ChatResponseChunk {
+		return provider.ChatResponseChunk{ID: resp.ID, Object: "chat.completion.chunk", Created: created, Model: resp.Model, Choices: choices}
 	}
-	if finishReason == "" {
-		finishReason = "stop"
+	send := func(chunk provider.ChatResponseChunk) bool {
+		if err := writeSSE(w, chunk); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
 	}
 
-	words := strings.Fields(content)
-	if len(words) == 0 && content != "" {
-		words = []string{content}
+	choices := resp.Choices
+	if len(choices) == 0 {
+		choices = []provider.Choice{{Index: 0, Message: provider.Message{Role: "assistant"}}}
 	}
-	for i, word := range words {
-		token := word
-		if i < len(words)-1 {
-			token += " "
+	for _, choice := range choices {
+		role := firstNonEmpty(choice.Message.Role, "assistant")
+		for _, piece := range splitRunes(choice.Message.Content, cachedStreamChunkRunes) {
+			if !send(newChunk([]provider.ChunkChoice{{Index: choice.Index, Delta: provider.Message{Role: role, Content: piece}}})) {
+				return
+			}
+			role = ""
 		}
-		chunk := map[string]any{
-			"id":      resp.ID,
-			"object":  "chat.completion.chunk",
-			"created": time.Now().Unix(),
-			"model":   resp.Model,
-			"choices": []map[string]any{
-				{
-					"index": 0,
-					"delta": map[string]string{"content": token},
-				},
-			},
+		if len(choice.Message.ToolCalls) > 0 {
+			deltas := make([]provider.ToolCall, len(choice.Message.ToolCalls))
+			for index, call := range choice.Message.ToolCalls {
+				i := index
+				call.Index = &i
+				deltas[index] = call
+			}
+			if !send(newChunk([]provider.ChunkChoice{{Index: choice.Index, Delta: provider.Message{Role: role, ToolCalls: deltas}}})) {
+				return
+			}
 		}
-		writeSSE(w, chunk)
-		flusher.Flush()
 	}
-	if len(toolCalls) > 0 {
-		deltas := make([]provider.ToolCall, len(toolCalls))
-		for index, call := range toolCalls {
-			i := index
-			call.Index = &i
-			deltas[index] = call
+	for _, choice := range choices {
+		finish := firstNonEmpty(choice.FinishReason, "stop")
+		if !send(newChunk([]provider.ChunkChoice{{Index: choice.Index, FinishReason: finish}})) {
+			return
 		}
-		chunk := provider.ChatResponseChunk{
-			ID:      resp.ID,
-			Object:  "chat.completion.chunk",
-			Created: time.Now().Unix(),
-			Model:   resp.Model,
-			Choices: []provider.ChunkChoice{{Index: 0, Delta: provider.Message{ToolCalls: deltas}}},
+	}
+	if includeUsage {
+		usage := resp.Usage
+		usageChunk := newChunk([]provider.ChunkChoice{})
+		usageChunk.Usage = &usage
+		if !send(usageChunk) {
+			return
 		}
-		writeSSE(w, chunk)
-		flusher.Flush()
 	}
-
-	finalChunk := map[string]any{
-		"id":      resp.ID,
-		"object":  "chat.completion.chunk",
-		"created": time.Now().Unix(),
-		"model":   resp.Model,
-		"choices": []map[string]any{
-			{
-				"index":         0,
-				"delta":         map[string]string{},
-				"finish_reason": finishReason,
-			},
-		},
-	}
-	writeSSE(w, finalChunk)
-	fmt.Fprint(w, "data: [DONE]\n\n")
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
+}
+
+// splitRunes cuts text into pieces of at most size runes. Joining the pieces
+// gives back the original text byte for byte.
+func splitRunes(text string, size int) []string {
+	if text == "" {
+		return nil
+	}
+	if size <= 0 {
+		return []string{text}
+	}
+	pieces := make([]string, 0, utf8.RuneCountInString(text)/size+1)
+	start, count := 0, 0
+	for index := range text {
+		if count == size {
+			pieces = append(pieces, text[start:index])
+			start, count = index, 0
+		}
+		count++
+	}
+	return append(pieces, text[start:])
 }
 
 func mergeToolCallDeltas(target *[]provider.ToolCall, deltas []provider.ToolCall) {
@@ -1137,12 +1675,15 @@ func mergeToolCallDeltas(target *[]provider.ToolCall, deltas []provider.ToolCall
 	}
 }
 
-func writeSSE(w http.ResponseWriter, payload any) {
+// writeSSE writes one SSE data event and reports write failures so callers
+// can stop streaming to a client that is gone.
+func writeSSE(w http.ResponseWriter, payload any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return
+		return nil
 	}
-	fmt.Fprintf(w, "data: %s\n\n", data)
+	_, err = fmt.Fprintf(w, "data: %s\n\n", data)
+	return err
 }
 
 func newRequestID() string {
