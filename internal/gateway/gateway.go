@@ -963,12 +963,11 @@ loop:
 				res.clientGone = ctx.Err() != nil
 				break loop
 			}
+			agg.add(chunk)
 			if chunk.Err != nil {
-				agg.add(chunk)
 				res.err = chunk.Err
 				break loop
 			}
-			agg.add(chunk)
 			if isUsageOnlyChunk(chunk) && !sc.IncludeUsage {
 				continue
 			}
@@ -1007,14 +1006,10 @@ func isUsageOnlyChunk(chunk provider.ChatResponseChunk) bool {
 
 // writeStreamError tells a streaming client that the upstream stream failed.
 // No [DONE] marker follows, so clients cannot mistake the partial output for
-// a complete response.
+// a complete response. err must not be nil.
 func writeStreamError(w http.ResponseWriter, flusher http.Flusher, err error) {
-	message := "upstream stream failed"
-	if err != nil {
-		message = err.Error()
-	}
 	_ = writeSSE(w, map[string]any{
-		"error": map[string]string{"message": message, "type": "upstream_stream_error"},
+		"error": map[string]string{"message": err.Error(), "type": "upstream_stream_error"},
 	})
 	flusher.Flush()
 }
