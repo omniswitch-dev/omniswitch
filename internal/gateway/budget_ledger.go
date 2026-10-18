@@ -608,10 +608,3 @@ func (l *budgetLedger) addLostLocked(e *budgetEntry, c budgetCharge, month time.
 	bucket.Lifetime += c.Lifetime
 	bucket.Monthly.add(c.Monthly)
 }
-
-// size returns the number of tracked scopes.
-func (l *budgetLedger) size() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.entries)
-}

@@ -436,12 +436,6 @@ func (backend *localRateLimitBackend) sweepLocked(now, cutoff time.Time, interva
 	}
 }
 
-func (backend *localRateLimitBackend) size() int {
-	backend.mu.Lock()
-	defer backend.mu.Unlock()
-	return len(backend.windows)
-}
-
 // Default control-plane request body limits.
 const (
 	// DefaultControlPlaneBodyLimit caps /api/* request bodies.
