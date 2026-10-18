@@ -28,6 +28,9 @@ type Handler struct {
 	// onConfigChange, when set, is called with the id and name of a stored
 	// gateway config after /api/configs changed it.
 	onConfigChange func(refs ...string)
+	// metricsPublic leaves /metrics open to tenant-scoped callers
+	// (OMNISWITCH_METRICS_PUBLIC).
+	metricsPublic bool
 }
 
 // New creates a new dashboard handler.
@@ -60,8 +63,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/metrics/providers", readOnly(h.getProviderMetrics))
 	mux.HandleFunc("/api/analytics/cost", readOnly(h.getCostAnalytics))
 	mux.HandleFunc("/api/traces/", readOnly(h.getTrace))
-	mux.HandleFunc("/api/config/raw", h.rawConfig)
-	mux.HandleFunc("/api/configs", h.configs)
+	mux.HandleFunc("/api/config/raw", globalOnly(h.rawConfig))
+	mux.HandleFunc("/api/configs", globalOnly(h.configs))
 	mux.HandleFunc("/api/health", readOnly(h.health))
 
 	// Serve embedded static files at root.
@@ -79,7 +82,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 // RegisterPrometheus registers a lightweight Prometheus text endpoint. It is
 // kept separate from RegisterRoutes so operators can explicitly disable it.
 func (h *Handler) RegisterPrometheus(mux *http.ServeMux) {
-	mux.HandleFunc("/metrics", readOnly(h.prometheus))
+	mux.HandleFunc("/metrics", readOnly(h.prometheusAccess(h.prometheus)))
 }
 
 // readOnly rejects every method other than GET and HEAD so read endpoints
@@ -105,14 +108,7 @@ func (h *Handler) getLogs(w http.ResponseWriter, r *http.Request) {
 		limit = 50
 	}
 
-	var logs []store.RequestLog
-	var total int
-	var err error
-	if keyID := scopedAPIKeyID(r); keyID != "" {
-		logs, total, err = h.store.ListLogsForAPIKey(r.Context(), keyID, limit, offset, providerFilter, statusFilter)
-	} else {
-		logs, total, err = h.store.ListLogs(r.Context(), limit, offset, providerFilter, statusFilter)
-	}
+	logs, total, err := h.store.ListLogsInScope(r.Context(), logScope(r), limit, offset, providerFilter, statusFilter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -138,13 +134,7 @@ func (h *Handler) getMetrics(w http.ResponseWriter, r *http.Request) {
 		since = now.Add(-30 * 24 * time.Hour)
 	}
 
-	var metrics store.Metrics
-	var err error
-	if keyID := scopedAPIKeyID(r); keyID != "" {
-		metrics, err = h.store.GetMetricsForAPIKey(r.Context(), since, keyID)
-	} else {
-		metrics, err = h.store.GetMetrics(r.Context(), since)
-	}
+	metrics, err := h.store.GetMetricsInScope(r.Context(), since, logScope(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -154,13 +144,7 @@ func (h *Handler) getMetrics(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) getProviderMetrics(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().UTC().Add(-24 * time.Hour)
-	var metrics []store.ProviderMetrics
-	var err error
-	if keyID := scopedAPIKeyID(r); keyID != "" {
-		metrics, err = h.store.GetProviderMetricsForAPIKey(r.Context(), since, keyID)
-	} else {
-		metrics, err = h.store.GetProviderMetrics(r.Context(), since)
-	}
+	metrics, err := h.store.GetProviderMetricsInScope(r.Context(), since, logScope(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -174,11 +158,7 @@ func (h *Handler) getProviderMetrics(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) getCostAnalytics(w http.ResponseWriter, r *http.Request) {
 	since := windowStart(r.URL.Query().Get("window"))
 	groupBy := r.URL.Query().Get("groupBy")
-	var keyID string
-	if scoped := scopedAPIKeyID(r); scoped != "" {
-		keyID = scoped
-	}
-	rows, err := h.store.GetCostAnalytics(r.Context(), since, groupBy, keyID)
+	rows, err := h.store.GetCostAnalyticsInScope(r.Context(), since, groupBy, logScope(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -196,7 +176,7 @@ func (h *Handler) getTrace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "trace id is required")
 		return
 	}
-	detail, err := h.store.GetTrace(r.Context(), traceID, scopedAPIKeyID(r))
+	detail, err := h.store.GetTraceInScope(r.Context(), traceID, logScope(r))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "trace not found")
 		return

@@ -65,6 +65,7 @@ func newGatewayMux(h routeHandlers) *http.ServeMux {
 	// Dashboard API + static files.
 	h.dash.RegisterRoutes(mux)
 	if h.settings.prometheusEnabled {
+		h.dash.SetMetricsPublic(h.settings.metricsPublic)
 		h.dash.RegisterPrometheus(mux)
 	}
 	return mux
