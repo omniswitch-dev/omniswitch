@@ -62,6 +62,11 @@ type RequestLog struct {
 	ErrorMessage   string    `json:"error,omitempty"`
 	Cached         bool      `json:"cached"`
 	Metadata       string    `json:"metadata,omitempty"`
+	// WorkspaceID and OrganizationID are the tenant of the caller that sent
+	// the request. Both are empty for unauthenticated or global callers and
+	// for rows written before the columns existed.
+	WorkspaceID    string `json:"workspace_id,omitempty"`
+	OrganizationID string `json:"organization_id,omitempty"`
 }
 
 // TraceSpan captures a single stage of request processing for waterfall views.
@@ -179,6 +184,10 @@ type Feedback struct {
 	Comment   string            `json:"comment,omitempty"`
 	UserID    string            `json:"user_id,omitempty"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
+	// WorkspaceID and OrganizationID are the tenant of the caller that
+	// submitted the feedback.
+	WorkspaceID    string `json:"workspace_id,omitempty"`
+	OrganizationID string `json:"organization_id,omitempty"`
 }
 
 type Organization struct {
@@ -576,6 +585,12 @@ var legacyColumns = []struct{ table, column, definition string }{
 	{"api_keys", "role", "TEXT"},
 	{"semantic_cache", "cache_key", "TEXT"},
 	{"semantic_cache", "expires_at", "TEXT"},
+	// Tenant of the caller. A constant default keeps ADD COLUMN a
+	// metadata-only change on large tables; old rows read as '' (global).
+	{"request_logs", "workspace_id", "TEXT DEFAULT ''"},
+	{"request_logs", "organization_id", "TEXT DEFAULT ''"},
+	{"feedback", "workspace_id", "TEXT DEFAULT ''"},
+	{"feedback", "organization_id", "TEXT DEFAULT ''"},
 }
 
 func (s *Store) dialectSQL(stmt string) string {
@@ -592,31 +607,34 @@ const requestLogColumns = `id, timestamp, COALESCE(trace_id, ''), COALESCE(sessi
 	COALESCE(model, ''), COALESCE(api_key_id, ''), COALESCE(status, ''), COALESCE(input_tokens, 0),
 	COALESCE(output_tokens, 0), COALESCE(total_tokens, 0), COALESCE(latency_ms, 0), COALESCE(cost, 0),
 	COALESCE(request_body, ''), COALESCE(response_body, ''), COALESCE(decision, ''), COALESCE(decision_reason, ''),
-	COALESCE(error_message, ''), COALESCE(cached, 0), COALESCE(metadata, '')`
+	COALESCE(error_message, ''), COALESCE(cached, 0), COALESCE(metadata, ''), COALESCE(workspace_id, ''),
+	COALESCE(organization_id, '')`
 
 // InsertLog stores a request log entry.
 func (s *Store) InsertLog(ctx context.Context, log RequestLog) error {
 	_, err := s.exec(ctx,
 		`INSERT INTO request_logs (id, timestamp, trace_id, session_id, provider, model, api_key_id, status,
 			input_tokens, output_tokens, total_tokens, latency_ms, cost,
-			request_body, response_body, decision, decision_reason, error_message, cached, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			request_body, response_body, decision, decision_reason, error_message, cached, metadata,
+			workspace_id, organization_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		log.ID, formatTime(log.Timestamp), log.TraceID, log.SessionID, log.Provider, log.Model,
 		log.APIKeyID, log.Status, log.InputTokens, log.OutputTokens, log.TotalTokens,
 		log.LatencyMs, log.Cost, log.RequestBody, log.ResponseBody,
 		log.Decision, log.DecisionReason, log.ErrorMessage, boolToInt(log.Cached), log.Metadata,
+		log.WorkspaceID, log.OrganizationID,
 	)
 	return err
 }
 
 // ListLogs returns paginated request logs ordered by timestamp descending.
 func (s *Store) ListLogs(ctx context.Context, limit, offset int, provider, status string) ([]RequestLog, int, error) {
-	return s.listLogs(ctx, limit, offset, provider, status, "")
+	return s.listLogs(ctx, limit, offset, provider, status, LogScope{})
 }
 
 // ListLogsForAPIKey scopes dashboard access to the authenticated workload key.
 func (s *Store) ListLogsForAPIKey(ctx context.Context, apiKeyID string, limit, offset int, provider, status string) ([]RequestLog, int, error) {
-	return s.listLogs(ctx, limit, offset, provider, status, apiKeyID)
+	return s.listLogs(ctx, limit, offset, provider, status, LogScope{APIKeyID: apiKeyID})
 }
 
 // Page size bounds applied by every paginated store method.
@@ -642,14 +660,9 @@ func ClampPage(limit, offset int) (int, int) {
 	return limit, offset
 }
 
-func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, status, apiKeyID string) ([]RequestLog, int, error) {
+func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, status string, scope LogScope) ([]RequestLog, int, error) {
 	limit, offset = ClampPage(limit, offset)
-	where := "1=1"
-	args := []any{}
-	if apiKeyID != "" {
-		where += " AND api_key_id = ?"
-		args = append(args, apiKeyID)
-	}
+	where, args := scope.where("1=1", nil)
 	if provider != "" {
 		where += " AND provider = ?"
 		args = append(args, provider)
@@ -683,7 +696,8 @@ func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, statu
 		var cached int
 		if err := rows.Scan(&l.ID, &ts, &l.TraceID, &l.SessionID, &l.Provider, &l.Model, &l.APIKeyID,
 			&l.Status, &l.InputTokens, &l.OutputTokens, &l.TotalTokens,
-			&l.LatencyMs, &l.Cost, &l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached, &l.Metadata); err != nil {
+			&l.LatencyMs, &l.Cost, &l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached, &l.Metadata,
+			&l.WorkspaceID, &l.OrganizationID); err != nil {
 			return nil, 0, err
 		}
 		l.Timestamp = parseTime(ts)
@@ -827,16 +841,15 @@ func (s *Store) DeleteGatewayConfig(ctx context.Context, ref string) error {
 }
 
 func (s *Store) GetCostAnalytics(ctx context.Context, since time.Time, groupBy, apiKeyID string) ([]CostAnalyticsRow, error) {
+	return s.getCostAnalytics(ctx, since, groupBy, LogScope{APIKeyID: apiKeyID})
+}
+
+func (s *Store) getCostAnalytics(ctx context.Context, since time.Time, groupBy string, scope LogScope) ([]CostAnalyticsRow, error) {
 	expr, err := analyticsGroupExpression(groupBy)
 	if err != nil {
 		return nil, err
 	}
-	where := "timestamp >= ?"
-	args := []any{formatTime(since)}
-	if apiKeyID != "" {
-		where += " AND api_key_id = ?"
-		args = append(args, apiKeyID)
-	}
+	where, args := scope.where("timestamp >= ?", []any{formatTime(since)})
 	rows, err := s.query(ctx, fmt.Sprintf(`
 		SELECT %s AS bucket,
 			COUNT(*) AS request_count,
@@ -863,13 +876,16 @@ func (s *Store) GetCostAnalytics(ctx context.Context, since time.Time, groupBy, 
 }
 
 func (s *Store) GetTrace(ctx context.Context, traceID, apiKeyID string) (TraceDetail, error) {
+	return s.getTrace(ctx, traceID, LogScope{APIKeyID: apiKeyID})
+}
+
+// getTrace returns the logs of a trace that scope may see, with the
+// guardrail events and shadow requests of those logs and the trace's
+// feedback in the scope's tenant. Trace ids come from clients, so two
+// tenants can share one: everything is joined through the visible logs.
+func (s *Store) getTrace(ctx context.Context, traceID string, scope LogScope) (TraceDetail, error) {
 	detail := TraceDetail{TraceID: traceID}
-	where := "trace_id = ?"
-	args := []any{traceID}
-	if apiKeyID != "" {
-		where += " AND api_key_id = ?"
-		args = append(args, apiKeyID)
-	}
+	where, args := scope.where("trace_id = ?", []any{traceID})
 	rows, err := s.query(ctx,
 		fmt.Sprintf("SELECT "+requestLogColumns+" FROM request_logs WHERE %s ORDER BY timestamp ASC", where),
 		args...,
@@ -885,7 +901,8 @@ func (s *Store) GetTrace(ctx context.Context, traceID, apiKeyID string) (TraceDe
 		var cached int
 		if err := rows.Scan(&l.ID, &ts, &l.TraceID, &l.SessionID, &l.Provider, &l.Model, &l.APIKeyID,
 			&l.Status, &l.InputTokens, &l.OutputTokens, &l.TotalTokens, &l.LatencyMs, &l.Cost,
-			&l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached, &l.Metadata); err != nil {
+			&l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached, &l.Metadata,
+			&l.WorkspaceID, &l.OrganizationID); err != nil {
 			return detail, err
 		}
 		l.Timestamp = parseTime(ts)
@@ -904,12 +921,12 @@ func (s *Store) GetTrace(ctx context.Context, traceID, apiKeyID string) (TraceDe
 		return detail, err
 	}
 	detail.GuardrailEvents = guardrailEvents
-	shadowLogs, err := s.listShadowLogsForTrace(ctx, traceID)
+	shadowLogs, err := s.listShadowLogsForRequests(ctx, traceID, requestIDs)
 	if err != nil {
 		return detail, err
 	}
 	detail.ShadowLogs = shadowLogs
-	feedback, err := s.ListFeedback(ctx, 100, "", traceID)
+	feedback, err := s.listFeedback(ctx, 100, "", traceID, scope.tenantOnly())
 	if err != nil {
 		return detail, err
 	}
@@ -938,23 +955,17 @@ func analyticsGroupExpression(groupBy string) (string, error) {
 
 // GetMetrics returns aggregated metrics for the given time window.
 func (s *Store) GetMetrics(ctx context.Context, since time.Time) (Metrics, error) {
-	return s.getMetrics(ctx, since, "")
+	return s.getMetrics(ctx, since, LogScope{})
 }
 
 // GetMetricsForAPIKey returns metrics only for one workload key.
 func (s *Store) GetMetricsForAPIKey(ctx context.Context, since time.Time, apiKeyID string) (Metrics, error) {
-	return s.getMetrics(ctx, since, apiKeyID)
+	return s.getMetrics(ctx, since, LogScope{APIKeyID: apiKeyID})
 }
 
-func (s *Store) getMetrics(ctx context.Context, since time.Time, apiKeyID string) (Metrics, error) {
+func (s *Store) getMetrics(ctx context.Context, since time.Time, scope LogScope) (Metrics, error) {
 	var m Metrics
-	sinceStr := formatTime(since)
-	where := "timestamp >= ?"
-	args := []any{sinceStr}
-	if apiKeyID != "" {
-		where += " AND api_key_id = ?"
-		args = append(args, apiKeyID)
-	}
+	where, args := scope.where("timestamp >= ?", []any{formatTime(since)})
 	err := s.queryRow(ctx, fmt.Sprintf(`
 		SELECT
 			COUNT(*),
@@ -981,22 +992,16 @@ func (s *Store) getMetrics(ctx context.Context, since time.Time, apiKeyID string
 
 // GetProviderMetrics returns per-provider metrics.
 func (s *Store) GetProviderMetrics(ctx context.Context, since time.Time) ([]ProviderMetrics, error) {
-	return s.getProviderMetrics(ctx, since, "")
+	return s.getProviderMetrics(ctx, since, LogScope{})
 }
 
 // GetProviderMetricsForAPIKey returns per-provider metrics only for one key.
 func (s *Store) GetProviderMetricsForAPIKey(ctx context.Context, since time.Time, apiKeyID string) ([]ProviderMetrics, error) {
-	return s.getProviderMetrics(ctx, since, apiKeyID)
+	return s.getProviderMetrics(ctx, since, LogScope{APIKeyID: apiKeyID})
 }
 
-func (s *Store) getProviderMetrics(ctx context.Context, since time.Time, apiKeyID string) ([]ProviderMetrics, error) {
-	sinceStr := formatTime(since)
-	where := "timestamp >= ?"
-	args := []any{sinceStr}
-	if apiKeyID != "" {
-		where += " AND api_key_id = ?"
-		args = append(args, apiKeyID)
-	}
+func (s *Store) getProviderMetrics(ctx context.Context, since time.Time, scope LogScope) ([]ProviderMetrics, error) {
+	where, args := scope.where("timestamp >= ?", []any{formatTime(since)})
 	rows, err := s.query(ctx, fmt.Sprintf(`
 		SELECT COALESCE(provider, ''),
 			COUNT(*),
@@ -1608,11 +1613,23 @@ func (s *Store) ListShadowLogs(ctx context.Context, requestID string) ([]ShadowL
 	return logs, rows.Err()
 }
 
-func (s *Store) listShadowLogsForTrace(ctx context.Context, traceID string) ([]ShadowLog, error) {
+// listShadowLogsForRequests returns the shadow requests of a trace that
+// belong to the given primary requests.
+func (s *Store) listShadowLogsForRequests(ctx context.Context, traceID string, requestIDs []string) ([]ShadowLog, error) {
+	if len(requestIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(requestIDs))
+	args := make([]any, 0, len(requestIDs)+1)
+	args = append(args, traceID)
+	for i, id := range requestIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
 	rows, err := s.query(ctx,
 		`SELECT `+shadowColumns+`
-		FROM shadow_requests WHERE trace_id = ? ORDER BY timestamp ASC`,
-		traceID,
+		FROM shadow_requests WHERE trace_id = ? AND request_id IN (`+strings.Join(placeholders, ",")+`) ORDER BY timestamp ASC`,
+		args...,
 	)
 	if err != nil {
 		return nil, err
@@ -1634,8 +1651,9 @@ func (s *Store) listShadowLogsForTrace(ctx context.Context, traceID string) ([]S
 func (s *Store) InsertFeedback(ctx context.Context, entry Feedback) error {
 	metadata, _ := json.Marshal(entry.Metadata)
 	_, err := s.exec(ctx,
-		`INSERT INTO feedback (id, request_id, trace_id, timestamp, score, rating, comment, user_id, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO feedback (id, request_id, trace_id, timestamp, score, rating, comment, user_id, metadata,
+			workspace_id, organization_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID,
 		entry.RequestID,
 		entry.TraceID,
@@ -1645,16 +1663,21 @@ func (s *Store) InsertFeedback(ctx context.Context, entry Feedback) error {
 		entry.Comment,
 		entry.UserID,
 		string(metadata),
+		entry.WorkspaceID,
+		entry.OrganizationID,
 	)
 	return err
 }
 
 func (s *Store) ListFeedback(ctx context.Context, limit int, requestID, traceID string) ([]Feedback, error) {
+	return s.listFeedback(ctx, limit, requestID, traceID, LogScope{})
+}
+
+func (s *Store) listFeedback(ctx context.Context, limit int, requestID, traceID string, scope LogScope) ([]Feedback, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	where := "1=1"
-	args := []any{}
+	where, args := scope.tenantOnly().where("1=1", nil)
 	if requestID != "" {
 		where += " AND request_id = ?"
 		args = append(args, requestID)
@@ -1667,7 +1690,8 @@ func (s *Store) ListFeedback(ctx context.Context, limit int, requestID, traceID 
 
 	rows, err := s.query(ctx,
 		fmt.Sprintf(`SELECT id, COALESCE(request_id, ''), COALESCE(trace_id, ''), timestamp, COALESCE(score, 0), COALESCE(rating, ''),
-			COALESCE(comment, ''), COALESCE(user_id, ''), COALESCE(metadata, '')
+			COALESCE(comment, ''), COALESCE(user_id, ''), COALESCE(metadata, ''), COALESCE(workspace_id, ''),
+			COALESCE(organization_id, '')
 		FROM feedback WHERE %s ORDER BY timestamp DESC LIMIT ?`, where),
 		args...,
 	)
@@ -1681,7 +1705,8 @@ func (s *Store) ListFeedback(ctx context.Context, limit int, requestID, traceID 
 		var entry Feedback
 		var timestamp string
 		var metadata string
-		if err := rows.Scan(&entry.ID, &entry.RequestID, &entry.TraceID, &timestamp, &entry.Score, &entry.Rating, &entry.Comment, &entry.UserID, &metadata); err != nil {
+		if err := rows.Scan(&entry.ID, &entry.RequestID, &entry.TraceID, &timestamp, &entry.Score, &entry.Rating, &entry.Comment, &entry.UserID, &metadata,
+			&entry.WorkspaceID, &entry.OrganizationID); err != nil {
 			return nil, err
 		}
 		entry.Timestamp = parseTime(timestamp)

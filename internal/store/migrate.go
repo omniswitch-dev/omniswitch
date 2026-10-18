@@ -57,6 +57,12 @@ var schemaIndexes = []schemaIndex{
 	{name: "idx_shadow_request", table: "shadow_requests", columns: "(request_id)"},
 	{name: "idx_feedback_request", table: "feedback", columns: "(request_id)"},
 	{name: "idx_feedback_trace", table: "feedback", columns: "(trace_id)"},
+	// Tenant-scoped dashboard reads filter on the caller's workspace or
+	// organization and order or range on timestamp.
+	{name: "idx_logs_workspace_time", table: "request_logs", columns: "(workspace_id, timestamp)"},
+	{name: "idx_logs_org_time", table: "request_logs", columns: "(organization_id, timestamp)"},
+	{name: "idx_feedback_workspace_time", table: "feedback", columns: "(workspace_id, timestamp)"},
+	{name: "idx_feedback_org_time", table: "feedback", columns: "(organization_id, timestamp)"},
 	{name: "idx_workspaces_org", table: "workspaces", columns: "(organization_id)"},
 	{name: "idx_workspace_members_user", table: "workspace_members", columns: "(user_id)"},
 	{name: "idx_virtual_keys_name", table: "virtual_keys", columns: "(name)"},
