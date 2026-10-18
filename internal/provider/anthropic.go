@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -38,6 +40,9 @@ type anthropicRequest struct {
 	MaxTokens    int                    `json:"max_tokens"`
 	System       string                 `json:"system,omitempty"`
 	Stream       bool                   `json:"stream,omitempty"`
+	Temperature  *float64               `json:"temperature,omitempty"`
+	TopP         *float64               `json:"top_p,omitempty"`
+	StopSeqs     []string               `json:"stop_sequences,omitempty"`
 	Tools        []anthropicTool        `json:"tools,omitempty"`
 	ToolChoice   *anthropicToolChoice   `json:"tool_choice,omitempty"`
 	OutputConfig *anthropicOutputConfig `json:"output_config,omitempty"`
@@ -284,6 +289,19 @@ func toAnthropicRequest(req ChatRequest, stream bool) (anthropicRequest, error) 
 	if req.MaxCompletionTokens != nil {
 		anthReq.MaxTokens = *req.MaxCompletionTokens
 	}
+	if req.Temperature != nil {
+		// Anthropic accepts 0..1; OpenAI accepts 0..2. Clamp instead of
+		// failing so OpenAI-shaped requests (and fallbacks) keep working.
+		temperature := math.Min(math.Max(*req.Temperature, 0), 1)
+		anthReq.Temperature = &temperature
+	}
+	if req.TopP != nil {
+		topP := *req.TopP
+		anthReq.TopP = &topP
+	}
+	if len(req.Stop) > 0 {
+		anthReq.StopSeqs = append([]string(nil), req.Stop...)
+	}
 
 	if req.ResponseFormat != nil {
 		switch req.ResponseFormat.Type {
@@ -345,9 +363,15 @@ func toAnthropicRequest(req ChatRequest, stream bool) (anthropicRequest, error) 
 		anthReq.ToolChoice.DisableParallelToolUse = &disable
 	}
 
+	var system []string
 	for _, msg := range req.Messages {
-		if msg.Role == "system" {
-			anthReq.System = msg.Text()
+		// OpenAI "developer" messages are system instructions for newer
+		// models; Anthropic only has one top-level system prompt, so every
+		// system/developer message is joined into it in order.
+		if msg.Role == "system" || msg.Role == "developer" {
+			if text := msg.Text(); text != "" {
+				system = append(system, text)
+			}
 			continue
 		}
 
@@ -408,6 +432,7 @@ func toAnthropicRequest(req ChatRequest, stream bool) (anthropicRequest, error) 
 			Content: content,
 		})
 	}
+	anthReq.System = strings.Join(system, "\n\n")
 	return anthReq, nil
 }
 
