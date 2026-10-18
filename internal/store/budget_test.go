@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,8 +35,14 @@ func TestDataMigrationSplitsCopiedLifetimeBudget(t *testing.T) {
 
 		// Simulate a database created before the migration existed.
 		mustExec(t, st, "DELETE FROM schema_migrations")
+		logs := captureLog(t)
 		if err := st.migrate(); err != nil {
 			t.Fatalf("migrate() error = %v", err)
+		}
+		// Equal budgets set on purpose look the same, so every changed key
+		// is logged with its old value.
+		if out := logs.String(); !strings.Contains(out, "from 1 API key(s)") || !strings.Contains(out, "copied (10)") || strings.Contains(out, "distinct") {
+			t.Fatalf("migration log = %q, want only the copied key and its old budget", out)
 		}
 		if lifetime, monthly := budgets("copied"); lifetime != 0 || monthly != 10 {
 			t.Fatalf("copied key budgets = %v/%v, want 0/10", lifetime, monthly)
