@@ -53,7 +53,9 @@ Headers:
 
 - `Authorization: Bearer <omniswitch-api-key>` when `OMNISWITCH_AUTH=true`
 - `x-omniswitch-provider`: force a provider or provider alias
-- `x-omniswitch-config`: use a dynamic gateway config by name or ID
+- `x-omniswitch-config`: use a dynamic gateway config by name or ID (create
+  one with [`POST /api/configs`](#post-apiconfigs)); an unknown or disabled
+  config returns `400`
 - `x-omniswitch-shadow-provider`: run a secondary provider asynchronously
 - `x-omniswitch-trace-id`: group calls into a trace
 - `x-omniswitch-session-id`: group calls into an agent session
@@ -125,11 +127,38 @@ Supported A2A methods:
 Task lifecycle methods, streaming, push notifications, and outbound A2A client
 calls are not yet implemented.
 
+## Health Checks
+
+`/healthz` and `/readyz` are served ahead of the authentication, authorization
+and rate-limit middleware, so orchestrators can probe them without a key.
+Both accept `GET` and `HEAD`.
+
+### `GET /healthz`
+
+Liveness. Returns `200 {"status":"ok"}` whenever the process is serving HTTP;
+it never touches the store or providers.
+
+### `GET /readyz`
+
+Readiness. Returns `200 {"status":"ready"}` when the store answers a ping and
+at least one provider is registered (or `OMNISWITCH_ALLOW_NO_PROVIDERS=true`).
+Otherwise returns `503 {"status":"not ready","reasons":[...]}`.
+
 ## Management API
 
 ### `GET /api/health`
 
 Returns health information.
+
+### `GET /api/version`
+
+Returns the build metadata of the running binary:
+
+```json
+{"version": "0.2.0-beta", "commit": "abc1234", "built": "2026-01-01T00:00:00Z"}
+```
+
+Builds without release metadata report `dev`, `none` and `unknown`.
 
 ### `GET /api/logs`
 
@@ -176,6 +205,76 @@ authorization rule names/effects, guardrail rule/webhook names, provider counts,
 route summaries, MCP target posture, and A2A capability flags. It does not
 return bootstrap keys, provider credentials, target headers, webhook URLs,
 provider base URLs, Redis URLs, or policy expressions.
+
+### `GET /api/analytics/cost`
+
+Aggregated spend from the request logs. Query parameters:
+
+- `window`: `1h`, `6h`, `24h` (default), `7d`, or `30d`
+- `groupBy`: `day` (default), `provider`, `model`, `api_key_id`, `session_id`,
+  or `status`; any other value returns `400`
+
+```json
+{"groupBy": "model", "rows": [{"group": "gpt-4o-mini", "request_count": 12, "total_cost": 0.0042, "total_tokens": 9150, "avg_latency_ms": 640.5}]}
+```
+
+Admins and owners see all keys; other roles see only their own key's rows.
+
+### `GET /api/traces/{trace_id}`
+
+Returns everything recorded for one `x-omniswitch-trace-id`:
+`{"trace_id", "logs", "guardrail_events", "shadow_logs", "feedback"}`.
+Returns `404` when the trace does not exist or is not visible to the caller's
+key (non-admin roles see only their own key's requests).
+
+### `GET /api/configs`
+
+Lists stored dynamic gateway configs as `{"configs": [...]}`. Disabled configs
+are included only with `include_disabled=true`. With `id=<id>` or
+`name=<name>`, returns a single enabled config (`404` if it is missing or
+disabled). Requires the `admin` role, because config bodies can contain
+secrets.
+
+### `POST /api/configs`
+
+Creates or replaces a dynamic config that requests can select with the
+`x-omniswitch-config` header. Requires `admin`.
+
+```json
+{
+  "id": "cfg_optional",
+  "name": "cheap-routing",
+  "description": "optional",
+  "format": "yaml",
+  "body": "routes:\n  gpt-4o:\n    provider: groq\n    model: llama-3.3-70b-versatile\n",
+  "enabled": true
+}
+```
+
+`name` and `body` are required. `body` uses the same schema as the gateway
+config file (see [CONFIGURATION.md](CONFIGURATION.md)); `format` is `yaml`
+(default) or `json`. The body is parsed before it is stored, and a parse
+error returns `400`. An omitted `id` is generated; posting an existing `id`
+replaces that record. Returns `201` with the stored record.
+
+### `PATCH /api/configs?id=<id>` (or `?name=<name>`)
+
+Body `{"enabled": true|false}` enables or disables a config. Requires `admin`.
+
+### `DELETE /api/configs?id=<id>` (or `?name=<name>`)
+
+Deletes a config and returns `{"deleted": true}`. Requires `admin`.
+
+### `GET /api/config/raw` and `POST /api/config/raw`
+
+Reads or replaces the gateway config file named by `OMNISWITCH_CONFIG`
+(`404` when no config file is configured). `GET` returns
+`{"path", "format", "body"}`. `POST` takes `{"body": "...", "format": "yaml"}`,
+validates it, writes the file, and returns `{"saved": true, "path": ...}`; the
+running gateway applies the reloadable parts (routes, guardrails, cache,
+shaping limits, shadow provider) within a few seconds; providers, identity and
+MCP targets need a restart. Both methods
+require `admin`.
 
 ### `POST /api/virtual-keys`
 
