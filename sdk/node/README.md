@@ -6,9 +6,9 @@ provider routing, dynamic config, trace, session, and shadow-provider headers.
 
 ## Install
 
-The SDK is not published to npm yet. Do not install a package named
-`omniswitch` from the npm registry: it is not ours. Install it from a checkout
-of this repository or from git:
+The SDK is not published to npm yet. If a package named `omniswitch`
+appears on the npm registry before we publish, it is not ours. Install it
+from a checkout of this repository or from git:
 
 ```bash
 # From a local checkout

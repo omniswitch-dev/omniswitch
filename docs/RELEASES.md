@@ -93,10 +93,10 @@ See [`docs/KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
 ## Publishing the SDKs
 
 The Python and Node.js SDKs are not on PyPI or npm yet, and the READMEs tell
-users to install them from this repository. Nobody else owns the name
-`omniswitch` on PyPI or npm today. The first upload gives the name to the
-uploading account, so publish from an account that the maintainers control,
-with two-factor authentication turned on. Do the steps by hand; no workflow
+users to install them from this repository. In October 2026 nobody owned the
+name `omniswitch` on PyPI or npm (step 1 checks it again). The first upload
+gives the name to the uploading account, so publish from an account that the
+maintainers control, with two-factor authentication turned on. Do the steps by hand; no workflow
 publishes the SDKs.
 
 1. Check that the names are still free. A `404` means that nobody owns the
@@ -142,8 +142,8 @@ publishes the SDKs.
 
 6. Change the install sections of `README.md`, `sdk/python/README.md` and
    `sdk/node/README.md` to `pip install omniswitch` and
-   `npm install omniswitch openai`, and remove the warning about the PyPI
-   name.
+   `npm install omniswitch openai`, and remove the warnings about the PyPI
+   and npm names.
 
 ## Rollback procedure
 

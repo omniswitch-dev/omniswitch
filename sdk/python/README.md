@@ -7,8 +7,9 @@ sessions, provider overrides, and shadow traffic.
 
 ## Install
 
-The SDK is not published to PyPI yet. Do not install a package named
-`omniswitch` from PyPI: it is not ours. Install from the repository instead:
+The SDK is not published to PyPI yet. If a package named `omniswitch`
+appears on PyPI before we publish, it is not ours. Install from the
+repository instead:
 
 ```bash
 pip install "git+https://github.com/omniswitch-dev/omniswitch#subdirectory=sdk/python"
