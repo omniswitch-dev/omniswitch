@@ -41,6 +41,12 @@ func NewCircuitBreaker(threshold int, cooldown time.Duration) *CircuitBreaker {
 	}
 }
 
+// Settings returns the failure threshold and the cooldown of the breaker.
+// They do not change after NewCircuitBreaker.
+func (b *CircuitBreaker) Settings() (threshold int, cooldown time.Duration) {
+	return b.threshold, b.cooldown
+}
+
 func (b *CircuitBreaker) Allow(providerName string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()

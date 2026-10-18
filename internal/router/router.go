@@ -68,6 +68,14 @@ type Router struct {
 	mu         sync.Mutex
 	rrCounters map[string]int // round-robin counters per model
 	breakers   *CircuitBreaker
+	// breakerSource, when set, is the router whose current circuit breaker
+	// this router uses. Clones made by CloneWithRoutes set it to the base
+	// router, so they share open circuits with it and follow a breaker that
+	// is swapped later.
+	breakerSource *Router
+	// generation counts changes of the route table and the breaker. Callers
+	// that cache derived routers compare it to know when to rebuild them.
+	generation atomic.Uint64
 	latency    *latencyTracker
 	// conditions caches compiled CEL programs for conditional variants,
 	// keyed by trimmed expression. It is rebuilt whenever the route table
@@ -131,6 +139,26 @@ func (r *Router) SetCircuitBreaker(breaker *CircuitBreaker) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.breakers = breaker
+	r.breakerSource = nil
+	r.generation.Add(1)
+}
+
+// CircuitBreaker returns the breaker that the router uses now. For a clone
+// made by CloneWithRoutes it is the current breaker of the base router.
+func (r *Router) CircuitBreaker() *CircuitBreaker {
+	r.mu.Lock()
+	breaker, source := r.breakers, r.breakerSource
+	r.mu.Unlock()
+	if source != nil {
+		return source.CircuitBreaker()
+	}
+	return breaker
+}
+
+// Generation returns a counter that changes whenever the route table or the
+// circuit breaker of r is replaced.
+func (r *Router) Generation() uint64 {
+	return r.generation.Load()
 }
 
 // SetRoute configures a custom route for a specific model.
@@ -139,6 +167,7 @@ func (r *Router) SetRoute(model string, route Route) {
 	defer r.mu.Unlock()
 	r.routes[model] = route
 	compileRouteConditions(r.conditions, map[string]Route{model: route})
+	r.generation.Add(1)
 }
 
 // ReplaceRoutes atomically swaps the full route table, removing routes that
@@ -152,6 +181,7 @@ func (r *Router) ReplaceRoutes(routes map[string]Route) {
 	}
 	r.conditions = make(map[string]compiledCondition)
 	compileRouteConditions(r.conditions, r.routes)
+	r.generation.Add(1)
 }
 
 // RouteFor reports whether a logical model has a configured route.
@@ -163,12 +193,19 @@ func (r *Router) RouteFor(model string) (Route, bool) {
 }
 
 // CloneWithRoutes returns a request-scoped router that inherits the registry,
-// base routes, and circuit breaker, then overlays the supplied routes.
+// base routes, and circuit breaker, then overlays the supplied routes. The
+// clone always uses the current breaker of r, so a breaker swapped on r
+// later applies to the clone too. Routes are copied: rebuild the clone when
+// r.Generation changes to pick up new base routes.
 func (r *Router) CloneWithRoutes(overrides map[string]Route) *Router {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cloned := New(r.registry)
 	cloned.breakers = r.breakers
+	cloned.breakerSource = r
+	if r.breakerSource != nil {
+		cloned.breakerSource = r.breakerSource
+	}
 	cloned.latency = r.latency
 	for model, route := range r.routes {
 		cloned.routes[model] = route
@@ -192,6 +229,7 @@ func (r *Router) CloneForShadow(breaker *CircuitBreaker) *Router {
 	// can be set without taking its lock.
 	cloned := r.CloneWithRoutes(nil)
 	cloned.breakers = breaker
+	cloned.breakerSource = nil
 	cloned.latency = newLatencyTracker()
 	return cloned
 }
@@ -903,9 +941,7 @@ func randomInt(max int) int {
 }
 
 func (r *Router) allowProvider(providerName string) bool {
-	r.mu.Lock()
-	breaker := r.breakers
-	r.mu.Unlock()
+	breaker := r.CircuitBreaker()
 	if breaker == nil {
 		return true
 	}
@@ -913,18 +949,14 @@ func (r *Router) allowProvider(providerName string) bool {
 }
 
 func (r *Router) recordSuccess(providerName string) {
-	r.mu.Lock()
-	breaker := r.breakers
-	r.mu.Unlock()
+	breaker := r.CircuitBreaker()
 	if breaker != nil {
 		breaker.RecordSuccess(providerName)
 	}
 }
 
 func (r *Router) recordFailure(providerName string) {
-	r.mu.Lock()
-	breaker := r.breakers
-	r.mu.Unlock()
+	breaker := r.CircuitBreaker()
 	if breaker != nil {
 		breaker.RecordFailure(providerName)
 	}
