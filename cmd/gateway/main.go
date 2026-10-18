@@ -138,6 +138,8 @@ func runServe() {
 	gw.SetMaxRequestBytes(settings.maxRequestBytes)
 	gw.SetShadowProvider(settings.shadowProvider)
 	gw.SetAlerts(settings.alerts)
+	gw.SetBudgetFailOpen(settings.budgetFailOpen)
+	gw.SetBudgetRefreshInterval(settings.budgetRefreshInterval)
 	if settings.configPath != "" {
 		startConfigReloader(settings.configPath, rtr, gw, settings)
 		log.Printf("config hot-reload enabled for %s", settings.configPath)

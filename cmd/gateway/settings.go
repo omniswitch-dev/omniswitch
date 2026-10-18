@@ -41,6 +41,8 @@ type runtimeSettings struct {
 	rateLimitRedisURL      string
 	rateLimitPrefix        string
 	rateLimitFailOpen      bool
+	budgetFailOpen         bool
+	budgetRefreshInterval  time.Duration
 	guardrailStreamBuffer  bool
 	maxRequestBytes        int64
 	readHeaderTimeout      time.Duration
@@ -163,6 +165,7 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 		rateLimitRequests:      120,
 		rateLimitWindow:        time.Minute,
 		rateLimitPrefix:        "omniswitch:ratelimit",
+		budgetRefreshInterval:  5 * time.Second,
 		guardrailStreamBuffer:  true,
 		maxRequestBytes:        10 << 20,
 		readHeaderTimeout:      5 * time.Second,
@@ -215,6 +218,8 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 	settings.rateLimitRedisURL = env("OMNISWITCH_RATE_LIMIT_REDIS_URL", settings.rateLimitRedisURL)
 	settings.rateLimitPrefix = env("OMNISWITCH_RATE_LIMIT_PREFIX", settings.rateLimitPrefix)
 	settings.rateLimitFailOpen = e.bool("OMNISWITCH_RATE_LIMIT_FAIL_OPEN", settings.rateLimitFailOpen)
+	settings.budgetFailOpen = e.bool("OMNISWITCH_BUDGET_FAIL_OPEN", settings.budgetFailOpen)
+	settings.budgetRefreshInterval = e.budgetRefreshInterval("OMNISWITCH_BUDGET_REFRESH_INTERVAL", settings.budgetRefreshInterval)
 	if value := strings.TrimSpace(os.Getenv("OMNISWITCH_CORS_ORIGINS")); value != "" {
 		settings.corsOrigins = parseCSV(value)
 	}
@@ -371,6 +376,12 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 	}
 	if cfg.RateLimit.FailOpen != nil {
 		settings.rateLimitFailOpen = *cfg.RateLimit.FailOpen
+	}
+	if cfg.Gateway.BudgetFailOpen != nil {
+		settings.budgetFailOpen = *cfg.Gateway.BudgetFailOpen
+	}
+	if cfg.Gateway.BudgetRefreshInterval != nil {
+		settings.budgetRefreshInterval = cfg.Gateway.BudgetRefreshInterval.Duration
 	}
 	if cfg.Guardrails.StreamBuffer != nil {
 		settings.guardrailStreamBuffer = *cfg.Guardrails.StreamBuffer
@@ -638,6 +649,16 @@ func applyHotConfig(cfg gatewayconfig.Config, rtr *router.Router, gw *gateway.Ha
 	} else {
 		gw.SetAlerts(base.alerts)
 	}
+	if cfg.Gateway.BudgetFailOpen != nil {
+		gw.SetBudgetFailOpen(*cfg.Gateway.BudgetFailOpen)
+	} else {
+		gw.SetBudgetFailOpen(base.budgetFailOpen)
+	}
+	if cfg.Gateway.BudgetRefreshInterval != nil {
+		gw.SetBudgetRefreshInterval(cfg.Gateway.BudgetRefreshInterval.Duration)
+	} else {
+		gw.SetBudgetRefreshInterval(base.budgetRefreshInterval)
+	}
 	failures, cooldown := base.circuitBreakerFailures, base.circuitBreakerCooldown
 	if cfg.Gateway.CircuitBreakerFailures != nil {
 		failures = *cfg.Gateway.CircuitBreakerFailures
@@ -768,6 +789,21 @@ func (e *envReader) bool(key string, fallback bool) bool {
 	parsed, ok := parseBoolValue(value)
 	if !ok {
 		e.fail(key, value, "true/false, 1/0, yes/no or on/off")
+		return fallback
+	}
+	return parsed
+}
+
+// budgetRefreshInterval reads a budget refresh interval, which must be
+// between 100ms and 10m like gateway.budget_refresh_interval.
+func (e *envReader) budgetRefreshInterval(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < 100*time.Millisecond || parsed > 10*time.Minute {
+		e.fail(key, value, "a Go duration between 100ms and 10m such as 5s")
 		return fallback
 	}
 	return parsed

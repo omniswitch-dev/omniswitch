@@ -105,6 +105,14 @@ type Gateway struct {
 	IdleTimeout            *Duration    `json:"idle_timeout,omitempty" yaml:"idle_timeout,omitempty"`
 	ShadowProvider         string       `json:"shadow_provider,omitempty" yaml:"shadow_provider,omitempty"`
 	Alerts                 *AlertConfig `json:"alerts,omitempty" yaml:"alerts,omitempty"`
+	// BudgetFailOpen lets requests of a key with a budget through when its
+	// budget state cannot be read. The default (false) rejects them with
+	// HTTP 503.
+	BudgetFailOpen *bool `json:"budget_fail_open,omitempty" yaml:"budget_fail_open,omitempty"`
+	// BudgetRefreshInterval is how often a key's committed usage is re-read
+	// from the store (default 5s). Spend from other replicas becomes
+	// visible within it.
+	BudgetRefreshInterval *Duration `json:"budget_refresh_interval,omitempty" yaml:"budget_refresh_interval,omitempty"`
 }
 
 type AlertConfig struct {
@@ -285,6 +293,11 @@ func Validate(cfg Config) error {
 	}
 	if cfg.Gateway.CircuitBreakerCooldown != nil && cfg.Gateway.CircuitBreakerCooldown.Duration <= 0 {
 		return fmt.Errorf("gateway.circuit_breaker_cooldown must be positive")
+	}
+	if cfg.Gateway.BudgetRefreshInterval != nil {
+		if interval := cfg.Gateway.BudgetRefreshInterval.Duration; interval < 100*time.Millisecond || interval > 10*time.Minute {
+			return fmt.Errorf("gateway.budget_refresh_interval must be between 100ms and 10m")
+		}
 	}
 	if cfg.Gateway.MaxRequestBytes < 0 {
 		return fmt.Errorf("gateway.max_request_bytes must be non-negative")
