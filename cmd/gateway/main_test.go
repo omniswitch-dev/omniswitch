@@ -417,3 +417,66 @@ func clearGatewayEnv(t *testing.T) {
 		t.Setenv(key, "")
 	}
 }
+
+func TestEnsureBootstrapKeyDoesNotResurrectOrReset(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	settings := runtimeSettings{authEnabled: true, bootstrapAPIKey: "sk-sentinel-bootstrap-secret"}
+	if err := ensureBootstrapKey(ctx, st, settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteAPIKey(ctx, bootstrapKeyID); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureBootstrapKey(ctx, st, settings); err != nil {
+		t.Fatal(err)
+	}
+	key, err := st.GetAPIKeyByID(ctx, bootstrapKeyID)
+	if err != nil || key.Enabled {
+		t.Fatalf("bootstrap key after restart = %+v, %v; want still disabled", key, err)
+	}
+}
+
+func TestEnsureBootstrapKeyRotatesHashAndKeepsState(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if err := ensureBootstrapKey(ctx, st, runtimeSettings{authEnabled: true, bootstrapAPIKey: "sk-sentinel-first-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureBootstrapKey(ctx, st, runtimeSettings{authEnabled: true, bootstrapAPIKey: "sk-sentinel-second-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	key, err := st.GetAPIKeyByHash(ctx, sha256Hex("sk-sentinel-second-secret"))
+	if err != nil || key.ID != bootstrapKeyID || !key.Enabled {
+		t.Fatalf("rotated key = %+v, %v", key, err)
+	}
+	if _, err := st.GetAPIKeyByHash(ctx, sha256Hex("sk-sentinel-first-secret")); err == nil {
+		t.Fatal("old bootstrap secret still valid")
+	}
+}
+
+func TestEnsureBootstrapKeySkipsWhenAdminExists(t *testing.T) {
+	st, err := store.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if err := st.InsertAPIKey(ctx, store.APIKey{ID: "key_admin", Name: "admin", KeyHash: "h", KeyPrefix: "p", Role: "admin", Enabled: true, RateLimit: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureBootstrapKey(ctx, st, runtimeSettings{authEnabled: true, bootstrapAPIKey: "sk-sentinel-bootstrap-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetAPIKeyByID(ctx, bootstrapKeyID); err == nil {
+		t.Fatal("bootstrap key created although an admin key exists")
+	}
+}
