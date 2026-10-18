@@ -1,16 +1,26 @@
 services:
   gateway:
-    build: .
+    build:
+      context: .
+      # Optional build metadata for `omniswitch version`, for example:
+      #   OMNISWITCH_BUILD_COMMIT=$(git rev-parse --short HEAD) docker compose build
+      args:
+        VERSION: ${OMNISWITCH_BUILD_VERSION:-dev}
+        COMMIT: ${OMNISWITCH_BUILD_COMMIT:-none}
+        DATE: ${OMNISWITCH_BUILD_DATE:-unknown}
+    restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
       OMNISWITCH_CONFIG: examples/gateway-config.yaml
       OMNISWITCH_DATA: /data
       OMNISWITCH_AUTH: "true"
-      # Required when OMNISWITCH_AUTH=true: the initial admin API key clients
-      # use as `Authorization: Bearer <key>`. Set this in a .env file or your
-      # shell before running `docker compose up` — do not commit a real key.
-      OMNISWITCH_BOOTSTRAP_API_KEY: ${OMNISWITCH_BOOTSTRAP_API_KEY:-}
+      # Required because OMNISWITCH_AUTH=true: the initial admin API key clients
+      # use as `Authorization: Bearer <key>`. Set it in your shell or an
+      # uncommitted .env file before `docker compose up`, for example
+      # `export OMNISWITCH_BOOTSTRAP_API_KEY=$(openssl rand -hex 32)`.
+      # Compose refuses to start without it. Do not commit a real key.
+      OMNISWITCH_BOOTSTRAP_API_KEY: ${OMNISWITCH_BOOTSTRAP_API_KEY:?Set OMNISWITCH_BOOTSTRAP_API_KEY (for example with openssl rand -hex 32)}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
