@@ -264,6 +264,13 @@ func foldName(name string) string {
 	return strings.ToLower(strings.ToUpper(name))
 }
 
+// FoldName returns the case-folded form of an argument or member name, the
+// same folding the adapter uses for its own case-insensitive lookups. The
+// policy engine uses it so args.<name> lookups agree with the adapter.
+func FoldName(name string) string {
+	return foldName(name)
+}
+
 // CheckDuplicateMembers walks a JSON document and fails when an object (at
 // any depth) has two member names that are equal under Unicode case folding.
 // Decoders disagree on which of such members wins (encoding/json struct

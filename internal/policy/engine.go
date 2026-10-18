@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -18,7 +17,6 @@ import (
 	"github.com/google/cel-go/cel"
 	celast "github.com/google/cel-go/common/ast"
 	"github.com/google/cel-go/common/operators"
-	"github.com/google/cel-go/common/types"
 
 	"github.com/omniswitch-dev/omniswitch/internal/adapter/mcp"
 	"github.com/omniswitch-dev/omniswitch/internal/model"
@@ -171,6 +169,9 @@ func (e *CELEngine) Evaluate(ctx context.Context, req model.ToolRequest) (model.
 		return decision, errors.New(decision.Reason)
 	}
 
+	// Build the activation once: converting args is not free and the
+	// values are read-only during evaluation.
+	vars := activation(req)
 	traces := []model.RuleTrace{}
 	for _, compiled := range e.rules {
 		select {
@@ -185,7 +186,7 @@ func (e *CELEngine) Evaluate(ctx context.Context, req model.ToolRequest) (model.
 		default:
 		}
 
-		output, _, err := compiled.program.Eval(activation(req))
+		output, _, err := compiled.program.Eval(vars)
 		if err != nil {
 			traces = append(traces, compiled.rule.trace(false))
 			decision := finish(model.Decision{
@@ -457,43 +458,7 @@ func activation(req model.ToolRequest) map[string]any {
 			"id": req.Session.ID,
 		},
 		"metadata": metadata,
-		"args":     celArgs(req.Args),
-	}
-}
-
-// celArgs converts decoded JSON arguments into values the CEL runtime
-// understands. json.Number values (from decoders using UseNumber) become
-// int64 when they are exact integers and float64 otherwise.
-func celArgs(args map[string]any) map[string]any {
-	out := make(map[string]any, len(args))
-	for key, value := range args {
-		out[key] = celValue(value)
-	}
-	return out
-}
-
-func celValue(value any) any {
-	switch typed := value.(type) {
-	case json.Number:
-		if integer, err := typed.Int64(); err == nil {
-			return integer
-		}
-		if float, err := typed.Float64(); err == nil {
-			return float
-		}
-		return typed.String()
-	case map[string]any:
-		return celArgs(typed)
-	case []any:
-		out := make([]any, len(typed))
-		for index, item := range typed {
-			out[index] = celValue(item)
-		}
-		return out
-	case nil:
-		return types.NullValue
-	default:
-		return typed
+		"args":     argsValue(req.Args),
 	}
 }
 
