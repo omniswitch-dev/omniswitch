@@ -154,18 +154,41 @@ A2A clients with `Cache-Control` and `ETag` validators.
 
 ### `POST /a2a`
 
-Accepts A2A v1 JSON-RPC requests. `SendMessage` supports direct text message
-responses by converting message text into the same chat-completions path used
-by OpenAI-compatible clients. Provide the model with `metadata.model` or the
-`x-omniswitch-model` header.
+Accepts A2A v1 JSON-RPC requests. A message's text parts go through the same
+chat-completions path that OpenAI-compatible clients use. Provide the model
+with `metadata.model` or the `x-omniswitch-model` header.
 
 Supported A2A methods:
 
-- `SendMessage`
+- `SendMessage` (alias `message/send`): runs the inference and returns the
+  completed task, with the reply as an artifact.
+- `SendMessageStream` (alias `message/stream`): returns SSE frames, each
+  `data: <JSON-RPC response>`. The first frame is a `status-update` with the
+  `working` state. After the inference completes, the stream sends an
+  `artifact-update` with the whole reply and a final `status-update`. The
+  stream does not send tokens incrementally.
+- `GetTask` (alias `tasks/get`): returns a task.
+- `CancelTask` (alias `tasks/cancel`): cancels a working task and stops its
+  inference. A finished task returns error `-32002`.
 - `GetExtendedAgentCard`
 
-Task lifecycle methods, streaming, push notifications, and outbound A2A client
-calls are not yet implemented.
+Each task belongs to the API key and workspace that created it. A task that
+is unknown, expired or owned by another caller returns error `-32001` (task
+not found). A request with an invalid JSON-RPC envelope, duplicate members or
+members that differ only in case returns `-32600`.
+
+The gateway keeps tasks in memory for 1 hour, at most 10,000 in total and at
+most 1,000 for each owner. When an owner reaches its limit, the gateway
+removes that owner's oldest task, finished tasks first. When the total limit
+is reached, the owner with the most tasks loses one. A removed working task
+is canceled. Tasks are not shared between replicas and do not survive a
+restart.
+
+When authorization rules are configured, the gateway reads at most 1 MiB of
+a `POST /a2a` or `POST /v1/*` body to evaluate them. A larger body gets HTTP
+403 `invalid request body for authorization policy`.
+
+Push notifications and outbound A2A client calls are not implemented.
 
 ## Health Checks
 
