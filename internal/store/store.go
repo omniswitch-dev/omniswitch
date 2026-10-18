@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 	"github.com/omniswitch-dev/omniswitch/internal/model"
 	"github.com/omniswitch-dev/omniswitch/internal/provider"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
@@ -623,8 +625,32 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migration failed: %w", err)
 		}
 	}
+	if err := optionalIndex(ctx, tx, "idx_prompts_name_version",
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_prompts_name_version ON prompts(name, version)`); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("migration failed: commit: %w", err)
+	}
+	return nil
+}
+
+// optionalIndex creates an index that existing data may prevent, such as a
+// unique index over rows that already hold duplicates. A failure is logged
+// and the migration continues: startup must not fail on old data. The
+// savepoint keeps a PostgreSQL error from aborting the whole transaction.
+func optionalIndex(ctx context.Context, tx *sql.Tx, name, stmt string) error {
+	if _, err := tx.ExecContext(ctx, "SAVEPOINT optional_index"); err != nil {
+		return fmt.Errorf("migration failed: savepoint: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, stmt); err != nil {
+		log.Printf("store: warning: could not create index %s, continuing without it: %v", name, err)
+		if _, rbErr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT optional_index"); rbErr != nil {
+			return fmt.Errorf("migration failed: rollback to savepoint: %w", rbErr)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT optional_index"); err != nil {
+		return fmt.Errorf("migration failed: release savepoint: %w", err)
 	}
 	return nil
 }
@@ -1251,6 +1277,76 @@ func (s *Store) ListPromptVersions(ctx context.Context, name string) ([]Prompt, 
 	return prompts, rows.Err()
 }
 
+// maxPromptVersionAttempts bounds CreatePromptVersion retries when a
+// concurrent create for the same name wins the race for a version number.
+const maxPromptVersionAttempts = 5
+
+// CreatePromptVersion stores p as the next version of p.Name and returns it
+// with Version set. The version is computed inside the INSERT, so two
+// concurrent creates cannot both read the same MAX(version) and store a
+// duplicate. On PostgreSQL a per-name advisory lock serializes creates for
+// one name; on SQLite the single writer connection does. If the unique
+// (name, version) index rejects the row anyway, the insert is retried.
+func (s *Store) CreatePromptVersion(ctx context.Context, p Prompt) (Prompt, error) {
+	vars, _ := json.Marshal(p.Variables)
+	meta, _ := json.Marshal(p.Metadata)
+	query := `INSERT INTO prompts (id, name, version, template, variables, created_at, updated_at, metadata)
+		SELECT CAST(? AS TEXT), CAST(? AS TEXT), COALESCE(MAX(version), 0) + 1, CAST(? AS TEXT), CAST(? AS TEXT),
+			CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT)
+		FROM prompts WHERE name = ?
+		RETURNING version`
+	if s.pg {
+		query = rewriteSQL(query)
+	}
+	args := []any{p.ID, p.Name, p.Template, string(vars), formatTime(p.CreatedAt), formatTime(p.UpdatedAt), string(meta), p.Name}
+	var lastErr error
+	for attempt := 0; attempt < maxPromptVersionAttempts; attempt++ {
+		version, err := s.insertPromptVersion(ctx, query, p.Name, args)
+		if err == nil {
+			p.Version = version
+			return p, nil
+		}
+		if !isUniqueViolation(err) {
+			return p, err
+		}
+		lastErr = err
+	}
+	return p, fmt.Errorf("create prompt version: %w", lastErr)
+}
+
+func (s *Store) insertPromptVersion(ctx context.Context, query, name string, args []any) (int, error) {
+	tx, err := s.wdb.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if s.pg {
+		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", "omniswitch.prompt:"+name); err != nil {
+			return 0, err
+		}
+	}
+	var version int
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&version); err != nil {
+		return 0, err
+	}
+	return version, tx.Commit()
+}
+
+// isUniqueViolation reports whether err is a unique-constraint failure on
+// either backend.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
+
+// NextPromptVersion returns MAX(version)+1 for name. It is not safe for
+// concurrent creates; use CreatePromptVersion to store a new version.
 func (s *Store) NextPromptVersion(ctx context.Context, name string) (int, error) {
 	var latest int
 	err := s.queryRow(ctx, "SELECT COALESCE(MAX(version), 0) FROM prompts WHERE name = ?", name).Scan(&latest)
