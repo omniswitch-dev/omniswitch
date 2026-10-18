@@ -2,14 +2,17 @@ package prompt
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/omniswitch-dev/omniswitch/internal/gateway"
 	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
@@ -27,12 +30,16 @@ func New(st *store.Store) *Handler {
 type CreatePromptRequest struct {
 	Name     string `json:"name"`
 	Template string `json:"template"`
+	// WorkspaceID selects the prompt namespace; see resolveWorkspace.
+	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
 // RenderRequest is the request body for rendering a prompt template.
 type RenderRequest struct {
 	PromptID  string            `json:"prompt_id"`
 	Variables map[string]string `json:"variables"`
+	// WorkspaceID selects the prompt namespace; see resolveWorkspace.
+	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
 // CreatePrompt handles POST /api/prompts.
@@ -46,17 +53,22 @@ func (h *Handler) CreatePrompt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name and template are required")
 		return
 	}
+	workspaceID, ok := h.resolveWorkspace(w, r, req.WorkspaceID)
+	if !ok {
+		return
+	}
 
 	now := time.Now().UTC()
 	// CreatePromptVersion picks the version inside the INSERT, so two
 	// concurrent creates for one name cannot get the same version.
 	p, err := h.store.CreatePromptVersion(r.Context(), store.Prompt{
-		ID:        newID("prompt"),
-		Name:      req.Name,
-		Template:  req.Template,
-		Variables: extractVariables(req.Template),
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:          newID("prompt"),
+		WorkspaceID: workspaceID,
+		Name:        req.Name,
+		Template:    req.Template,
+		Variables:   extractVariables(req.Template),
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -65,9 +77,13 @@ func (h *Handler) CreatePrompt(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, p)
 }
 
-// ListPrompts handles GET /api/prompts.
+// ListPrompts handles GET /api/prompts[?workspace_id=<id>].
 func (h *Handler) ListPrompts(w http.ResponseWriter, r *http.Request) {
-	prompts, err := h.store.ListPrompts(r.Context())
+	workspaceID, ok := h.resolveWorkspace(w, r, r.URL.Query().Get("workspace_id"))
+	if !ok {
+		return
+	}
+	prompts, err := h.store.ListWorkspacePrompts(r.Context(), workspaceID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -78,14 +94,19 @@ func (h *Handler) ListPrompts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"prompts": prompts})
 }
 
-// ListPromptVersions handles GET /api/prompts/versions?name=<prompt-name>.
+// ListPromptVersions handles GET
+// /api/prompts/versions?name=<prompt-name>[&workspace_id=<id>].
 func (h *Handler) ListPromptVersions(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	prompts, err := h.store.ListPromptVersions(r.Context(), name)
+	workspaceID, ok := h.resolveWorkspace(w, r, r.URL.Query().Get("workspace_id"))
+	if !ok {
+		return
+	}
+	prompts, err := h.store.ListWorkspacePromptVersions(r.Context(), workspaceID, name)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -127,7 +148,19 @@ func (h *Handler) RenderPrompt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	p, err := h.store.GetPrompt(r.Context(), req.PromptID)
+	var p store.Prompt
+	var err error
+	if gateway.ScopeFromContext(r.Context()).Global() && req.WorkspaceID == "" {
+		// Prompt IDs are unique across namespaces, so a global caller
+		// renders any prompt by ID, as before.
+		p, err = h.store.GetPrompt(r.Context(), req.PromptID)
+	} else {
+		workspaceID, ok := h.resolveWorkspace(w, r, req.WorkspaceID)
+		if !ok {
+			return
+		}
+		p, err = h.store.GetWorkspacePrompt(r.Context(), workspaceID, req.PromptID)
+	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, "prompt not found")
 		return
@@ -139,6 +172,46 @@ func (h *Handler) RenderPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"rendered": rendered})
+}
+
+// resolveWorkspace returns the prompt namespace for a request that asked
+// for requested (empty when the request named none). Prompts belong to one
+// workspace (finding SEC-3):
+//   - A global caller works in the global namespace ("") by default and
+//     may name any workspace.
+//   - A workspace-scoped caller always works in its own workspace; naming
+//     another workspace gets 404.
+//   - An organization-scoped caller must name a workspace of its
+//     organization; another workspace gets 404.
+//
+// It writes the error response and returns false when the request is not
+// allowed.
+func (h *Handler) resolveWorkspace(w http.ResponseWriter, r *http.Request, requested string) (string, bool) {
+	scope := gateway.ScopeFromContext(r.Context())
+	requested = strings.TrimSpace(requested)
+	switch {
+	case scope.Global():
+		return requested, true
+	case scope.WorkspaceID != "":
+		if requested != "" && requested != scope.WorkspaceID {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return "", false
+		}
+		return scope.WorkspaceID, true
+	case requested == "":
+		writeError(w, http.StatusBadRequest, "workspace_id is required: prompts belong to a workspace of your organization")
+		return "", false
+	}
+	workspace, err := h.store.GetWorkspaceByID(r.Context(), requested)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return "", false
+	}
+	if err != nil || !scope.Allows(workspace.ID, workspace.OrganizationID) {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return "", false
+	}
+	return workspace.ID, true
 }
 
 // renderTemplate substitutes {{name}} placeholders in a single pass over the
