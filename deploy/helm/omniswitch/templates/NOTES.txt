@@ -26,8 +26,9 @@ before sending production traffic.
 {{- if or .Values.database.url .Values.database.existingSecret }}
 Postgres is configured through Secret {{ include "omniswitch.databaseSecretName" . }}.
 Gateway persistence settings are ignored; no SQLite PVC is created or mounted.
-Existing SQLite data is NOT migrated to Postgres. The semantic cache remains
-local and ephemeral; configure shared Redis for cross-replica rate limits.
+Existing SQLite data is NOT migrated to Postgres. Exact and semantic cache
+entries are stored in Postgres and shared by all replicas; configure shared
+Redis for cross-replica rate limits.
 {{- else }}
 SQLite is configured. Keep replicaCount=1 and back up the data volume.
 {{- end }}
