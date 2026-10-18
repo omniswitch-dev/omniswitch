@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/common/types"
 
 	"github.com/omniswitch-dev/omniswitch/internal/model"
 	"github.com/omniswitch-dev/omniswitch/internal/spec"
@@ -223,6 +225,10 @@ func newEnvironment() (*cel.Env, error) {
 		cel.Variable("tool", stringMap),
 		cel.Variable("action", stringMap),
 		cel.Variable("resource", stringMap),
+		cel.Variable("target", stringMap),
+		cel.Variable("session", stringMap),
+		cel.Variable("metadata", stringMap),
+		cel.Variable("args", cel.MapType(cel.StringType, cel.DynType)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create CEL environment: %w", err)
@@ -319,6 +325,10 @@ func newDecisionID() string {
 }
 
 func activation(req model.ToolRequest) map[string]any {
+	metadata := make(map[string]string, len(req.Metadata))
+	for key, value := range req.Metadata {
+		metadata[key] = value
+	}
 	return map[string]any{
 		"agent": map[string]string{
 			"id":         req.Agent.ID,
@@ -326,16 +336,62 @@ func activation(req model.ToolRequest) map[string]any {
 			"role":       req.Agent.Role,
 		},
 		"tool": map[string]string{
-			"name": req.Tool.Name,
+			"name":      req.Tool.Name,
+			"full_name": req.Tool.FullName,
 		},
 		"action": map[string]string{
-			"name": req.Action.Name,
+			"name":      req.Action.Name,
+			"operation": req.Action.Operation,
 		},
 		"resource": map[string]string{
 			"type":        req.Resource.Type,
 			"name":        req.Resource.Name,
 			"environment": req.Resource.Environment,
 		},
+		"target": map[string]string{
+			"name": req.Target.Name,
+		},
+		"session": map[string]string{
+			"id": req.Session.ID,
+		},
+		"metadata": metadata,
+		"args":     celArgs(req.Args),
+	}
+}
+
+// celArgs converts decoded JSON arguments into values the CEL runtime
+// understands. json.Number values (from decoders using UseNumber) become
+// int64 when they are exact integers and float64 otherwise.
+func celArgs(args map[string]any) map[string]any {
+	out := make(map[string]any, len(args))
+	for key, value := range args {
+		out[key] = celValue(value)
+	}
+	return out
+}
+
+func celValue(value any) any {
+	switch typed := value.(type) {
+	case json.Number:
+		if integer, err := typed.Int64(); err == nil {
+			return integer
+		}
+		if float, err := typed.Float64(); err == nil {
+			return float
+		}
+		return typed.String()
+	case map[string]any:
+		return celArgs(typed)
+	case []any:
+		out := make([]any, len(typed))
+		for index, item := range typed {
+			out[index] = celValue(item)
+		}
+		return out
+	case nil:
+		return types.NullValue
+	default:
+		return typed
 	}
 }
 
@@ -351,6 +407,8 @@ func renderReason(rule Rule, req model.ToolRequest) string {
 		"{{resource.name}}":        req.Resource.Name,
 		"{{resource.environment}}": req.Resource.Environment,
 		"{{session.id}}":           req.Session.ID,
+		"{{target.name}}":          req.Target.Name,
+		"{{action.operation}}":     req.Action.Operation,
 	}
 	for old, replacement := range replacements {
 		reason = strings.ReplaceAll(reason, old, replacement)

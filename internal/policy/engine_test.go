@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,6 +119,63 @@ resource.environment == "production"`,
 			}
 			if strings.TrimSpace(rule.Expression) != tt.wantExpr {
 				t.Fatalf("Expression = %q, want %q", rule.Expression, tt.wantExpr)
+			}
+		})
+	}
+}
+
+func TestEvaluateExposesTargetSessionMetadataAndArgs(t *testing.T) {
+	req := model.ToolRequest{
+		Tool:     model.Tool{Name: "delete_repo", FullName: "delete_repo"},
+		Action:   model.Action{Name: "delete", Operation: "delete_repo"},
+		Target:   model.Target{Name: "github"},
+		Session:  model.Session{ID: "sess-1"},
+		Metadata: map[string]string{"owner": "platform"},
+		Args: map[string]any{
+			"repo":  "acme",
+			"count": json.Number("12345678901234567"),
+			"ratio": json.Number("0.5"),
+			"tags":  []any{"a", "b"},
+			"opts":  map[string]any{"force": true},
+			"none":  nil,
+		},
+	}
+	tests := []struct {
+		name       string
+		expression string
+		wantDeny   bool
+		wantErr    bool
+	}{
+		{name: "target", expression: `target.name == "github"`, wantDeny: true},
+		{name: "session", expression: `session.id == "sess-1"`, wantDeny: true},
+		{name: "metadata", expression: `metadata.owner == "platform"`, wantDeny: true},
+		{name: "action operation", expression: `action.operation == "delete_repo"`, wantDeny: true},
+		{name: "args string", expression: `args.repo == "acme"`, wantDeny: true},
+		{name: "args exact integer", expression: `args.count == 12345678901234567`, wantDeny: true},
+		{name: "args float", expression: `args.ratio == 0.5`, wantDeny: true},
+		{name: "args list", expression: `"b" in args.tags`, wantDeny: true},
+		{name: "args nested", expression: `args.opts.force == true`, wantDeny: true},
+		{name: "args has", expression: `has(args.missing)`, wantDeny: false},
+		{name: "args missing key fails closed", expression: `args.missing == "x"`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			engine, err := NewEngine(Rule{Name: tt.name, Expression: tt.expression})
+			if err != nil {
+				t.Fatalf("NewEngine() error = %v", err)
+			}
+			decision, err := engine.Evaluate(context.Background(), req)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Evaluate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if decision.Allowed {
+					t.Fatalf("evaluation error must deny")
+				}
+				return
+			}
+			if decision.Allowed == tt.wantDeny {
+				t.Fatalf("Allowed = %v, want deny=%v (%s)", decision.Allowed, tt.wantDeny, decision.Reason)
 			}
 		})
 	}
