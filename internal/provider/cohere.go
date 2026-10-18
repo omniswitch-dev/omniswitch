@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 )
@@ -23,7 +22,7 @@ func NewCohere(apiKey string) *Cohere {
 	return &Cohere{
 		apiKey:  apiKey,
 		baseURL: "https://api.cohere.com/v2",
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  newProviderClient(defaultRequestTimeout),
 	}
 }
 
@@ -57,16 +56,18 @@ func (c *Cohere) Rerank(ctx context.Context, req RerankRequest) (RerankResponse,
 		return RerankResponse{}, meta, fmt.Errorf("cohere rerank request: %w", err)
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "cohere rerank error", resp)
+		meta.Error = upstreamErr.Body
+		return RerankResponse{}, meta, upstreamErr
+	}
+	payload, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Latency = time.Since(start)
 		return RerankResponse{}, meta, fmt.Errorf("read cohere rerank response: %w", err)
 	}
 	meta.Latency = time.Since(start)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		meta.Error = string(payload)
-		return RerankResponse{}, meta, fmt.Errorf("cohere rerank error (status %d): %s", resp.StatusCode, string(payload))
-	}
 	var response RerankResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
 		return RerankResponse{}, meta, fmt.Errorf("decode cohere rerank response: %w", err)

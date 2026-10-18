@@ -24,7 +24,7 @@ func NewOpenAI(apiKey string) *OpenAI {
 	return &OpenAI{
 		apiKey:  apiKey,
 		baseURL: "https://api.openai.com/v1",
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  newProviderClient(defaultRequestTimeout),
 	}
 }
 
@@ -60,7 +60,13 @@ func (o *OpenAI) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "openai error", resp)
+		meta.Error = upstreamErr.Body
+		return ChatResponse{}, meta, upstreamErr
+	}
+	respBody, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
@@ -68,11 +74,6 @@ func (o *OpenAI) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 	}
 
 	meta.Latency = time.Since(start)
-
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(respBody)
-		return ChatResponse{}, meta, fmt.Errorf("openai error (status %d): %s", resp.StatusCode, string(respBody))
-	}
 
 	var chatResp ChatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
@@ -85,7 +86,7 @@ func (o *OpenAI) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 }
 
 func (o *OpenAI) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan ChatResponseChunk, ProviderMeta, error) {
-	return streamOpenAICompatible(ctx, o.client, o.baseURL+"/chat/completions", o.apiKey, req, "openai", nil)
+	return streamOpenAICompatible(ctx, streamingClient(o.client), o.baseURL+"/chat/completions", o.apiKey, req, "openai", nil)
 }
 
 func (o *OpenAI) Embeddings(ctx context.Context, req EmbeddingRequest) (EmbeddingResponse, ProviderMeta, error) {
@@ -107,16 +108,18 @@ func (o *OpenAI) Embeddings(ctx context.Context, req EmbeddingRequest) (Embeddin
 		return EmbeddingResponse{}, meta, fmt.Errorf("openai embeddings request: %w", err)
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "openai embeddings error", resp)
+		meta.Error = upstreamErr.Body
+		return EmbeddingResponse{}, meta, upstreamErr
+	}
+	payload, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Latency = time.Since(start)
 		return EmbeddingResponse{}, meta, fmt.Errorf("read embeddings response: %w", err)
 	}
 	meta.Latency = time.Since(start)
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(payload)
-		return EmbeddingResponse{}, meta, fmt.Errorf("openai embeddings error (status %d): %s", resp.StatusCode, string(payload))
-	}
 	var response EmbeddingResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
 		return EmbeddingResponse{}, meta, fmt.Errorf("decode embeddings response: %w", err)
@@ -147,17 +150,19 @@ func (o *OpenAI) ImageGeneration(ctx context.Context, req ImageRequest) (ImageRe
 		return ImageResponse{}, meta, fmt.Errorf("openai image request: %w", err)
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "openai image error", resp)
+		meta.Error = upstreamErr.Body
+		return ImageResponse{}, meta, upstreamErr
+	}
+	payload, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
 		return ImageResponse{}, meta, fmt.Errorf("read image response: %w", err)
 	}
 	meta.Latency = time.Since(start)
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(payload)
-		return ImageResponse{}, meta, fmt.Errorf("openai image error (status %d): %s", resp.StatusCode, string(payload))
-	}
 	var response ImageResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
 		meta.Error = err.Error()
@@ -217,17 +222,19 @@ func (o *OpenAI) Transcription(ctx context.Context, req TranscriptionRequest) (T
 		return TranscriptionResponse{}, meta, fmt.Errorf("openai transcription request: %w", err)
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "openai transcription error", resp)
+		meta.Error = upstreamErr.Body
+		return TranscriptionResponse{}, meta, upstreamErr
+	}
+	payload, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
 		return TranscriptionResponse{}, meta, fmt.Errorf("read transcription response: %w", err)
 	}
 	meta.Latency = time.Since(start)
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(payload)
-		return TranscriptionResponse{}, meta, fmt.Errorf("openai transcription error (status %d): %s", resp.StatusCode, string(payload))
-	}
 	var response TranscriptionResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
 		meta.Error = err.Error()
@@ -258,11 +265,12 @@ func (o *OpenAI) Speech(ctx context.Context, req SpeechRequest) (io.ReadCloser, 
 		return nil, "", meta, fmt.Errorf("openai speech request: %w", err)
 	}
 	meta.Latency = time.Since(start)
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		payload, _ := io.ReadAll(resp.Body)
-		meta.Error = string(payload)
-		return nil, "", meta, fmt.Errorf("openai speech error (status %d): %s", resp.StatusCode, string(payload))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "openai speech error", resp)
+		_ = resp.Body.Close()
+		meta.Error = upstreamErr.Body
+		return nil, "", meta, upstreamErr
 	}
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {

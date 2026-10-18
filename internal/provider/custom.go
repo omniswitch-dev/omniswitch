@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -36,9 +35,14 @@ func WithCustomHeaders(headers map[string]string) CustomOption {
 	return func(c *Custom) { c.extraHeaders = headers }
 }
 
-// WithCustomTimeout sets the HTTP client timeout.
+// WithCustomTimeout bounds non-streaming requests and the wait for response
+// headers. Streaming responses are bounded only by the request context.
 func WithCustomTimeout(d time.Duration) CustomOption {
-	return func(c *Custom) { c.client.Timeout = d }
+	return func(c *Custom) {
+		if d > 0 {
+			c.client = newProviderClient(d)
+		}
+	}
 }
 
 // NewCustom creates a new OpenAI-compatible custom provider.
@@ -56,7 +60,7 @@ func NewCustom(name, baseURL, apiKey string, opts ...CustomOption) *Custom {
 		name:    strings.ToLower(strings.TrimSpace(name)),
 		baseURL: baseURL,
 		apiKey:  apiKey,
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  newProviderClient(defaultRequestTimeout),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -111,7 +115,13 @@ func (c *Custom) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, c.name+" error", resp)
+		meta.Error = upstreamErr.Body
+		return ChatResponse{}, meta, upstreamErr
+	}
+	respBody, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
@@ -119,11 +129,6 @@ func (c *Custom) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 	}
 
 	meta.Latency = time.Since(start)
-
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(respBody)
-		return ChatResponse{}, meta, fmt.Errorf("%s error (status %d): %s", c.name, resp.StatusCode, string(respBody))
-	}
 
 	var chatResp ChatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
@@ -137,7 +142,7 @@ func (c *Custom) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 }
 
 func (c *Custom) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan ChatResponseChunk, ProviderMeta, error) {
-	return streamOpenAICompatible(ctx, c.client, c.chatURL(), c.bearerAPIKey(), req, c.name, c.extraHeaders)
+	return streamOpenAICompatible(ctx, streamingClient(c.client), c.chatURL(), c.bearerAPIKey(), req, c.name, c.extraHeaders)
 }
 
 func (c *Custom) Embeddings(ctx context.Context, req EmbeddingRequest) (EmbeddingResponse, ProviderMeta, error) {
@@ -164,16 +169,18 @@ func (c *Custom) Embeddings(ctx context.Context, req EmbeddingRequest) (Embeddin
 		return EmbeddingResponse{}, meta, fmt.Errorf("%s embeddings request: %w", c.name, err)
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, c.name+" embeddings error", resp)
+		meta.Error = upstreamErr.Body
+		return EmbeddingResponse{}, meta, upstreamErr
+	}
+	payload, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Latency = time.Since(start)
 		return EmbeddingResponse{}, meta, fmt.Errorf("read embeddings response: %w", err)
 	}
 	meta.Latency = time.Since(start)
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(payload)
-		return EmbeddingResponse{}, meta, fmt.Errorf("%s embeddings error (status %d): %s", c.name, resp.StatusCode, string(payload))
-	}
 	var response EmbeddingResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
 		return EmbeddingResponse{}, meta, fmt.Errorf("decode embeddings response: %w", err)
@@ -206,16 +213,18 @@ func (c *Custom) Rerank(ctx context.Context, req RerankRequest) (RerankResponse,
 		return RerankResponse{}, meta, fmt.Errorf("%s rerank request: %w", c.name, err)
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, c.name+" rerank error", resp)
+		meta.Error = upstreamErr.Body
+		return RerankResponse{}, meta, upstreamErr
+	}
+	payload, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Latency = time.Since(start)
 		return RerankResponse{}, meta, fmt.Errorf("read rerank response: %w", err)
 	}
 	meta.Latency = time.Since(start)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		meta.Error = string(payload)
-		return RerankResponse{}, meta, fmt.Errorf("%s rerank error (status %d): %s", c.name, resp.StatusCode, string(payload))
-	}
 	var response RerankResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
 		return RerankResponse{}, meta, fmt.Errorf("decode rerank response: %w", err)

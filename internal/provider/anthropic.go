@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 )
@@ -22,7 +21,7 @@ func NewAnthropic(apiKey string) *Anthropic {
 	return &Anthropic{
 		apiKey:  apiKey,
 		baseURL: "https://api.anthropic.com",
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  newProviderClient(defaultRequestTimeout),
 	}
 }
 
@@ -123,7 +122,13 @@ func (a *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "anthropic error", resp)
+		meta.Error = upstreamErr.Body
+		return ChatResponse{}, meta, upstreamErr
+	}
+	respBody, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
@@ -131,11 +136,6 @@ func (a *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 	}
 
 	meta.Latency = time.Since(start)
-
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(respBody)
-		return ChatResponse{}, meta, fmt.Errorf("anthropic error (status %d): %s", resp.StatusCode, string(respBody))
-	}
 
 	var anthResp anthropicResponse
 	if err := json.Unmarshal(respBody, &anthResp); err != nil {
@@ -216,18 +216,18 @@ func (a *Anthropic) ChatCompletionStream(ctx context.Context, req ChatRequest) (
 	httpReq.Header.Set("x-api-key", a.apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
-	resp, err := a.client.Do(httpReq)
+	resp, err := streamingClient(a.client).Do(httpReq)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
 		return nil, meta, fmt.Errorf("anthropic stream request: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(resp.Body)
-		meta.Error = string(respBody)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		meta.Latency = time.Since(start)
-		return nil, meta, fmt.Errorf("anthropic stream error (status %d): %s", resp.StatusCode, string(respBody))
+		upstreamErr := newUpstreamError(meta.Provider, "anthropic stream error", resp)
+		_ = resp.Body.Close()
+		meta.Error = upstreamErr.Body
+		return nil, meta, upstreamErr
 	}
 	meta.Latency = time.Since(start)
 	return streamAnthropic(ctx, resp.Body, req.Model, req.StreamOptions != nil && req.StreamOptions.IncludeUsage), meta, nil

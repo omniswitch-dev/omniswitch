@@ -46,12 +46,11 @@ func streamOpenAICompatibleBody(ctx context.Context, client *http.Client, url st
 		meta.Latency = time.Since(start)
 		return nil, meta, fmt.Errorf("%s stream request: %w", providerName, err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(resp.Body)
-		meta.Error = string(respBody)
-		meta.Latency = time.Since(start)
-		return nil, meta, fmt.Errorf("%s stream error (status %d): %s", providerName, resp.StatusCode, string(respBody))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		upstreamErr := newUpstreamError(meta.Provider, providerName+" stream error", resp)
+		_ = resp.Body.Close()
+		meta.Error = upstreamErr.Body
+		return nil, meta, upstreamErr
 	}
 	meta.Latency = time.Since(start)
 

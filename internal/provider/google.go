@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -23,7 +22,7 @@ func NewGoogle(apiKey string) *Google {
 	return &Google{
 		apiKey:  apiKey,
 		baseURL: "https://generativelanguage.googleapis.com/v1beta",
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  newProviderClient(defaultRequestTimeout),
 	}
 }
 
@@ -153,7 +152,13 @@ func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "gemini error", resp)
+		meta.Error = upstreamErr.Body
+		return ChatResponse{}, meta, upstreamErr
+	}
+	respBody, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
@@ -161,11 +166,6 @@ func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 	}
 
 	meta.Latency = time.Since(start)
-
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(respBody)
-		return ChatResponse{}, meta, fmt.Errorf("gemini error (status %d): %s", resp.StatusCode, string(respBody))
-	}
 
 	var gemResp geminiResponse
 	if err := json.Unmarshal(respBody, &gemResp); err != nil {
@@ -245,18 +245,18 @@ func (g *Google) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-c
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := g.client.Do(httpReq)
+	resp, err := streamingClient(g.client).Do(httpReq)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
 		return nil, meta, fmt.Errorf("gemini stream request: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(resp.Body)
-		meta.Error = string(respBody)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		meta.Latency = time.Since(start)
-		return nil, meta, fmt.Errorf("gemini stream error (status %d): %s", resp.StatusCode, string(respBody))
+		upstreamErr := newUpstreamError(meta.Provider, "gemini stream error", resp)
+		_ = resp.Body.Close()
+		meta.Error = upstreamErr.Body
+		return nil, meta, upstreamErr
 	}
 	meta.Latency = time.Since(start)
 	return streamGemini(ctx, resp.Body, req.Model, req.StreamOptions != nil && req.StreamOptions.IncludeUsage), meta, nil

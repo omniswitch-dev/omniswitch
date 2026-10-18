@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -34,7 +33,7 @@ func NewAzureOpenAI(name, endpoint, apiKey, apiVersion string, models []string) 
 		apiKey:     apiKey,
 		apiVersion: apiVersion,
 		models:     append([]string(nil), models...),
-		client:     &http.Client{Timeout: 120 * time.Second},
+		client:     newProviderClient(defaultRequestTimeout),
 	}
 }
 
@@ -74,17 +73,19 @@ func (a *AzureOpenAI) ChatCompletion(ctx context.Context, req ChatRequest) (Chat
 		return ChatResponse{}, meta, fmt.Errorf("azure openai request: %w", err)
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "azure openai error", resp)
+		meta.Error = upstreamErr.Body
+		return ChatResponse{}, meta, upstreamErr
+	}
+	payload, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
 		return ChatResponse{}, meta, err
 	}
 	meta.Latency = time.Since(start)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		meta.Error = string(payload)
-		return ChatResponse{}, meta, fmt.Errorf("azure openai error (status %d): %s", resp.StatusCode, string(payload))
-	}
 	var chatResp ChatResponse
 	if err := json.Unmarshal(payload, &chatResp); err != nil {
 		meta.Error = err.Error()
@@ -104,7 +105,7 @@ func (a *AzureOpenAI) ChatCompletionStream(ctx context.Context, req ChatRequest)
 	if err != nil {
 		return nil, ProviderMeta{Provider: a.name, ProviderType: "azure", Model: req.Model, Timestamp: start, Error: err.Error()}, err
 	}
-	return streamOpenAICompatibleBody(ctx, a.client, a.chatURL(req.Model), "", body, req.Model, a.name, map[string]string{"api-key": a.apiKey}, start)
+	return streamOpenAICompatibleBody(ctx, streamingClient(a.client), a.chatURL(req.Model), "", body, req.Model, a.name, map[string]string{"api-key": a.apiKey}, start)
 }
 
 func (a *AzureOpenAI) chatURL(model string) string {

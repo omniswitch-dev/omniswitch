@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -46,7 +45,7 @@ func NewBedrock(name, region, accessKeyID, secretAccessKey, sessionToken string,
 		secretAccessKey: secretAccessKey,
 		sessionToken:    sessionToken,
 		models:          append([]string(nil), models...),
-		client:          &http.Client{Timeout: 120 * time.Second},
+		client:          newProviderClient(defaultRequestTimeout),
 	}
 }
 
@@ -201,17 +200,19 @@ func (b *Bedrock) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResp
 		return ChatResponse{}, meta, fmt.Errorf("bedrock converse request: %w", err)
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "bedrock converse error", resp)
+		meta.Error = upstreamErr.Body
+		return ChatResponse{}, meta, upstreamErr
+	}
+	payload, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
 		return ChatResponse{}, meta, err
 	}
 	meta.Latency = time.Since(start)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		meta.Error = string(payload)
-		return ChatResponse{}, meta, fmt.Errorf("bedrock converse error (status %d): %s", resp.StatusCode, string(payload))
-	}
 	var bedrockResp bedrockConverseResponse
 	if err := json.Unmarshal(payload, &bedrockResp); err != nil {
 		meta.Error = err.Error()
