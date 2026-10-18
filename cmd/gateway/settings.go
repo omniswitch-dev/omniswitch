@@ -678,6 +678,11 @@ func applyHotConfig(cfg gatewayconfig.Config, rtr *router.Router, gw *gateway.Ha
 	if failures > 0 && cooldown > 0 && !breakerHasSettings(rtr.CircuitBreaker(), failures, cooldown) {
 		rtr.SetCircuitBreaker(router.NewCircuitBreaker(failures, cooldown))
 	}
+	// The shadow breaker follows the same rule, so an unchanged reload keeps
+	// its open circuits too.
+	if failures > 0 && cooldown > 0 && !breakerHasSettings(gw.ShadowCircuitBreaker(), failures, cooldown) {
+		gw.SetShadowCircuitBreaker(router.NewCircuitBreaker(failures, cooldown))
+	}
 	return fileRoutes, gr
 }
 

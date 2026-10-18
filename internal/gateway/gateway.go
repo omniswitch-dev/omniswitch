@@ -82,7 +82,7 @@ type Handler struct {
 	configRouters configRouterCache
 
 	shadowSlots   chan struct{}
-	shadowBreaker *router.CircuitBreaker
+	shadowBreaker atomic.Pointer[router.CircuitBreaker]
 
 	budget *budgetState
 }
@@ -90,13 +90,13 @@ type Handler struct {
 // New creates a new gateway handler.
 func New(registry *provider.Registry, rtr *router.Router, st *store.Store, gr *guardrail.Engine) *Handler {
 	h := &Handler{
-		registry:      registry,
-		router:        rtr,
-		store:         st,
-		shadowSlots:   make(chan struct{}, maxConcurrentShadowRequests),
-		shadowBreaker: router.NewCircuitBreaker(5, 60*time.Second),
-		budget:        &budgetState{ledger: newBudgetLedger(storeBudgetLoader(st))},
+		registry:    registry,
+		router:      rtr,
+		store:       st,
+		shadowSlots: make(chan struct{}, maxConcurrentShadowRequests),
+		budget:      &budgetState{ledger: newBudgetLedger(storeBudgetLoader(st))},
 	}
+	h.shadowBreaker.Store(router.NewCircuitBreaker(5, 60*time.Second))
 	h.settings.Store(&handlerSettings{
 		cacheThreshold: 0.95,
 		cacheTTL:       24 * time.Hour,
@@ -1433,7 +1433,7 @@ func (h *Handler) shadow(activeRouter *router.Router, requestID, traceID, primar
 		log.Printf("shadow request to %s dropped: %d shadow requests already in flight", shadowProvider, cap(h.shadowSlots))
 		return
 	}
-	shadowRouter := activeRouter.CloneForShadow(h.shadowBreaker)
+	shadowRouter := activeRouter.CloneForShadow(h.ShadowCircuitBreaker())
 	go func() {
 		defer func() { <-h.shadowSlots }()
 		shadowCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

@@ -125,11 +125,11 @@ func runServe() {
 		rtr.SetRoute(model, route)
 		log.Printf("configured route for %s: %+v", model, route)
 	}
-	rtr.SetCircuitBreaker(router.NewCircuitBreaker(settings.circuitBreakerFailures, settings.circuitBreakerCooldown))
 	// Tool rules, webhooks and LLM judges count too: a webhook-only
 	// configuration must be enforced from the first request.
 	gr := guardrail.NewEngineWithConfig(settings.guardrailConfig)
 	gw := gateway.New(registry, rtr, st, gr)
+	setupCircuitBreakers(rtr, gw, settings)
 	gw.SetSemanticCache(settings.cacheThreshold)
 	gw.SetCacheTTL(settings.cacheTTL)
 	gw.SetCacheScope(settings.cacheScope)
