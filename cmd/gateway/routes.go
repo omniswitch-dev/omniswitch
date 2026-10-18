@@ -259,6 +259,7 @@ func wrapGatewayMiddleware(settings runtimeSettings, st *store.Store, mux http.H
 			WorkspaceClaim:    settings.oidcWorkspaceClaim,
 			OrganizationClaim: settings.oidcOrganizationClaim,
 			CacheTTL:          settings.oidcCacheTTL,
+			StaleIfError:      settings.oidcStaleIfError,
 		}
 		for _, warning := range oidcConfig.MissingBindingWarnings() {
 			log.Printf("WARNING: %s", warning)

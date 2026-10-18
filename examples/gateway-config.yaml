@@ -55,6 +55,9 @@ identity:
     workspace_claim: workspace_id
     organization_claim: organization_id
     cache_ttl: 5m
+    # Keep using cached signing keys for this long after cache_ttl while the
+    # JWKS endpoint fails (max 168h). 0 rejects OIDC tokens once the cache expires.
+    stale_if_error: 24h
 
 guardrails:
   # Supported actions: deny, redact, warn, and log. deny/redact change the

@@ -54,6 +54,7 @@ func runtimeConfigSummary(settings runtimeSettings, registry *provider.Registry)
 				"workspace_claim":    settings.oidcWorkspaceClaim,
 				"organization_claim": settings.oidcOrganizationClaim,
 				"cache_ttl":          settings.oidcCacheTTL.String(),
+				"stale_if_error":     settings.oidcStaleIfError.String(),
 			},
 		},
 		"authorization": map[string]any{

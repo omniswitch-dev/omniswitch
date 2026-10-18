@@ -69,6 +69,7 @@ type runtimeSettings struct {
 	oidcWorkspaceClaim    string
 	oidcOrganizationClaim string
 	oidcCacheTTL          time.Duration
+	oidcStaleIfError      time.Duration
 	configPath            string
 	otelEnabled           bool
 	otelEndpoint          string
@@ -179,6 +180,7 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 		mcpUpstreamURL:    "http://127.0.0.1:8090/mcp",
 		routes:            map[string]router.Route{},
 		oidcCacheTTL:      5 * time.Minute,
+		oidcStaleIfError:  24 * time.Hour,
 		otelServiceName:   "omniswitch-gateway",
 		otelTimeout:       10 * time.Second,
 		prometheusEnabled: true,
@@ -243,6 +245,7 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 	settings.oidcWorkspaceClaim = env("OMNISWITCH_OIDC_WORKSPACE_CLAIM", settings.oidcWorkspaceClaim)
 	settings.oidcOrganizationClaim = env("OMNISWITCH_OIDC_ORGANIZATION_CLAIM", settings.oidcOrganizationClaim)
 	settings.oidcCacheTTL = e.duration("OMNISWITCH_OIDC_CACHE_TTL", settings.oidcCacheTTL)
+	settings.oidcStaleIfError = e.oidcStaleIfError("OMNISWITCH_OIDC_STALE_IF_ERROR", settings.oidcStaleIfError)
 	settings.otelEnabled = e.bool("OMNISWITCH_OTEL_ENABLED", settings.otelEnabled)
 	settings.otelEndpoint = env("OMNISWITCH_OTEL_ENDPOINT", settings.otelEndpoint)
 	settings.otelServiceName = env("OMNISWITCH_OTEL_SERVICE_NAME", settings.otelServiceName)
@@ -347,6 +350,9 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 	}
 	if cfg.Identity.OIDC.CacheTTL != nil {
 		settings.oidcCacheTTL = cfg.Identity.OIDC.CacheTTL.Duration
+	}
+	if cfg.Identity.OIDC.StaleIfError != nil {
+		settings.oidcStaleIfError = cfg.Identity.OIDC.StaleIfError.Duration
 	}
 	if cfg.Guardrails.Actions != nil {
 		settings.guardrailConfig.Actions = cfg.Guardrails.Actions

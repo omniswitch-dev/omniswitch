@@ -49,7 +49,15 @@ type OIDC struct {
 	WorkspaceClaim    string    `json:"workspace_claim,omitempty" yaml:"workspace_claim,omitempty"`
 	OrganizationClaim string    `json:"organization_claim,omitempty" yaml:"organization_claim,omitempty"`
 	CacheTTL          *Duration `json:"cache_ttl,omitempty" yaml:"cache_ttl,omitempty"`
+	// StaleIfError is how long cached JWKS keys stay usable after cache_ttl
+	// while refreshing them fails (RFC 5861 stale-if-error). 0 fails closed.
+	StaleIfError *Duration `json:"stale_if_error,omitempty" yaml:"stale_if_error,omitempty"`
 }
+
+// MaxOIDCStaleIfError caps identity.oidc.stale_if_error. A week covers a long
+// IdP outage over a weekend; past that, a key the IdP revoked could be
+// trusted for too long.
+const MaxOIDCStaleIfError = 7 * 24 * time.Hour
 
 // Authorization configures CEL authorization after API-key authentication.
 // If one or more allow rules are present, every request must match an allow
@@ -387,6 +395,9 @@ func Validate(cfg Config) error {
 	}
 	if cfg.Identity.OIDC.CacheTTL != nil && cfg.Identity.OIDC.CacheTTL.Duration <= 0 {
 		return fmt.Errorf("identity.oidc.cache_ttl must be positive")
+	}
+	if cfg.Identity.OIDC.StaleIfError != nil && (cfg.Identity.OIDC.StaleIfError.Duration < 0 || cfg.Identity.OIDC.StaleIfError.Duration > MaxOIDCStaleIfError) {
+		return fmt.Errorf("identity.oidc.stale_if_error must be between 0 and %s", MaxOIDCStaleIfError)
 	}
 	for index, rule := range cfg.Authorization.Rules {
 		if strings.TrimSpace(rule.When) == "" {
