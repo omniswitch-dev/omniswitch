@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/omniswitch-dev/omniswitch/internal/accel"
@@ -44,6 +45,11 @@ type Engine struct {
 	// pattern the accelerator rejects stays in compiled for the Go path.
 	accelInput  *accel.Scanner
 	accelOutput *accel.Scanner
+	// accelRules are the rules evaluated by the accelerator. They are kept
+	// so the Go path can evaluate them if an accelerator scan fails.
+	accelRules []compiledRule
+
+	closeOnce sync.Once
 }
 
 type compiledRule struct {
@@ -244,8 +250,11 @@ func (e *Engine) initAccelerator() {
 	accelInput := make([]string, len(inputPatterns))
 	accelOutput := make([]string, len(outputPatterns))
 	fallback := false
-	for i := range e.compiled {
-		if rejectedSet[i] || rejectedSet[i+len(e.compiled)] {
+	for i, cr := range e.compiled {
+		// The accelerator receives patterns newline-delimited, so a pattern
+		// containing a line break would be split and shift the index of
+		// every later rule. Keep such patterns on the Go path.
+		if rejectedSet[i] || rejectedSet[i+len(e.compiled)] || !accel.SafePattern(cr.rule.Pattern) {
 			fallback = true
 			goInput[i], goOutput[i] = inputPatterns[i], outputPatterns[i]
 			continue
@@ -255,14 +264,51 @@ func (e *Engine) initAccelerator() {
 	scannerIn, errIn := accel.NewScanner(accelInput)
 	scannerOut, errOut := accel.NewScanner(accelOutput)
 	if errIn != nil || errOut != nil {
+		_ = scannerIn.Close()
+		_ = scannerOut.Close()
 		return
 	}
 	e.accelInput, e.accelOutput = scannerIn, scannerOut
+	e.accelRules = retainGoRules(e.compiled, accelInput, accelOutput)
 	if fallback {
 		e.compiled = retainGoRules(e.compiled, goInput, goOutput)
 	} else {
 		e.compiled = nil
 	}
+}
+
+// Close releases the accelerator scanners owned by the engine. It is
+// idempotent and safe to call while evaluations are still running: those
+// evaluations finish, and later ones use the pure-Go path for every rule.
+// Call it on an engine that has been replaced (for example after a config
+// hot reload) so its WASM instances are freed.
+func (e *Engine) Close() error {
+	if e == nil {
+		return nil
+	}
+	var err error
+	e.closeOnce.Do(func() {
+		if cerr := e.accelInput.Close(); cerr != nil {
+			err = cerr
+		}
+		if cerr := e.accelOutput.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	})
+	return err
+}
+
+func appendRegexMatches(triggered []Result, rules []compiledRule, stage, text string) []Result {
+	for _, cr := range rules {
+		if cr.rule.Stage != "both" && cr.rule.Stage != stage {
+			continue
+		}
+		if !cr.re.MatchString(text) {
+			continue
+		}
+		triggered = append(triggered, Result{Triggered: true, Type: cr.rule.Name, Action: cr.rule.Action, Message: cr.rule.Message, Details: cr.rule.Pattern, Fallback: cr.rule.Fallback, RerouteProvider: cr.rule.RerouteProvider, MaxRetries: cr.rule.MaxRetries})
+	}
+	return triggered
 }
 
 func retainGoRules(compiled []compiledRule, goInput, goOutput []string) []compiledRule {
@@ -315,7 +361,12 @@ func (e *Engine) evaluate(ctx context.Context, input GuardrailInput) []Result {
 		scanner = e.accelInput
 	}
 	if scanner != nil && text != "" {
-		if matches, err := scanner.ScanFirst([]byte(text)); err == nil {
+		matches, err := scanner.ScanFirst([]byte(text))
+		if err != nil {
+			// The accelerator failed (closed engine, invalid UTF-8, trap):
+			// evaluate its rules with Go so they are never skipped.
+			triggered = appendRegexMatches(triggered, e.accelRules, stage, text)
+		} else {
 			emitted := make(map[int]bool, len(matches))
 			for _, m := range matches {
 				if m.RuleIndex < 0 || m.RuleIndex >= len(e.rules) || emitted[m.RuleIndex] {
@@ -330,15 +381,7 @@ func (e *Engine) evaluate(ctx context.Context, input GuardrailInput) []Result {
 			}
 		}
 	}
-	for _, cr := range e.compiled {
-		if cr.rule.Stage != "both" && cr.rule.Stage != stage {
-			continue
-		}
-		if !cr.re.MatchString(text) {
-			continue
-		}
-		triggered = append(triggered, Result{Triggered: true, Type: cr.rule.Name, Action: cr.rule.Action, Message: cr.rule.Message, Details: cr.rule.Pattern, Fallback: cr.rule.Fallback, RerouteProvider: cr.rule.RerouteProvider, MaxRetries: cr.rule.MaxRetries})
-	}
+	triggered = appendRegexMatches(triggered, e.compiled, stage, text)
 	for _, ct := range e.toolRules {
 		if ct.rule.Stage != "both" && ct.rule.Stage != stage {
 			continue
