@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -112,31 +115,32 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 		applyGatewayConfig(&settings, cfg)
 	}
 
+	e := &envReader{}
 	settings.listenAddr = env("OMNISWITCH_LISTEN", settings.listenAddr)
 	settings.dataDir = env("OMNISWITCH_DATA", settings.dataDir)
-	settings.authEnabled = envBool("OMNISWITCH_AUTH", settings.authEnabled)
-	settings.cacheThreshold = envFloat("OMNISWITCH_CACHE_THRESHOLD", settings.cacheThreshold)
-	settings.cacheTTL = envDuration("OMNISWITCH_CACHE_TTL", settings.cacheTTL)
+	settings.authEnabled = e.bool("OMNISWITCH_AUTH", settings.authEnabled)
+	settings.cacheThreshold = e.float("OMNISWITCH_CACHE_THRESHOLD", settings.cacheThreshold)
+	settings.cacheTTL = e.duration("OMNISWITCH_CACHE_TTL", settings.cacheTTL)
 	settings.cacheScope = env("OMNISWITCH_CACHE_SCOPE", settings.cacheScope)
-	settings.logPayloads = envBool("OMNISWITCH_LOG_PAYLOADS", settings.logPayloads)
-	settings.guardrailStreamBuffer = envBool("OMNISWITCH_GUARDRAIL_STREAM_BUFFER", settings.guardrailStreamBuffer)
-	settings.maxRequestBytes = envInt64("OMNISWITCH_MAX_REQUEST_BYTES", settings.maxRequestBytes)
-	settings.readHeaderTimeout = envDuration("OMNISWITCH_READ_HEADER_TIMEOUT", settings.readHeaderTimeout)
-	settings.readTimeout = envDuration("OMNISWITCH_READ_TIMEOUT", settings.readTimeout)
-	settings.writeTimeout = envDuration("OMNISWITCH_WRITE_TIMEOUT", settings.writeTimeout)
-	settings.idleTimeout = envDuration("OMNISWITCH_IDLE_TIMEOUT", settings.idleTimeout)
-	settings.circuitBreakerFailures = envInt("OMNISWITCH_CIRCUIT_BREAKER_FAILURES", settings.circuitBreakerFailures)
-	settings.circuitBreakerCooldown = envDuration("OMNISWITCH_CIRCUIT_BREAKER_COOLDOWN", settings.circuitBreakerCooldown)
-	settings.rateLimitRequests = envInt("OMNISWITCH_RATE_LIMIT_REQUESTS", settings.rateLimitRequests)
-	settings.rateLimitWindow = envDuration("OMNISWITCH_RATE_LIMIT_WINDOW", settings.rateLimitWindow)
+	settings.logPayloads = e.bool("OMNISWITCH_LOG_PAYLOADS", settings.logPayloads)
+	settings.guardrailStreamBuffer = e.bool("OMNISWITCH_GUARDRAIL_STREAM_BUFFER", settings.guardrailStreamBuffer)
+	settings.maxRequestBytes = e.int64("OMNISWITCH_MAX_REQUEST_BYTES", settings.maxRequestBytes)
+	settings.readHeaderTimeout = e.duration("OMNISWITCH_READ_HEADER_TIMEOUT", settings.readHeaderTimeout)
+	settings.readTimeout = e.duration("OMNISWITCH_READ_TIMEOUT", settings.readTimeout)
+	settings.writeTimeout = e.duration("OMNISWITCH_WRITE_TIMEOUT", settings.writeTimeout)
+	settings.idleTimeout = e.duration("OMNISWITCH_IDLE_TIMEOUT", settings.idleTimeout)
+	settings.circuitBreakerFailures = e.int("OMNISWITCH_CIRCUIT_BREAKER_FAILURES", settings.circuitBreakerFailures)
+	settings.circuitBreakerCooldown = e.duration("OMNISWITCH_CIRCUIT_BREAKER_COOLDOWN", settings.circuitBreakerCooldown)
+	settings.rateLimitRequests = e.int("OMNISWITCH_RATE_LIMIT_REQUESTS", settings.rateLimitRequests)
+	settings.rateLimitWindow = e.duration("OMNISWITCH_RATE_LIMIT_WINDOW", settings.rateLimitWindow)
 	settings.rateLimitRedisURL = env("OMNISWITCH_RATE_LIMIT_REDIS_URL", settings.rateLimitRedisURL)
 	settings.rateLimitPrefix = env("OMNISWITCH_RATE_LIMIT_PREFIX", settings.rateLimitPrefix)
-	settings.rateLimitFailOpen = envBool("OMNISWITCH_RATE_LIMIT_FAIL_OPEN", settings.rateLimitFailOpen)
+	settings.rateLimitFailOpen = e.bool("OMNISWITCH_RATE_LIMIT_FAIL_OPEN", settings.rateLimitFailOpen)
 	if value := strings.TrimSpace(os.Getenv("OMNISWITCH_CORS_ORIGINS")); value != "" {
 		settings.corsOrigins = parseCSV(value)
 	}
 	settings.shadowProvider = env("OMNISWITCH_SHADOW_PROVIDER", settings.shadowProvider)
-	settings.mcpEnabled = envBool("OMNISWITCH_MCP_ENABLED", settings.mcpEnabled)
+	settings.mcpEnabled = e.bool("OMNISWITCH_MCP_ENABLED", settings.mcpEnabled)
 	if value := strings.TrimSpace(os.Getenv("OMNISWITCH_MCP_POLICY")); value != "" {
 		settings.mcpPolicyPath = value
 		settings.mcpPolicyExplicit = true
@@ -152,16 +156,16 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 	settings.oidcRoleClaim = env("OMNISWITCH_OIDC_ROLE_CLAIM", settings.oidcRoleClaim)
 	settings.oidcWorkspaceClaim = env("OMNISWITCH_OIDC_WORKSPACE_CLAIM", settings.oidcWorkspaceClaim)
 	settings.oidcOrganizationClaim = env("OMNISWITCH_OIDC_ORGANIZATION_CLAIM", settings.oidcOrganizationClaim)
-	settings.oidcCacheTTL = envDuration("OMNISWITCH_OIDC_CACHE_TTL", settings.oidcCacheTTL)
-	settings.otelEnabled = envBool("OMNISWITCH_OTEL_ENABLED", settings.otelEnabled)
+	settings.oidcCacheTTL = e.duration("OMNISWITCH_OIDC_CACHE_TTL", settings.oidcCacheTTL)
+	settings.otelEnabled = e.bool("OMNISWITCH_OTEL_ENABLED", settings.otelEnabled)
 	settings.otelEndpoint = env("OMNISWITCH_OTEL_ENDPOINT", settings.otelEndpoint)
 	settings.otelServiceName = env("OMNISWITCH_OTEL_SERVICE_NAME", settings.otelServiceName)
 	settings.otelHeaders = mergeStringMaps(settings.otelHeaders, parseHeaderList(os.Getenv("OMNISWITCH_OTEL_HEADERS")))
-	settings.otelInsecure = envBool("OMNISWITCH_OTEL_INSECURE", settings.otelInsecure)
-	settings.otelTimeout = envDuration("OMNISWITCH_OTEL_TIMEOUT", settings.otelTimeout)
-	settings.prometheusEnabled = envBool("OMNISWITCH_PROMETHEUS_ENABLED", settings.prometheusEnabled)
-	settings.shutdownTimeout = envDuration("OMNISWITCH_SHUTDOWN_TIMEOUT", settings.shutdownTimeout)
-	settings.allowNoProviders = envBool("OMNISWITCH_ALLOW_NO_PROVIDERS", settings.allowNoProviders)
+	settings.otelInsecure = e.bool("OMNISWITCH_OTEL_INSECURE", settings.otelInsecure)
+	settings.otelTimeout = e.duration("OMNISWITCH_OTEL_TIMEOUT", settings.otelTimeout)
+	settings.prometheusEnabled = e.bool("OMNISWITCH_PROMETHEUS_ENABLED", settings.prometheusEnabled)
+	settings.shutdownTimeout = e.duration("OMNISWITCH_SHUTDOWN_TIMEOUT", settings.shutdownTimeout)
+	settings.allowNoProviders = e.bool("OMNISWITCH_ALLOW_NO_PROVIDERS", settings.allowNoProviders)
 	settings.vaultKey = env("OMNISWITCH_VAULT_KEY", settings.vaultKey)
 	// Bootstrap credentials must not live in config-as-code, so they are only
 	// accepted through the process environment or a secret manager injection.
@@ -176,6 +180,9 @@ func loadRuntimeSettings() (runtimeSettings, error) {
 	}
 	for model, route := range parseABConfig(os.Getenv("OMNISWITCH_AB_TEST")) {
 		settings.routes[model] = mergeRoute(settings.routes[model], route)
+	}
+	if err := e.err(); err != nil {
+		return settings, fmt.Errorf("invalid environment: %w", err)
 	}
 	return settings, nil
 }
@@ -562,49 +569,97 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func envFloat(key string, fallback float64) float64 {
-	if value := os.Getenv(key); value != "" {
-		if parsed, err := strconv.ParseFloat(value, 64); err == nil {
-			return parsed
-		}
-	}
-	return fallback
+// envReader parses typed environment variables and collects every invalid
+// value, so a typo such as OMNISWITCH_AUTH=ture fails startup with the
+// variable's name instead of silently keeping the default.
+type envReader struct {
+	errs []error
 }
 
-func envInt(key string, fallback int) int {
-	if value := os.Getenv(key); value != "" {
-		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
-			return parsed
-		}
-	}
-	return fallback
+func (e *envReader) fail(key, value, want string) {
+	e.errs = append(e.errs, fmt.Errorf("%s=%q: want %s", key, value, want))
 }
 
-func envInt64(key string, fallback int64) int64 {
-	if value := os.Getenv(key); value != "" {
-		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil && parsed > 0 {
-			return parsed
-		}
-	}
-	return fallback
+// err returns all collected parse errors, or nil.
+func (e *envReader) err() error {
+	return errors.Join(e.errs...)
 }
 
-func envBool(key string, fallback bool) bool {
-	if value := os.Getenv(key); value != "" {
-		if parsed, err := strconv.ParseBool(value); err == nil {
-			return parsed
-		}
+func (e *envReader) float(key string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
 	}
-	return fallback
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		e.fail(key, value, "a number")
+		return fallback
+	}
+	return parsed
 }
 
-func envDuration(key string, fallback time.Duration) time.Duration {
-	if value := os.Getenv(key); value != "" {
-		if parsed, err := time.ParseDuration(value); err == nil {
-			return parsed
-		}
+func (e *envReader) int(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
 	}
-	return fallback
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		e.fail(key, value, "a positive integer")
+		return fallback
+	}
+	return parsed
+}
+
+func (e *envReader) int64(key string, fallback int64) int64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		e.fail(key, value, "a positive integer")
+		return fallback
+	}
+	return parsed
+}
+
+func (e *envReader) bool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, ok := parseBoolValue(value)
+	if !ok {
+		e.fail(key, value, "true/false, 1/0, yes/no or on/off")
+		return fallback
+	}
+	return parsed
+}
+
+func (e *envReader) duration(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < 0 {
+		e.fail(key, value, "a non-negative Go duration such as 30s or 5m")
+		return fallback
+	}
+	return parsed
+}
+
+// parseBoolValue accepts the strconv.ParseBool forms plus yes/no and on/off,
+// case-insensitively.
+func parseBoolValue(value string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true, true
+	case "0", "f", "false", "n", "no", "off":
+		return false, true
+	}
+	return false, false
 }
 
 func parseHeaderList(value string) map[string]string {

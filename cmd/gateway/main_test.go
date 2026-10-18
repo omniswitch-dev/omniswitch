@@ -23,28 +23,68 @@ import (
 
 func TestEnvFloat(t *testing.T) {
 	t.Setenv("OMNISWITCH_TEST_FLOAT", "0.83")
-	if got := envFloat("OMNISWITCH_TEST_FLOAT", 0.95); got != 0.83 {
-		t.Fatalf("envFloat() = %v, want 0.83", got)
+	e := &envReader{}
+	if got := e.float("OMNISWITCH_TEST_FLOAT", 0.95); got != 0.83 {
+		t.Fatalf("float() = %v, want 0.83", got)
 	}
-	if got := envFloat("OMNISWITCH_TEST_MISSING", 0.95); got != 0.95 {
-		t.Fatalf("envFloat(missing) = %v, want fallback", got)
+	if got := e.float("OMNISWITCH_TEST_MISSING", 0.95); got != 0.95 {
+		t.Fatalf("float(missing) = %v, want fallback", got)
+	}
+	if e.err() != nil {
+		t.Fatalf("err() = %v, want nil", e.err())
 	}
 }
 
 func TestEnvDuration(t *testing.T) {
 	t.Setenv("OMNISWITCH_TEST_DURATION", "2h")
-	if got := envDuration("OMNISWITCH_TEST_DURATION", 0); got.String() != "2h0m0s" {
-		t.Fatalf("envDuration() = %s, want 2h0m0s", got)
+	e := &envReader{}
+	if got := e.duration("OMNISWITCH_TEST_DURATION", 0); got.String() != "2h0m0s" {
+		t.Fatalf("duration() = %s, want 2h0m0s", got)
 	}
 }
 
 func TestEnvBool(t *testing.T) {
-	t.Setenv("OMNISWITCH_TEST_BOOL", "true")
-	if !envBool("OMNISWITCH_TEST_BOOL", false) {
-		t.Fatalf("envBool() = false, want true")
+	e := &envReader{}
+	for value, want := range map[string]bool{"true": true, "TRUE": true, "1": true, "yes": true, "On": true, "false": false, "0": false, "No": false, "off": false} {
+		t.Setenv("OMNISWITCH_TEST_BOOL", value)
+		if got := e.bool("OMNISWITCH_TEST_BOOL", !want); got != want {
+			t.Errorf("bool(%q) = %v, want %v", value, got, want)
+		}
 	}
-	if !envBool("OMNISWITCH_TEST_MISSING_BOOL", true) {
-		t.Fatalf("envBool(missing) = false, want fallback")
+	if !e.bool("OMNISWITCH_TEST_MISSING_BOOL", true) {
+		t.Fatalf("bool(missing) = false, want fallback")
+	}
+	if e.err() != nil {
+		t.Fatalf("err() = %v, want nil", e.err())
+	}
+}
+
+func TestEnvReaderReportsInvalidValues(t *testing.T) {
+	t.Setenv("OMNISWITCH_TEST_BOOL", "ture")
+	t.Setenv("OMNISWITCH_TEST_INT", "0")
+	t.Setenv("OMNISWITCH_TEST_DURATION", "30")
+	t.Setenv("OMNISWITCH_TEST_FLOAT", "high")
+	e := &envReader{}
+	e.bool("OMNISWITCH_TEST_BOOL", false)
+	e.int("OMNISWITCH_TEST_INT", 1)
+	e.duration("OMNISWITCH_TEST_DURATION", 0)
+	e.float("OMNISWITCH_TEST_FLOAT", 0)
+	err := e.err()
+	if err == nil {
+		t.Fatal("err() = nil, want errors")
+	}
+	for _, name := range []string{"OMNISWITCH_TEST_BOOL", "OMNISWITCH_TEST_INT", "OMNISWITCH_TEST_DURATION", "OMNISWITCH_TEST_FLOAT"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("error %q does not name %s", err, name)
+		}
+	}
+}
+
+func TestLoadRuntimeSettingsRejectsInvalidAuthFlag(t *testing.T) {
+	clearGatewayEnv(t)
+	t.Setenv("OMNISWITCH_AUTH", "ture")
+	if _, err := loadRuntimeSettings(); err == nil || !strings.Contains(err.Error(), "OMNISWITCH_AUTH") {
+		t.Fatalf("loadRuntimeSettings() error = %v, want OMNISWITCH_AUTH error", err)
 	}
 }
 
