@@ -381,7 +381,7 @@ func BuildToolRequest(name string, arguments map[string]any, tc ToolContext) mod
 		actionName = "delete"
 	}
 
-	resourceName := firstString(arguments, "repo", "repository", "table", "database", "resource", "name")
+	resourceName := firstString(arguments, resourceKeys...)
 	resourceType := strings.TrimSpace(tc.TargetMetadata["resource_type"])
 	if resourceType == "" {
 		resourceType = inferResourceType(operation, arguments)
@@ -392,12 +392,20 @@ func BuildToolRequest(name string, arguments map[string]any, tc ToolContext) mod
 		}
 	}
 
-	environment := resolveEnvironment(
-		normalizeEnvironment(tc.TargetMetadata["environment"]),
-		inferEnvironment(resourceName),
+	// Every resource-like argument counts, not only the first one, so a
+	// decoy argument ({"repo":"x","repository":"prod-api"}) cannot hide a
+	// production resource.
+	candidates := []string{normalizeEnvironment(tc.TargetMetadata["environment"])}
+	for _, key := range resourceKeys {
+		if value := firstString(arguments, key); value != "" {
+			candidates = append(candidates, inferEnvironment(value))
+		}
+	}
+	candidates = append(candidates,
 		inferEnvironment(tc.Target),
 		normalizeEnvironment(firstString(arguments, "environment", "env")),
 	)
+	environment := resolveEnvironment(candidates...)
 
 	metadata := make(map[string]string, len(tc.TargetMetadata)+2)
 	for key, value := range tc.TargetMetadata {
@@ -493,6 +501,10 @@ func splitToolName(name string) (string, string, bool) {
 	}
 	return name[:index], name[index+1:], true
 }
+
+// resourceKeys are the argument names that identify the target resource,
+// in precedence order for resource.name.
+var resourceKeys = []string{"repo", "repository", "table", "database", "resource", "name"}
 
 var destructiveVerbs = map[string]bool{
 	"delete": true, "del": true, "remove": true, "rm": true, "drop": true,

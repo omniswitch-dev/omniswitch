@@ -117,6 +117,9 @@ func TestBuildToolRequestTrustedAttributesWin(t *testing.T) {
 		{name: "case variant resource key", tool: "delete_repo", args: map[string]any{"Repo": "prod-api"}, tc: ToolContext{Target: "github"}, wantAct: "delete", wantEnv: "production", wantTool: "delete_repo"},
 		{name: "case variant env key", tool: "run", args: map[string]any{"ENV": "prod"}, wantAct: "call", wantEnv: "production", wantTool: "run"},
 		{name: "case variant action key", tool: "github.repo", args: map[string]any{"Operation": "delete"}, wantAct: "delete", wantEnv: "unknown", wantTool: "github"},
+		{name: "decoy resource argument cannot hide production", tool: "delete_repo", args: map[string]any{"repo": "x", "repository": "prod-api"}, wantAct: "delete", wantEnv: "production", wantTool: "delete_repo"},
+		{name: "later resource argument marks production", tool: "drop_table", args: map[string]any{"table": "orders", "database": "prod-db"}, wantAct: "delete", wantEnv: "production", wantTool: "drop_table"},
+		{name: "first known non-production resource", tool: "drop_table", args: map[string]any{"table": "orders", "database": "staging-db", "name": "dev"}, wantAct: "delete", wantEnv: "staging", wantTool: "drop_table"},
 		{name: "target name signals production", tool: "delete_repo", args: map[string]any{"repo": "acme"}, tc: ToolContext{Target: "github-prod"}, wantAct: "delete", wantEnv: "production", wantTool: "delete_repo"},
 	}
 	for _, tt := range tests {
@@ -147,5 +150,12 @@ func TestAgentNeverComesFromArguments(t *testing.T) {
 	}
 	if got.Args["agent_id"] != "admin" {
 		t.Fatalf("raw args not kept: %v", got.Args)
+	}
+}
+
+func TestResourceNameStaysFirstMatch(t *testing.T) {
+	got := BuildToolRequest("delete_repo", map[string]any{"repo": "x", "repository": "prod-api"}, ToolContext{})
+	if got.Resource.Name != "x" || got.Resource.Environment != "production" {
+		t.Fatalf("resource = %+v, want name x in production", got.Resource)
 	}
 }
