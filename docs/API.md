@@ -39,6 +39,12 @@ behave differently than requested:
 ```
 
 This applies to both the non-streaming and streaming (`stream: true`) paths.
+
+A request can set both `temperature` and `top_p`. When it sets both, the
+`anthropic` adapter and the `bedrock` adapter for Claude models send only
+`temperature`, because those models reject the pair. See
+[Claude sampling parameters](CONFIGURATION.md#claude-sampling-parameters).
+
 Requests to OpenAI-compatible upstreams (`openai`, `azure`, `groq`, `custom`,
 and any preset built on `custom`) never hit this path: every field above,
 plus any field OmniSwitch does not model by name, is forwarded verbatim.
@@ -66,18 +72,52 @@ be enforced.
 
 ### `POST /v1/responses`
 
-Implements the practical text/messages subset of the OpenAI Responses API:
-`model`, a string or message-array `input`, `instructions`, `temperature`,
-`max_output_tokens`, and `top_p`. It uses the same routing, cache, budget,
-guardrail, and logging path as chat completions. Responses streaming, tools,
-background mode, and other advanced Responses features are not yet supported.
+Implements a subset of the OpenAI Responses API. It uses the same routing,
+cache, budget, guardrail, and logging path as chat completions.
+
+Supported request fields:
+
+- `model`, `instructions`, `temperature`, `max_output_tokens`, `top_p`.
+- `input` as a string or as an array of `message` items. A message's content
+  is a string or an array of `input_text`, `output_text`, `text`,
+  `input_image` and `image_url` parts.
+- `tools` with named `function` tools, and `tool_choice` (`auto`, `none`,
+  `required`, or a named function).
+- `stream`.
+
+The endpoint returns HTTP 400 for:
+
+- built-in tools (for example `web_search` or `file_search`) and function
+  tools without a name;
+- other input item types, including `function_call_output`;
+- other content part types, such as audio and file parts.
+
+A client cannot send tool results back through this endpoint. Use
+[`POST /v1/chat/completions`](#post-v1chatcompletions) for multi-turn tool use.
+
+The endpoint ignores `previous_response_id`, `store`, `background`,
+`text.format`, `reasoning`, and other fields that are not in the list above.
+
+A response puts the assistant text in a `message` output item and each tool
+call in a `function_call` output item. With `stream: true`, the endpoint
+sends these SSE events: `response.created`, `response.output_text.delta`,
+`response.output_item.added`, `response.function_call_arguments.delta`,
+`response.function_call_arguments.done`, `response.output_item.done`, and
+`response.completed`, then `[DONE]`. An error after the stream starts sends
+`response.failed`.
 
 ### `POST /v1/messages`
 
 Accepts the core Anthropic Messages shape (`model`, `messages`, `system`,
-`max_tokens`, `temperature`, `top_p`) and returns an Anthropic-style message
-result through the common OmniSwitch path. Streaming and Anthropic tool use are
-not yet supported.
+`max_tokens`, `temperature`, `top_p`, `stream`) and returns an
+Anthropic-style message result through the common OmniSwitch path.
+
+The endpoint does not accept or forward client `tools`, so the routed model
+normally returns text only. The non-streaming response has one `text`
+content block. With `stream: true`, the endpoint sends Anthropic SSE events.
+If the upstream returns tool calls, the stream sends them as `tool_use`
+content blocks with `input_json_delta` deltas and ends with `stop_reason:
+tool_use`.
 
 ### `POST /v1/embeddings`
 
