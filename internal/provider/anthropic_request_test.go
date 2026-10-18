@@ -19,10 +19,19 @@ func TestAnthropicRequestSamplingParams(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(anthReq)
-	for _, want := range []string{`"temperature":1`, `"top_p":0.9`, `"stop_sequences":["END","STOP"]`} {
+	for _, want := range []string{`"temperature":1`, `"stop_sequences":["END","STOP"]`} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("missing %s in %s", want, raw)
 		}
+	}
+	// Claude rejects temperature together with top_p: keep temperature only.
+	if strings.Contains(string(raw), `"top_p"`) {
+		t.Errorf("top_p must be dropped when temperature is set: %s", raw)
+	}
+	anthReq, _ = toAnthropicRequest(ChatRequest{Model: "m", TopP: &topP}, false)
+	raw, _ = json.Marshal(anthReq)
+	if !strings.Contains(string(raw), `"top_p":0.9`) || strings.Contains(string(raw), `"temperature"`) {
+		t.Errorf("top_p alone must be sent: %s", raw)
 	}
 	zero := 0.0
 	anthReq, _ = toAnthropicRequest(ChatRequest{Model: "m", Temperature: &zero}, false)
@@ -78,6 +87,43 @@ func TestFinishReasonMapping(t *testing.T) {
 	for i, c := range cases {
 		if c.got != c.want {
 			t.Errorf("case %d: got %q, want %q", i, c.got, c.want)
+		}
+	}
+}
+
+func TestBedrockSamplingParamsForClaude(t *testing.T) {
+	b := NewBedrock("bedrock", "us-east-1", "ak", "sk", "", nil)
+	temp, topP := 0.5, 0.9
+	cases := []struct {
+		model    string
+		temp     *float64
+		wantTopP bool
+	}{
+		{"anthropic.claude-sonnet-4-5-20250929-v1:0", &temp, false},
+		{"us.anthropic.claude-haiku-4-5-20251001-v1:0", &temp, false},
+		{"arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-4-1-20250805-v1:0", &temp, false},
+		{"anthropic.claude-sonnet-4-5-20250929-v1:0", nil, true},
+		{"amazon.nova-pro-v1:0", &temp, true},
+		{"meta.llama3-70b-instruct-v1:0", &temp, true},
+	}
+	for _, c := range cases {
+		out, err := b.toConverseRequest(ChatRequest{
+			Model:       c.model,
+			Messages:    []Message{{Role: "user", Content: "hi"}},
+			Temperature: c.temp,
+			TopP:        &topP,
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", c.model, err)
+		}
+		if out.InferenceConfig == nil {
+			t.Fatalf("%s: inferenceConfig missing", c.model)
+		}
+		if got := out.InferenceConfig.TopP != nil; got != c.wantTopP {
+			t.Errorf("%s (temperature set=%v): topP sent=%v, want %v", c.model, c.temp != nil, got, c.wantTopP)
+		}
+		if c.temp != nil && out.InferenceConfig.Temperature == nil {
+			t.Errorf("%s: temperature must be sent", c.model)
 		}
 	}
 }

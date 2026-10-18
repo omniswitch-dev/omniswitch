@@ -243,6 +243,15 @@ func (b *Bedrock) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResp
 	}, meta, nil
 }
 
+// isBedrockClaudeModel reports whether a Bedrock model id (or inference
+// profile / ARN) refers to an Anthropic Claude model, for example
+// "anthropic.claude-sonnet-4-5-20250929-v1:0" or
+// "us.anthropic.claude-haiku-4-5-20251001-v1:0".
+func isBedrockClaudeModel(model string) bool {
+	m := strings.ToLower(model)
+	return strings.Contains(m, "anthropic.") || strings.Contains(m, "claude")
+}
+
 func (b *Bedrock) converseURL(model string) string {
 	if b.endpoint != "" {
 		return b.endpoint + "/model/" + url.PathEscape(model) + "/converse"
@@ -292,11 +301,18 @@ func (b *Bedrock) toConverseRequest(req ChatRequest) (bedrockConverseRequest, er
 		maxTokens = req.MaxCompletionTokens
 	}
 
+	topP := req.TopP
+	if topP != nil && req.Temperature != nil && isBedrockClaudeModel(req.Model) {
+		// Current Claude models reject temperature and top_p together.
+		// Match the Anthropic adapter: keep temperature, drop top_p.
+		topP = nil
+	}
+
 	out := bedrockConverseRequest{
 		InferenceConfig: &bedrockInferenceConfig{
 			MaxTokens:     maxTokens,
 			Temperature:   req.Temperature,
-			TopP:          req.TopP,
+			TopP:          topP,
 			StopSequences: append([]string(nil), req.Stop...),
 		},
 	}

@@ -295,7 +295,10 @@ func toAnthropicRequest(req ChatRequest, stream bool) (anthropicRequest, error) 
 		temperature := math.Min(math.Max(*req.Temperature, 0), 1)
 		anthReq.Temperature = &temperature
 	}
-	if req.TopP != nil {
+	// Current Claude models reject requests that set both temperature and
+	// top_p, and many OpenAI-shaped clients send both. Keep temperature
+	// (the more common knob) and drop top_p in that case.
+	if req.TopP != nil && req.Temperature == nil {
 		topP := *req.TopP
 		anthReq.TopP = &topP
 	}
