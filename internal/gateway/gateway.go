@@ -23,7 +23,6 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/omniswitch-dev/omniswitch/internal/cache"
-	"github.com/omniswitch-dev/omniswitch/internal/gatewayconfig"
 	"github.com/omniswitch-dev/omniswitch/internal/guardrail"
 	"github.com/omniswitch-dev/omniswitch/internal/provider"
 	"github.com/omniswitch-dev/omniswitch/internal/router"
@@ -80,15 +79,10 @@ type Handler struct {
 	settings   atomic.Pointer[handlerSettings]
 	settingsMu sync.Mutex
 
-	configRouters sync.Map
+	configRouters configRouterCache
 
 	shadowSlots   chan struct{}
 	shadowBreaker *router.CircuitBreaker
-}
-
-type cachedConfigRouter struct {
-	router    *router.Router
-	updatedAt time.Time
 }
 
 // New creates a new gateway handler.
@@ -753,32 +747,6 @@ func (h *Handler) logRequest(ctx context.Context, logCtx logContext) {
 			log.Printf("failed to increment API key spend: %v", err)
 		}
 	}
-}
-
-func (h *Handler) routerForConfig(ctx context.Context, ref string) (*router.Router, error) {
-	if h.store == nil {
-		return nil, fmt.Errorf("dynamic config %q requested but no store is configured", ref)
-	}
-	record, err := h.store.GetGatewayConfig(ctx, ref)
-	if err != nil {
-		return nil, fmt.Errorf("dynamic config %q not found", ref)
-	}
-	if cached, ok := h.configRouters.Load(record.Name); ok {
-		value := cached.(cachedConfigRouter)
-		if value.updatedAt.Equal(record.UpdatedAt) {
-			return value.router, nil
-		}
-	}
-	cfg, err := gatewayconfig.Parse([]byte(record.Body), "."+record.Format)
-	if err != nil {
-		return nil, fmt.Errorf("dynamic config %q is invalid: %w", record.Name, err)
-	}
-	configRouter := h.router.CloneWithRoutes(cfg.Routes)
-	h.configRouters.Store(record.Name, cachedConfigRouter{router: configRouter, updatedAt: record.UpdatedAt})
-	if record.ID != record.Name {
-		h.configRouters.Store(record.ID, cachedConfigRouter{router: configRouter, updatedAt: record.UpdatedAt})
-	}
-	return configRouter, nil
 }
 
 func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Context, sc streamContext) {
