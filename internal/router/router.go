@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/cel-go/cel"
@@ -68,6 +70,10 @@ type Router struct {
 	rrCounters map[string]int // round-robin counters per model
 	breakers   *CircuitBreaker
 	latency    *latencyTracker
+	// conditions caches compiled CEL programs for conditional variants,
+	// keyed by trimmed expression. It is rebuilt whenever the route table
+	// is replaced so it only holds expressions of the current routes.
+	conditions map[string]compiledCondition
 }
 
 type latencyTracker struct {
@@ -118,6 +124,7 @@ func New(registry *provider.Registry) *Router {
 		rrCounters: make(map[string]int),
 		breakers:   NewCircuitBreaker(5, 60*time.Second),
 		latency:    newLatencyTracker(),
+		conditions: make(map[string]compiledCondition),
 	}
 }
 
@@ -132,6 +139,10 @@ func (r *Router) SetRoute(model string, route Route) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.routes[model] = route
+	if r.conditions == nil {
+		r.conditions = make(map[string]compiledCondition)
+	}
+	compileRouteConditions(r.conditions, map[string]Route{model: route})
 }
 
 // ReplaceRoutes atomically swaps the full route table, removing routes that
@@ -143,6 +154,8 @@ func (r *Router) ReplaceRoutes(routes map[string]Route) {
 	for model, route := range routes {
 		r.routes[model] = route
 	}
+	r.conditions = make(map[string]compiledCondition)
+	compileRouteConditions(r.conditions, r.routes)
 }
 
 // RouteFor reports whether a logical model has a configured route.
@@ -167,6 +180,10 @@ func (r *Router) CloneWithRoutes(overrides map[string]Route) *Router {
 	for model, route := range overrides {
 		cloned.routes[model] = route
 	}
+	for expression, compiled := range r.conditions {
+		cloned.conditions[expression] = compiled
+	}
+	compileRouteConditions(cloned.conditions, overrides)
 	return cloned
 }
 
@@ -247,8 +264,11 @@ func (r *Router) Embeddings(ctx context.Context, req provider.EmbeddingRequest, 
 			}
 			return response, meta, nil
 		}
-		r.recordFailure(current.Name())
+		r.recordAttemptFailure(ctx, current.Name(), err)
 		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	return provider.EmbeddingResponse{}, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all embedding providers exhausted: %w", lastErr)
 }
@@ -283,8 +303,11 @@ func (r *Router) ImageGeneration(ctx context.Context, req provider.ImageRequest,
 			}
 			return response, meta, nil
 		}
-		r.recordFailure(current.Name())
+		r.recordAttemptFailure(ctx, current.Name(), err)
 		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	return provider.ImageResponse{}, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all image providers exhausted: %w", lastErr)
 }
@@ -319,8 +342,11 @@ func (r *Router) Transcription(ctx context.Context, req provider.TranscriptionRe
 			}
 			return response, meta, nil
 		}
-		r.recordFailure(current.Name())
+		r.recordAttemptFailure(ctx, current.Name(), err)
 		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	return provider.TranscriptionResponse{}, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all transcription providers exhausted: %w", lastErr)
 }
@@ -355,8 +381,11 @@ func (r *Router) Speech(ctx context.Context, req provider.SpeechRequest, provide
 			return &cancelReadCloser{ReadCloser: body, cancel: cancel}, contentType, meta, nil
 		}
 		cancel()
-		r.recordFailure(current.Name())
+		r.recordAttemptFailure(ctx, current.Name(), err)
 		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	return nil, "", provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all speech providers exhausted: %w", lastErr)
 }
@@ -415,8 +444,11 @@ func (r *Router) Rerank(ctx context.Context, req provider.RerankRequest, provide
 			}
 			return response, meta, nil
 		}
-		r.recordFailure(current.Name())
+		r.recordAttemptFailure(ctx, current.Name(), err)
 		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	return provider.RerankResponse{}, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all rerank providers exhausted: %w", lastErr)
 }
@@ -470,16 +502,19 @@ func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, provider
 				return resp, meta, nil
 			}
 			finishProviderSpan(span, meta, err)
-			r.recordFailure(prov.Name())
+			r.recordAttemptFailure(ctx, prov.Name(), err)
 			lastErr = err
 			meta.Retries = attempt
 
-			// Don't retry on context cancellation.
-			if ctx.Err() != nil || !isRetryable(err, route.RetryCodes) {
-				if ctx.Err() != nil {
-					return provider.ChatResponse{}, meta, ctx.Err()
-				}
-				return provider.ChatResponse{}, meta, err
+			// The caller is gone: neither retries nor fallbacks can help.
+			if ctx.Err() != nil {
+				return provider.ChatResponse{}, meta, ctx.Err()
+			}
+			// A non-retryable error ends the retries against this provider,
+			// but the next provider in the fallback chain is still tried
+			// (the same behaviour as ExecuteStream).
+			if !isRetryable(err, route.RetryCodes) {
+				break
 			}
 
 			// Brief backoff before retry.
@@ -515,6 +550,7 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 		return nil, provider.ProviderMeta{}, fmt.Errorf("no provider found for model %q", req.Model)
 	}
 
+	timeout := routeTimeout(route.Timeout)
 	var lastErr error
 	for i, prov := range providers {
 		if !r.allowProvider(prov.Name()) {
@@ -528,9 +564,7 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 				attempts += route.MaxRetries
 			}
 			for attempt := 0; attempt < attempts; attempt++ {
-				callCtx, cancel := withRouteTimeout(ctx, route.Timeout)
-				callCtx, span := startProviderSpan(callCtx, prov.Name(), req.Model, attempt, i > 0, true)
-				chunks, meta, err := streamer.ChatCompletionStream(callCtx, req)
+				chunks, meta, err := r.startStream(ctx, prov.Name(), streamer, req, timeout, attempt, i > 0)
 				if err == nil {
 					r.recordSuccess(prov.Name())
 					r.recordLatency(prov.Name(), meta.Latency)
@@ -539,14 +573,14 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 					if meta.Model == "" {
 						meta.Model = req.Model
 					}
-					finishProviderSpan(span, meta, nil)
 					return chunks, meta, nil
 				}
-				cancel()
-				finishProviderSpan(span, meta, err)
-				r.recordFailure(prov.Name())
+				r.recordAttemptFailure(ctx, prov.Name(), err)
 				lastErr = err
-				if ctx.Err() != nil || !isRetryable(err, route.RetryCodes) {
+				if ctx.Err() != nil {
+					return nil, meta, ctx.Err()
+				}
+				if !isRetryable(err, route.RetryCodes) {
 					break
 				}
 				if attempt < attempts-1 {
@@ -573,7 +607,7 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 			return provider.StreamFromResponse(ctx, resp), meta, nil
 		}
 		finishProviderSpan(span, meta, err)
-		r.recordFailure(prov.Name())
+		r.recordAttemptFailure(ctx, prov.Name(), err)
 		lastErr = err
 		if ctx.Err() != nil {
 			return nil, meta, ctx.Err()
@@ -581,6 +615,187 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 	}
 
 	return nil, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all providers exhausted: %w", lastErr)
+}
+
+// errStreamIdleTimeout is reported on the terminal chunk when an upstream
+// stream stays silent for longer than the route timeout after it started.
+var errStreamIdleTimeout = errors.New("stream idle timeout exceeded")
+
+// finalChunkGrace bounds how long the relay waits to hand the terminal error
+// chunk to a consumer whose request context has already ended.
+const finalChunkGrace = time.Second
+
+// startStream runs one streaming attempt against a provider.
+//
+// The route timeout is a time-to-first-response limit: it covers opening the
+// upstream stream and receiving its first chunk. Once the first chunk has
+// arrived the stream is no longer bound by the route timeout, so long
+// generations are not cut off part way; instead the relay applies an idle
+// timeout of the same length between chunks. Because nothing has been sent
+// to the client before the first chunk, a failure in that phase is returned
+// as an error and the caller may retry or fall back to another provider.
+//
+// The returned channel always ends either with the source closing normally
+// or with a terminal chunk whose Err field is set, and the attempt's context
+// is cancelled when the relay finishes so no timer or upstream body is left
+// running.
+func (r *Router) startStream(ctx context.Context, providerName string, streamer provider.StreamProvider, req provider.ChatRequest, timeout time.Duration, attempt int, fallback bool) (<-chan provider.ChatResponseChunk, provider.ProviderMeta, error) {
+	attemptCtx, cancel := context.WithCancel(ctx)
+	var timedOut atomic.Bool
+	var firstByte *time.Timer
+	if timeout > 0 {
+		firstByte = time.AfterFunc(timeout, func() {
+			timedOut.Store(true)
+			cancel()
+		})
+	}
+	stopFirstByte := func() bool {
+		if firstByte == nil {
+			return true
+		}
+		return firstByte.Stop()
+	}
+	timeoutErr := func(name string) error {
+		return fmt.Errorf("provider %q did not start streaming within route timeout %s: %w", name, timeout, context.DeadlineExceeded)
+	}
+	fail := func(span oteltrace.Span, meta provider.ProviderMeta, err error) (<-chan provider.ChatResponseChunk, provider.ProviderMeta, error) {
+		stopFirstByte()
+		cancel()
+		if timedOut.Load() && ctx.Err() == nil {
+			err = timeoutErr(providerName)
+		}
+		if meta.Error == "" {
+			meta.Error = err.Error()
+		}
+		finishProviderSpan(span, meta, err)
+		return nil, meta, err
+	}
+
+	spanCtx, span := startProviderSpan(attemptCtx, providerName, req.Model, attempt, fallback, true)
+	source, meta, err := streamer.ChatCompletionStream(spanCtx, req)
+	if err != nil {
+		return fail(span, meta, err)
+	}
+
+	var first provider.ChatResponseChunk
+	var gotFirst bool
+	select {
+	case first, gotFirst = <-source:
+	case <-attemptCtx.Done():
+	}
+	if !gotFirst {
+		if attemptCtx.Err() != nil {
+			// Timed out or cancelled before anything reached the client.
+			go drainChunks(source)
+			cause := ctx.Err()
+			if cause == nil {
+				cause = attemptCtx.Err()
+			}
+			return fail(span, meta, cause)
+		}
+		// The upstream closed without sending anything: relay an empty
+		// stream as before.
+		stopFirstByte()
+		cancel()
+		finishProviderSpan(span, meta, nil)
+		empty := make(chan provider.ChatResponseChunk)
+		close(empty)
+		return empty, meta, nil
+	}
+	if !stopFirstByte() {
+		// The route timeout fired just as the first chunk arrived; the
+		// attempt context is already cancelled, so the stream is unusable.
+		go drainChunks(source)
+		return fail(span, meta, timeoutErr(providerName))
+	}
+	if first.Err != nil && len(first.Choices) == 0 {
+		// The upstream failed before producing output; nothing was sent to
+		// the client, so let the caller retry or fall back.
+		go drainChunks(source)
+		return fail(span, meta, first.Err)
+	}
+	finishProviderSpan(span, meta, nil)
+
+	out := make(chan provider.ChatResponseChunk)
+	go relayStream(ctx, cancel, source, first, out, timeout)
+	return out, meta, nil
+}
+
+// relayStream forwards chunks from source to out until source closes, the
+// request context ends, or the stream stays idle for longer than idle. It
+// always cancels the attempt context and closes out when it returns.
+func relayStream(ctx context.Context, cancel context.CancelFunc, source <-chan provider.ChatResponseChunk, first provider.ChatResponseChunk, out chan<- provider.ChatResponseChunk, idle time.Duration) {
+	sourceClosed := false
+	defer func() {
+		cancel()
+		if !sourceClosed {
+			// The upstream sees the cancellation and should close soon;
+			// keep reading so a producer blocked on a send can exit.
+			go drainChunks(source)
+		}
+		close(out)
+	}()
+
+	send := func(chunk provider.ChatResponseChunk) bool {
+		select {
+		case out <- chunk:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	sendFinal := func(err error) {
+		final := provider.ChatResponseChunk{Err: err}
+		if ctx.Err() == nil {
+			send(final)
+			return
+		}
+		grace := time.NewTimer(finalChunkGrace)
+		defer grace.Stop()
+		select {
+		case out <- final:
+		case <-grace.C:
+		}
+	}
+
+	if !send(first) {
+		sendFinal(ctx.Err())
+		return
+	}
+	var idleC <-chan time.Time
+	var idleTimer *time.Timer
+	if idle > 0 {
+		idleTimer = time.NewTimer(idle)
+		defer idleTimer.Stop()
+		idleC = idleTimer.C
+	}
+	for {
+		select {
+		case chunk, ok := <-source:
+			if !ok {
+				sourceClosed = true
+				return
+			}
+			if idleTimer != nil {
+				idleTimer.Reset(idle)
+			}
+			if !send(chunk) {
+				sendFinal(ctx.Err())
+				return
+			}
+		case <-ctx.Done():
+			sendFinal(ctx.Err())
+			return
+		case <-idleC:
+			sendFinal(fmt.Errorf("%w after %s", errStreamIdleTimeout, idle))
+			return
+		}
+	}
+}
+
+func drainChunks(source <-chan provider.ChatResponseChunk) {
+	for range source {
+	}
 }
 
 func startProviderSpan(ctx context.Context, providerName, model string, attempt int, fallback bool, stream bool) (context.Context, oteltrace.Span) {
@@ -628,7 +843,7 @@ func (r *Router) selectVariant(model string, req provider.ChatRequest) (Variant,
 
 	variants := make([]Variant, 0, len(route.Variants))
 	for _, variant := range route.Variants {
-		if strings.TrimSpace(variant.Condition) != "" && !matchesCondition(variant.Condition, req) {
+		if strings.TrimSpace(variant.Condition) != "" && !r.matchesCondition(variant.Condition, req) {
 			continue
 		}
 		variants = append(variants, variant)
@@ -697,6 +912,28 @@ func (r *Router) recordFailure(providerName string) {
 	if breaker != nil {
 		breaker.RecordFailure(providerName)
 	}
+}
+
+// recordAttemptFailure counts a failed provider call against the circuit
+// breaker unless the failure was caused by the caller: a cancelled request
+// (client disconnect) or an expired parent deadline says nothing about the
+// provider's health, and counting it would let a handful of aborted requests
+// take a healthy provider out of rotation for every tenant.
+func (r *Router) recordAttemptFailure(ctx context.Context, providerName string, err error) {
+	if !countsAsProviderFailure(ctx, err) {
+		return
+	}
+	r.recordFailure(providerName)
+}
+
+func countsAsProviderFailure(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+	return !errors.Is(err, context.Canceled)
 }
 
 func (r *Router) recordLatency(providerName string, latency time.Duration) {
@@ -828,14 +1065,23 @@ func appendUniqueProvider(providers []provider.Provider, candidate provider.Prov
 }
 
 func withRouteTimeout(ctx context.Context, timeout string) (context.Context, context.CancelFunc) {
-	if strings.TrimSpace(timeout) == "" {
-		return context.WithCancel(ctx)
-	}
-	duration, err := time.ParseDuration(timeout)
-	if err != nil || duration <= 0 {
+	duration := routeTimeout(timeout)
+	if duration <= 0 {
 		return context.WithCancel(ctx)
 	}
 	return context.WithTimeout(ctx, duration)
+}
+
+// routeTimeout parses a route timeout; zero means no timeout.
+func routeTimeout(timeout string) time.Duration {
+	if strings.TrimSpace(timeout) == "" {
+		return 0
+	}
+	duration, err := time.ParseDuration(strings.TrimSpace(timeout))
+	if err != nil || duration <= 0 {
+		return 0
+	}
+	return duration
 }
 
 func retryBackoff(value string, attempt int) time.Duration {
@@ -885,23 +1131,89 @@ func isRetryable(err error, codes []int) bool {
 	return false
 }
 
-func matchesCondition(expression string, req provider.ChatRequest) bool {
-	env, err := cel.NewEnv(
+// conditionEnv is the shared CEL environment for conditional variants.
+var conditionEnv = sync.OnceValues(func() (*cel.Env, error) {
+	return cel.NewEnv(
 		cel.Variable("model", cel.StringType),
 		cel.Variable("prompt", cel.StringType),
 	)
+})
+
+// compiledCondition is a conditional-variant expression compiled once.
+// A nil program with a non-nil err marks an invalid expression, which never
+// matches.
+type compiledCondition struct {
+	program cel.Program
+	err     error
+}
+
+func compileCondition(expression string) compiledCondition {
+	env, err := conditionEnv()
 	if err != nil {
-		return false
+		return compiledCondition{err: err}
 	}
 	ast, issues := env.Compile(expression)
 	if issues != nil && issues.Err() != nil {
-		return false
+		return compiledCondition{err: issues.Err()}
+	}
+	if ast.OutputType() != cel.BoolType && ast.OutputType() != cel.DynType {
+		return compiledCondition{err: fmt.Errorf("expression must return bool, got %s", ast.OutputType())}
 	}
 	program, err := env.Program(ast)
 	if err != nil {
+		return compiledCondition{err: err}
+	}
+	return compiledCondition{program: program}
+}
+
+// compileRouteConditions compiles every conditional variant of the routes
+// into cache, logging each invalid expression once.
+func compileRouteConditions(cache map[string]compiledCondition, routes map[string]Route) {
+	for model, route := range routes {
+		for _, variant := range route.Variants {
+			expression := strings.TrimSpace(variant.Condition)
+			if expression == "" {
+				continue
+			}
+			if _, ok := cache[expression]; ok {
+				continue
+			}
+			compiled := compileCondition(expression)
+			if compiled.err != nil {
+				log.Printf("router: route %q variant %q has an invalid condition %q; the variant will never be selected: %v", model, variant.Name, expression, compiled.err)
+			}
+			cache[expression] = compiled
+		}
+	}
+}
+
+// condition returns the compiled program for a conditional variant,
+// compiling (and caching) it on first use if the route table did not
+// already contain it.
+func (r *Router) condition(expression string) compiledCondition {
+	expression = strings.TrimSpace(expression)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if compiled, ok := r.conditions[expression]; ok {
+		return compiled
+	}
+	compiled := compileCondition(expression)
+	if compiled.err != nil {
+		log.Printf("router: invalid route condition %q; the variant will never be selected: %v", expression, compiled.err)
+	}
+	if r.conditions == nil {
+		r.conditions = map[string]compiledCondition{}
+	}
+	r.conditions[expression] = compiled
+	return compiled
+}
+
+func (r *Router) matchesCondition(expression string, req provider.ChatRequest) bool {
+	compiled := r.condition(expression)
+	if compiled.program == nil {
 		return false
 	}
-	result, _, err := program.Eval(map[string]any{"model": req.Model, "prompt": promptText(req)})
+	result, _, err := compiled.program.Eval(map[string]any{"model": req.Model, "prompt": promptText(req)})
 	if err != nil {
 		return false
 	}
