@@ -47,23 +47,18 @@ func (h *Handler) CreatePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	version, err := h.store.NextPromptVersion(r.Context(), req.Name)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	now := time.Now().UTC()
-	p := store.Prompt{
+	// CreatePromptVersion picks the version inside the INSERT, so two
+	// concurrent creates for one name cannot get the same version.
+	p, err := h.store.CreatePromptVersion(r.Context(), store.Prompt{
 		ID:        newID("prompt"),
 		Name:      req.Name,
-		Version:   version,
 		Template:  req.Template,
 		Variables: extractVariables(req.Template),
 		CreatedAt: now,
 		UpdatedAt: now,
-	}
-
-	if err := h.store.InsertPrompt(r.Context(), p); err != nil {
+	})
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
