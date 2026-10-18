@@ -329,3 +329,43 @@ func TestPromptsUpgradePostgres(t *testing.T) {
 		st.Close()
 	}
 }
+
+func TestListAPIKeysForTenant(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, st *Store) {
+		seedTenants(t, st)
+		ctx := context.Background()
+		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		for i, ws := range []string{"", "ws_a1", "ws_a2", "ws_b"} {
+			id := "key_global"
+			if ws != "" {
+				id = "key_" + ws
+			}
+			key := APIKey{ID: id, Name: id, KeyHash: "hash-" + id, KeyPrefix: id, WorkspaceID: ws, CreatedAt: base.Add(time.Duration(i) * time.Minute), Enabled: true}
+			if err := st.InsertAPIKey(ctx, key); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cases := []struct {
+			name   string
+			filter TenantFilter
+			want   []string
+		}{
+			{name: "global", filter: TenantFilter{}, want: []string{"key_global", "key_ws_a1", "key_ws_a2", "key_ws_b"}},
+			{name: "organization", filter: TenantFilter{OrganizationID: "org_a"}, want: []string{"key_ws_a1", "key_ws_a2"}},
+			{name: "workspace", filter: TenantFilter{WorkspaceID: "ws_a1", OrganizationID: "org_a"}, want: []string{"key_ws_a1"}},
+			{name: "workspace with forged organization", filter: TenantFilter{WorkspaceID: "ws_b", OrganizationID: "org_a"}, want: []string{"key_ws_b"}},
+			{name: "unknown organization", filter: TenantFilter{OrganizationID: "org_x"}, want: []string{}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				keys, err := st.ListAPIKeysForTenant(ctx, tc.filter)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := sortedIDs(keys, func(k APIKey) string { return k.ID }); !equalStrings(got, tc.want) {
+					t.Errorf("keys = %v, want %v", got, tc.want)
+				}
+			})
+		}
+	})
+}

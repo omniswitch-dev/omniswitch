@@ -74,12 +74,30 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "cannot create a key with a role above your own")
 			return
 		}
-		if caller.WorkspaceID != "" {
-			if req.WorkspaceID != "" && req.WorkspaceID != caller.WorkspaceID {
+		switch scope := gateway.ScopeFromContext(r.Context()); {
+		case scope.WorkspaceID != "":
+			if req.WorkspaceID != "" && req.WorkspaceID != scope.WorkspaceID {
 				writeError(w, http.StatusForbidden, "cannot create a key in another workspace")
 				return
 			}
-			req.WorkspaceID = caller.WorkspaceID
+			req.WorkspaceID = scope.WorkspaceID
+		case !scope.Global():
+			// An organization-scoped caller creates keys only in the
+			// workspaces of its organization; a key without a workspace
+			// would be global.
+			if req.WorkspaceID == "" {
+				writeError(w, http.StatusBadRequest, "workspace_id is required: keys belong to a workspace of your organization")
+				return
+			}
+			visible, err := h.keyInScope(r.Context(), scope, req.WorkspaceID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "look up workspace")
+				return
+			}
+			if !visible {
+				writeError(w, http.StatusNotFound, "workspace not found")
+				return
+			}
 		}
 	}
 
@@ -116,19 +134,11 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 // ListAPIKeys handles GET /api/keys.
 func (h *Handler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
-	keys, err := h.store.ListAPIKeys(r.Context())
+	scope := gateway.ScopeFromContext(r.Context())
+	keys, err := h.store.ListAPIKeysForTenant(r.Context(), store.TenantFilter{WorkspaceID: scope.WorkspaceID, OrganizationID: scope.OrganizationID})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
-	}
-	if caller, ok := gateway.IdentityFromContext(r.Context()); ok && caller.WorkspaceID != "" {
-		scoped := keys[:0]
-		for _, key := range keys {
-			if key.WorkspaceID == caller.WorkspaceID {
-				scoped = append(scoped, key)
-			}
-		}
-		keys = scoped
 	}
 	if keys == nil {
 		keys = []store.APIKey{}
@@ -153,8 +163,13 @@ func (h *Handler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "look up api key")
 			return
 		}
-		if caller.WorkspaceID != "" && target.WorkspaceID != caller.WorkspaceID {
-			// Same answer as a missing key, so ids in other workspaces are
+		visible, err := h.keyInScope(r.Context(), gateway.ScopeFromContext(r.Context()), target.WorkspaceID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "look up api key")
+			return
+		}
+		if !visible {
+			// Same answer as a missing key, so ids in other tenants are
 			// not confirmed.
 			writeError(w, http.StatusNotFound, "api key not found")
 			return

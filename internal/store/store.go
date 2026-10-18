@@ -1101,10 +1101,18 @@ func (s *Store) GetAPIKeyByHash(ctx context.Context, hash string) (APIKey, error
 
 // ListAPIKeys returns all API keys.
 func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
+	return s.listAPIKeys(ctx, "")
+}
+
+// listAPIKeys returns the API keys that match the optional SQL condition.
+func (s *Store) listAPIKeys(ctx context.Context, where string, args ...any) ([]APIKey, error) {
+	if where != "" {
+		where = " WHERE " + where
+	}
 	rows, err := s.query(ctx,
 		`SELECT id, name, key_prefix, created_at, expires_at, COALESCE(rate_limit, 0), COALESCE(budget_usd, 0), COALESCE(spend_usd, 0),
 			COALESCE(monthly_cost_budget, 0), COALESCE(monthly_token_budget, 0), COALESCE(enabled, 0), workspace_id, role
-		FROM api_keys ORDER BY created_at DESC`)
+		FROM api_keys`+where+` ORDER BY created_at DESC`, args...)
 	if err != nil {
 		return nil, err
 	}

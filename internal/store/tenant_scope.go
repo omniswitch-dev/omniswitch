@@ -102,6 +102,20 @@ func (s *Store) ListWorkspacesForTenant(ctx context.Context, f TenantFilter, org
 	return workspaces, rows.Err()
 }
 
+// ListAPIKeysForTenant returns the API keys the filter can see: every key
+// for a global filter, the keys of the workspace for a workspace filter, and
+// the keys of the organization's workspaces for an organization filter.
+// Keys without a workspace are global and only a global filter sees them.
+func (s *Store) ListAPIKeysForTenant(ctx context.Context, f TenantFilter) ([]APIKey, error) {
+	if f.Global() {
+		return s.ListAPIKeys(ctx)
+	}
+	if f.WorkspaceID != "" {
+		return s.listAPIKeys(ctx, "workspace_id = ?", f.WorkspaceID)
+	}
+	return s.listAPIKeys(ctx, "workspace_id IN (SELECT id FROM workspaces WHERE organization_id = ?)", f.OrganizationID)
+}
+
 // memberTenantCondition returns a SQL condition, over a workspace_members
 // row aliased m, that holds when the membership belongs to a workspace the
 // filter can see. It must not be called with a global filter.
