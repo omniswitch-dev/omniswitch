@@ -161,13 +161,19 @@ func (h *Handler) requestBodyLimit() int64 {
 }
 
 // SetGuardrails atomically swaps the guardrail engine; in-flight requests keep
-// using their loaded engine until completion. Used by config hot-reload.
+// using their loaded engine until completion.
 func (h *Handler) SetGuardrails(engine *guardrail.Engine) {
+	h.SwapGuardrails(engine)
+}
+
+// SwapGuardrails atomically installs engine and returns the engine it
+// replaced, so config hot-reload can close the old engine once in-flight
+// requests no longer need it.
+func (h *Handler) SwapGuardrails(engine *guardrail.Engine) *guardrail.Engine {
 	if engine == nil {
-		h.guardrails.Store(&guardrail.Engine{})
-		return
+		engine = &guardrail.Engine{}
 	}
-	h.guardrails.Store(engine)
+	return h.guardrails.Swap(engine)
 }
 
 func (h *Handler) SetSemanticCache(threshold float64) {

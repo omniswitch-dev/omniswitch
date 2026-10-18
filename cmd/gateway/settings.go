@@ -592,11 +592,13 @@ func applyHotConfig(cfg gatewayconfig.Config, rtr *router.Router, gw *gateway.Ha
 		effective[model] = route
 	}
 	rtr.ReplaceRoutes(effective)
-	gr := guardrail.NewEngine()
-	if len(base.guardrailConfig.Actions) > 0 || len(cfg.Guardrails.Rules) > 0 || len(cfg.Guardrails.ToolRules) > 0 || len(cfg.Guardrails.Webhooks) > 0 || len(cfg.Guardrails.LLMJudges) > 0 {
-		gr = guardrail.NewEngineWithConfig(guardrailConfigFromGatewayConfig(cfg, base.guardrailConfig))
+	// Guardrails come only from the config file, so the new engine is built
+	// from the new file alone: a rule or action removed from the file is
+	// removed from the running engine too.
+	gr := guardrail.NewEngineWithConfig(guardrailConfigFromGatewayConfig(cfg, guardrail.Config{}))
+	if old := gw.SwapGuardrails(gr); old != gr {
+		retireGuardrailEngine(old)
 	}
-	gw.SetGuardrails(gr)
 
 	if cfg.Gateway.CacheThreshold != nil {
 		gw.SetSemanticCache(*cfg.Gateway.CacheThreshold)
