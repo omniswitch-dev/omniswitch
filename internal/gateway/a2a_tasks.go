@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +66,9 @@ const (
 	a2aTaskTTL = time.Hour
 	// a2aMaxTasks caps the number of retained tasks.
 	a2aMaxTasks = 10000
+	// a2aMaxTasksPerOwner caps the retained tasks of one API key and
+	// workspace.
+	a2aMaxTasksPerOwner = 1000
 	// a2aPruneInterval rate-limits the expiry sweep.
 	a2aPruneInterval = time.Minute
 )
@@ -168,62 +171,105 @@ func (t *a2aTask) terminal() bool {
 	return isTerminalA2AState(t.status.State)
 }
 
-// a2aTaskStore is a bounded, TTL-expiring task registry.
+// a2aTaskStore is a bounded, TTL-expiring task registry. Each owner (API
+// key plus workspace) may hold at most maxPerOwner tasks; at that cap the
+// owner's own oldest task (finished ones first) makes room. The global cap
+// is a memory backstop: when it is reached the owner holding the most tasks
+// gives one up, so one caller cannot push out the tasks of others.
 type a2aTaskStore struct {
-	mu        sync.Mutex
-	tasks     map[string]*a2aTask
-	lastPrune time.Time
-	max       int
-	ttl       time.Duration
+	mu    sync.Mutex
+	tasks map[string]*a2aTask
+	// owners lists each owner's tasks in insertion (creation) order.
+	owners      map[string][]*a2aTask
+	lastPrune   time.Time
+	max         int
+	maxPerOwner int
+	ttl         time.Duration
 }
 
-func newA2ATaskStore(max int, ttl time.Duration) *a2aTaskStore {
-	return &a2aTaskStore{tasks: map[string]*a2aTask{}, max: max, ttl: ttl}
+func newA2ATaskStore(max, maxPerOwner int, ttl time.Duration) *a2aTaskStore {
+	return &a2aTaskStore{tasks: map[string]*a2aTask{}, owners: map[string][]*a2aTask{}, max: max, maxPerOwner: maxPerOwner, ttl: ttl}
 }
 
-var a2aTasks = newA2ATaskStore(a2aMaxTasks, a2aTaskTTL)
+var a2aTasks = newA2ATaskStore(a2aMaxTasks, a2aMaxTasksPerOwner, a2aTaskTTL)
+
+func (t *a2aTask) ownerKey() string {
+	return t.ownerKeyID + "\x00" + t.workspaceID
+}
 
 func (s *a2aTaskStore) put(task *a2aTask) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
-	if now.Sub(s.lastPrune) >= a2aPruneInterval || len(s.tasks) >= s.max {
+	if now.Sub(s.lastPrune) >= a2aPruneInterval {
 		s.pruneLocked(now)
 	}
+	owner := task.ownerKey()
+	for len(s.owners[owner]) >= s.maxPerOwner {
+		s.evictLocked(owner)
+	}
 	for len(s.tasks) >= s.max {
-		s.evictOldestLocked()
+		s.evictLocked(s.largestOwnerLocked())
 	}
 	s.tasks[task.id] = task
+	s.owners[owner] = append(s.owners[owner], task)
 }
 
 func (s *a2aTaskStore) pruneLocked(now time.Time) {
 	s.lastPrune = now
 	cutoff := now.Add(-s.ttl)
-	for id, task := range s.tasks {
-		if task.createdAt.Before(cutoff) {
-			delete(s.tasks, id)
+	for owner, list := range s.owners {
+		kept := list[:0]
+		for _, task := range list {
+			if task.createdAt.Before(cutoff) {
+				delete(s.tasks, task.id)
+				continue
+			}
+			kept = append(kept, task)
+		}
+		clear(list[len(kept):])
+		if len(kept) == 0 {
+			delete(s.owners, owner)
+		} else {
+			s.owners[owner] = kept
 		}
 	}
 }
 
-// evictOldestLocked drops the oldest terminal task, or the oldest task when
-// every retained task is still working.
-func (s *a2aTaskStore) evictOldestLocked() {
-	var oldestID, oldestTerminalID string
-	var oldest, oldestTerminal time.Time
-	for id, task := range s.tasks {
-		if oldestID == "" || task.createdAt.Before(oldest) {
-			oldestID, oldest = id, task.createdAt
-		}
-		if task.terminal() && (oldestTerminalID == "" || task.createdAt.Before(oldestTerminal)) {
-			oldestTerminalID, oldestTerminal = id, task.createdAt
+func (s *a2aTaskStore) largestOwnerLocked() string {
+	largest, size := "", -1
+	for owner, list := range s.owners {
+		if len(list) > size {
+			largest, size = owner, len(list)
 		}
 	}
-	if oldestTerminalID != "" {
-		delete(s.tasks, oldestTerminalID)
+	return largest
+}
+
+// evictLocked drops the owner's oldest terminal task, or its oldest task
+// when all of them are still working. An evicted working task is canceled:
+// once it leaves the store no one could cancel it any more.
+func (s *a2aTaskStore) evictLocked(owner string) {
+	list := s.owners[owner]
+	if len(list) == 0 {
 		return
 	}
-	delete(s.tasks, oldestID)
+	index := 0
+	for i, task := range list {
+		if task.terminal() {
+			index = i
+			break
+		}
+	}
+	task := list[index]
+	list = slices.Delete(list, index, index+1)
+	if len(list) == 0 {
+		delete(s.owners, owner)
+	} else {
+		s.owners[owner] = list
+	}
+	delete(s.tasks, task.id)
+	task.requestCancel()
 }
 
 // get returns the task only to the key and workspace that created it.
@@ -238,14 +284,4 @@ func (s *a2aTaskStore) get(id, keyID, workspaceID string) (*a2aTask, bool) {
 		return nil, false
 	}
 	return task, true
-}
-
-func (s *a2aTaskStore) len() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.tasks)
-}
-
-func a2aTaskNotFoundError(id string) string {
-	return fmt.Sprintf("task %q not found", id)
 }

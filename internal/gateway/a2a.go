@@ -320,34 +320,36 @@ func a2aTaskID(w http.ResponseWriter, request a2aRPCRequest) (string, bool) {
 	return strings.TrimSpace(params.ID), true
 }
 
-func (h *Handler) a2aGetTask(w http.ResponseWriter, r *http.Request, request a2aRPCRequest) {
+// a2aCallerTask resolves params.id to a task owned by the caller. It writes
+// the JSON-RPC error and reports false when the id is missing or unknown.
+func a2aCallerTask(w http.ResponseWriter, r *http.Request, request a2aRPCRequest) (*a2aTask, bool) {
 	id, ok := a2aTaskID(w, request)
 	if !ok {
-		return
+		return nil, false
 	}
 	keyID, workspaceID := a2aCaller(r)
 	task, ok := a2aTasks.get(id, keyID, workspaceID)
 	if !ok {
-		writeA2AError(w, request.ID, -32001, a2aTaskNotFoundError(id))
-		return
+		writeA2AError(w, request.ID, -32001, fmt.Sprintf("task %q not found", id))
+		return nil, false
 	}
-	writeA2AResponse(w, request.ID, task.snapshot())
+	return task, true
+}
+
+func (h *Handler) a2aGetTask(w http.ResponseWriter, r *http.Request, request a2aRPCRequest) {
+	if task, ok := a2aCallerTask(w, r, request); ok {
+		writeA2AResponse(w, request.ID, task.snapshot())
+	}
 }
 
 func (h *Handler) a2aCancelTask(w http.ResponseWriter, r *http.Request, request a2aRPCRequest) {
-	id, ok := a2aTaskID(w, request)
+	task, ok := a2aCallerTask(w, r, request)
 	if !ok {
-		return
-	}
-	keyID, workspaceID := a2aCaller(r)
-	task, ok := a2aTasks.get(id, keyID, workspaceID)
-	if !ok {
-		writeA2AError(w, request.ID, -32001, a2aTaskNotFoundError(id))
 		return
 	}
 	view, canceled := task.requestCancel()
 	if !canceled {
-		writeA2AError(w, request.ID, -32002, fmt.Sprintf("task %q is %s and cannot be canceled", id, view.Status.State))
+		writeA2AError(w, request.ID, -32002, fmt.Sprintf("task %q is %s and cannot be canceled", task.id, view.Status.State))
 		return
 	}
 	writeA2AResponse(w, request.ID, view)

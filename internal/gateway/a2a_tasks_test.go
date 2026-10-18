@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -268,7 +269,7 @@ func TestA2AMalformedJSONIsParseError(t *testing.T) {
 }
 
 func TestA2ATaskStoreIsBounded(t *testing.T) {
-	store := newA2ATaskStore(3, time.Hour)
+	store := newA2ATaskStore(3, 3, time.Hour)
 	var tasks []*a2aTask
 	for i := 0; i < 5; i++ {
 		task := newA2ATask("", "k", "w", nil)
@@ -290,7 +291,7 @@ func TestA2ATaskStoreIsBounded(t *testing.T) {
 		t.Fatalf("newest task was evicted")
 	}
 
-	expired := newA2ATaskStore(10, time.Minute)
+	expired := newA2ATaskStore(10, 10, time.Minute)
 	old := newA2ATask("", "k", "w", nil)
 	old.createdAt = time.Now().Add(-2 * time.Minute)
 	expired.put(old)
@@ -355,5 +356,74 @@ func TestA2ARejectsAmbiguousAndInvalidRequests(t *testing.T) {
 				t.Fatalf("response = %s, want code %d id %s", rec.Body.String(), tc.code, tc.wantID)
 			}
 		})
+	}
+}
+
+func (s *a2aTaskStore) len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.tasks)
+}
+
+func TestA2ATaskStorePerOwnerCap(t *testing.T) {
+	store := newA2ATaskStore(10, 3, time.Hour)
+	other := newA2ATask("", "victim", "w", nil)
+	store.put(other)
+
+	var canceled []int
+	var tasks []*a2aTask
+	for i := 0; i < 5; i++ {
+		task := newA2ATask("", "noisy", "w", func() { canceled = append(canceled, i) })
+		if i == 1 {
+			task.complete(map[string]any{}, a2aArtifact{})
+		}
+		tasks = append(tasks, task)
+		store.put(task)
+	}
+	if _, ok := store.get(other.id, "victim", "w"); !ok {
+		t.Fatal("another owner's task was evicted")
+	}
+	if store.len() != 4 {
+		t.Fatalf("store size = %d, want 4 (3 noisy + 1 victim)", store.len())
+	}
+	// The finished task goes first, then the oldest working one, which is
+	// canceled because it can no longer be reached.
+	for _, evicted := range []int{0, 1} {
+		if _, ok := store.get(tasks[evicted].id, "noisy", "w"); ok {
+			t.Fatalf("task %d kept", evicted)
+		}
+	}
+	if fmt.Sprint(canceled) != "[0]" {
+		t.Fatalf("canceled = %v, want only the evicted working task 0", canceled)
+	}
+	if view := tasks[0].snapshot(); view.Status.State != a2aStateCanceled {
+		t.Fatalf("evicted working task state = %s", view.Status.State)
+	}
+	// The same key in another workspace is a different owner.
+	store.put(newA2ATask("", "noisy", "w2", nil))
+	if store.len() != 5 {
+		t.Fatalf("store size = %d, want 5", store.len())
+	}
+}
+
+func TestA2ATaskStoreGlobalCapEvictsLargestOwner(t *testing.T) {
+	store := newA2ATaskStore(4, 10, time.Hour)
+	small := newA2ATask("", "small", "w", nil)
+	store.put(small)
+	var big []*a2aTask
+	for i := 0; i < 3; i++ {
+		task := newA2ATask("", "big", "w", nil)
+		big = append(big, task)
+		store.put(task)
+	}
+	store.put(newA2ATask("", "new", "w", nil))
+	if _, ok := store.get(small.id, "small", "w"); !ok {
+		t.Fatal("small owner's task evicted at the global cap")
+	}
+	if _, ok := store.get(big[0].id, "big", "w"); ok {
+		t.Fatal("largest owner's oldest task kept at the global cap")
+	}
+	if store.len() != 4 {
+		t.Fatalf("store size = %d, want 4", store.len())
 	}
 }
