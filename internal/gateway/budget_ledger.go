@@ -388,7 +388,14 @@ func (l *budgetLedger) admit(ctx context.Context, scope budgetScope, hint *budge
 	if hint != nil && !hint.any() {
 		return nil, budgetVerdict{}, nil
 	}
-	loadedHere := false
+	// ranLoad is set once this goroutine ran a load itself; waits counts
+	// the shared loads it waited for. A shared load may have been started
+	// for an older state (a background refresh that began before midnight
+	// on the 1st loads the previous month), so a waiter whose snapshot is
+	// still unusable starts or joins one more load. Admission ends after
+	// its own load or after two shared loads, so the loop cannot spin.
+	ranLoad := false
+	waits := 0
 	l.mu.Lock()
 	for {
 		now := l.now()
@@ -411,7 +418,7 @@ func (l *budgetLedger) admit(ctx context.Context, scope budgetScope, hint *budge
 		}
 
 		if !usable {
-			if loadedHere {
+			if ranLoad || waits >= 2 {
 				l.mu.Unlock()
 				return nil, budgetVerdict{Unavailable: true}, fmt.Errorf("budget state for %s %q is unavailable", scope.Kind, scope.ID)
 			}
@@ -422,7 +429,7 @@ func (l *budgetLedger) admit(ctx context.Context, scope budgetScope, hint *budge
 				case <-ctx.Done():
 					return nil, budgetVerdict{Unavailable: true}, ctx.Err()
 				}
-				loadedHere = true
+				waits++
 				l.mu.Lock()
 				continue
 			}
@@ -436,7 +443,7 @@ func (l *budgetLedger) admit(ctx context.Context, scope budgetScope, hint *budge
 			if err != nil {
 				return nil, budgetVerdict{Unavailable: true}, err
 			}
-			loadedHere = true
+			ranLoad = true
 			l.mu.Lock()
 			continue
 		}
