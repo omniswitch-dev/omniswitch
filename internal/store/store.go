@@ -363,34 +363,31 @@ func rewriteSQL(query string) string {
 	return b.String()
 }
 
-func (s *Store) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+// txSQL rewrites ? placeholders to $n for PostgreSQL. The helpers below use
+// it, and so does code that runs a statement on a transaction directly.
+func (s *Store) txSQL(query string) string {
 	if s.pg {
-		query = rewriteSQL(query)
+		return rewriteSQL(query)
 	}
-	return s.wdb.ExecContext(ctx, query, args...)
+	return query
+}
+
+func (s *Store) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return s.wdb.ExecContext(ctx, s.txSQL(query), args...)
 }
 
 func (s *Store) query(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	if s.pg {
-		query = rewriteSQL(query)
-	}
-	return s.db.QueryContext(ctx, query, args...)
+	return s.db.QueryContext(ctx, s.txSQL(query), args...)
 }
 
 func (s *Store) queryRow(ctx context.Context, query string, args ...any) *sql.Row {
-	if s.pg {
-		query = rewriteSQL(query)
-	}
-	return s.db.QueryRowContext(ctx, query, args...)
+	return s.db.QueryRowContext(ctx, s.txSQL(query), args...)
 }
 
 // writeQueryRow runs a statement that writes and returns a row (for example
 // INSERT ... RETURNING) on the write pool.
 func (s *Store) writeQueryRow(ctx context.Context, query string, args ...any) *sql.Row {
-	if s.pg {
-		query = rewriteSQL(query)
-	}
-	return s.wdb.QueryRowContext(ctx, query, args...)
+	return s.wdb.QueryRowContext(ctx, s.txSQL(query), args...)
 }
 
 // migrationLockID is the PostgreSQL advisory lock key that serializes schema
@@ -1207,14 +1204,11 @@ const maxPromptVersionAttempts = 5
 func (s *Store) CreatePromptVersion(ctx context.Context, p Prompt) (Prompt, error) {
 	vars, _ := json.Marshal(p.Variables)
 	meta, _ := json.Marshal(p.Metadata)
-	query := `INSERT INTO prompts (id, name, version, template, variables, created_at, updated_at, metadata)
+	query := s.txSQL(`INSERT INTO prompts (id, name, version, template, variables, created_at, updated_at, metadata)
 		SELECT CAST(? AS TEXT), CAST(? AS TEXT), COALESCE(MAX(version), 0) + 1, CAST(? AS TEXT), CAST(? AS TEXT),
 			CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT)
 		FROM prompts WHERE name = ?
-		RETURNING version`
-	if s.pg {
-		query = rewriteSQL(query)
-	}
+		RETURNING version`)
 	args := []any{p.ID, p.Name, p.Template, string(vars), formatTime(p.CreatedAt), formatTime(p.UpdatedAt), string(meta), p.Name}
 	var lastErr error
 	for attempt := 0; attempt < maxPromptVersionAttempts; attempt++ {
@@ -1260,17 +1254,6 @@ func isUniqueViolation(err error) bool {
 		return pgErr.Code == "23505"
 	}
 	return strings.Contains(err.Error(), "UNIQUE constraint failed")
-}
-
-// NextPromptVersion returns MAX(version)+1 for name. It is not safe for
-// concurrent creates; use CreatePromptVersion to store a new version.
-func (s *Store) NextPromptVersion(ctx context.Context, name string) (int, error) {
-	var latest int
-	err := s.queryRow(ctx, "SELECT COALESCE(MAX(version), 0) FROM prompts WHERE name = ?", name).Scan(&latest)
-	if err != nil {
-		return 0, err
-	}
-	return latest + 1, nil
 }
 
 // GetPrompt returns a specific prompt by ID.

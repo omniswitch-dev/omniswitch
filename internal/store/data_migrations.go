@@ -102,12 +102,3 @@ func (s *Store) applyDataMigrations(ctx context.Context, tx *sql.Tx) error {
 	}
 	return nil
 }
-
-// txSQL rewrites ? placeholders for PostgreSQL in statements that run on a
-// transaction directly instead of through the Store helpers.
-func (s *Store) txSQL(query string) string {
-	if s.pg {
-		return rewriteSQL(query)
-	}
-	return query
-}
