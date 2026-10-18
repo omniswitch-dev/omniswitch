@@ -101,6 +101,11 @@ A hardening release: security fixes, verified bug fixes, new regression tests an
 
 - Deleted the outdated `comparison_iter5.md` and `comparison_iter7.md` notes. The 27 competitor claims that cited only them are now "Unknown" in `docs/comparison/COMPARISON.md` until someone checks them against vendor sources.
 - Removed the dangling `website` gitlink. The site lives in the `omniswitch-dev/omniswitch-website` repository.
+- An upstream stream that closes without any chunk is now a failed attempt (`upstream stream ended before completion`). The router retries it or falls back as for other stream-start failures, it counts toward the circuit breaker, and the request gets 502 when no provider succeeds. Before, it was logged as an empty successful response.
+- Budget alerts fire when a charge is recorded. An alert for a monthly cost budget uses the key label `<key id> (monthly YYYY-MM)`.
+- `POST /api/users` accepts optional `workspace_id` and `role` fields that add the user to a workspace in the same call. Workspace- and organization-scoped admins must create users this way (for a workspace-scoped admin, `workspace_id` defaults to its own workspace). If the email already exists, the existing user is added to the workspace, and its name and metadata do not change. Scoped admins cannot create organizations. Workspace-scoped admins cannot create workspaces, and organization-scoped admins create workspaces only in their own organization. A scoped admin cannot grant a membership role above its own role or change a member whose role is above its own.
+- `.env.example` no longer sets `OMNISWITCH_*` overrides that repeat the built-in defaults, so your edits to the config file take effect when the file is loaded as `.env`. Only the provider key placeholders, `OMNISWITCH_CONFIG`, `OMNISWITCH_BOOTSTRAP_API_KEY` and `OMNISWITCH_VAULT_KEY` stay set. The file now lists `OMNISWITCH_BUDGET_FAIL_OPEN`, `OMNISWITCH_BUDGET_REFRESH_INTERVAL`, `OMNISWITCH_METRICS_PUBLIC` and `OMNISWITCH_POLICY_DIR`. If you copied the old file, remove the overrides that you do not want. The old file set `OMNISWITCH_OTEL_INSECURE=true`; the default is `false`.
+- The Docker image is built with `golang:1.26.9-bookworm` instead of a floating minor-version tag, so builds always use the Go release that `toolchain go1.26.9` in `go.mod` pins.
 
 ## [0.2.0-beta.1] - Unreleased
 
