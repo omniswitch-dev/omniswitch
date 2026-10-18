@@ -60,7 +60,11 @@ type TargetConfig struct {
 	// resource.environment, resource.type and metadata in CEL.
 	Metadata map[string]string
 
-	// Timeout bounds one forwarded call. Zero uses defaultCallTimeout.
+	// Timeout bounds one call to the target. For HTTP targets it bounds
+	// the wait for the response headers, including any token exchange, so
+	// a long-lived event stream is not cut. Buffered HTTP calls (tools/list
+	// federation and OpenAPI tools) and stdio calls are bounded as a whole.
+	// Zero uses defaultCallTimeout.
 	Timeout time.Duration
 
 	// TokenExchange configures RFC 8693 token exchange for this target.
@@ -116,8 +120,13 @@ func NewMultiHandler(engine policy.Engine, auditor audit.Logger, configs []Targe
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	// A hung upstream must not hold a request forever, but a client-wide
 	// timeout would terminate valid long-lived SSE responses, so only the
-	// wait for response headers is bounded here.
+	// wait for response headers is bounded here. Each call also has its
+	// target's own deadline; this shared limit only has to allow the
+	// longest one.
 	transport.ResponseHeaderTimeout = defaultCallTimeout
+	for _, config := range configs {
+		transport.ResponseHeaderTimeout = max(transport.ResponseHeaderTimeout, config.Timeout)
+	}
 	handler := &Handler{
 		engine:  engine,
 		auditor: auditor,
@@ -695,7 +704,16 @@ func (h *Handler) forwardToTarget(w http.ResponseWriter, r *http.Request, tgt *t
 		_, _ = w.Write(payload)
 		return
 	}
-	response, err := h.targetRequest(r.Context(), tgt, body, r.Header, isDefault)
+	ctx, headersArrived, cancel := withHeaderDeadline(r.Context(), tgt.callTimeout())
+	defer cancel()
+	response, err := h.targetRequest(ctx, tgt, body, r.Header, isDefault)
+	if !headersArrived() {
+		if err == nil {
+			response.Body.Close()
+		}
+		<-ctx.Done()
+		err = context.Cause(ctx)
+	}
 	if err != nil && !rpcReq.HasID {
 		writeNotificationError(w, http.StatusBadGateway, mcp.CodeInternalError, "Forwarding failed", err)
 		return
@@ -712,6 +730,26 @@ func (h *Handler) forwardToTarget(w http.ResponseWriter, r *http.Request, tgt *t
 	}
 	w.WriteHeader(response.StatusCode)
 	streamTargetResponse(w, response.Body, response.Header.Get("Content-Type"))
+}
+
+// errNoResponseHeaders reports an HTTP target that sent no response headers
+// before its call timeout.
+var errNoResponseHeaders = errors.New("upstream sent no response headers")
+
+// withHeaderDeadline returns a context that is canceled when timeout passes
+// before headersArrived is called. A call that returns true stops the
+// deadline, so the context stays open while a streamed body is relayed. A
+// call that returns false means the deadline fired and the context is, or
+// is about to be, canceled with an errNoResponseHeaders cause.
+func withHeaderDeadline(parent context.Context, timeout time.Duration) (ctx context.Context, headersArrived func() bool, cancel context.CancelFunc) {
+	ctx, cancelCause := context.WithCancelCause(parent)
+	timer := time.AfterFunc(timeout, func() {
+		cancelCause(fmt.Errorf("%w within %s", errNoResponseHeaders, timeout))
+	})
+	return ctx, timer.Stop, func() {
+		timer.Stop()
+		cancelCause(context.Canceled)
+	}
 }
 
 // callTarget performs one buffered request/response exchange with a target.

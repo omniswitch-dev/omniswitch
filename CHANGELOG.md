@@ -70,6 +70,7 @@ A hardening release: security fixes, verified bug fixes, new regression tests an
 - Startup banner URLs were wrong for `host:port` listen addresses.
 - `install.sh` used `sudo` even when the install directory was writable.
 
+- An MCP target `Timeout` did not apply to calls forwarded to HTTP targets, so a hung upstream held the call for the fixed 2-minute header limit. The target timeout now limits the wait for the response headers (an event stream that has started is not cut), and the shared limit grows to the longest target timeout.
 ### Changed
 
 - Deleted the outdated `comparison_iter5.md` and `comparison_iter7.md` notes. The 27 competitor claims that cited only them are now "Unknown" in `docs/comparison/COMPARISON.md` until someone checks them against vendor sources.
