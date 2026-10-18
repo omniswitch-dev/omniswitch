@@ -16,9 +16,11 @@ import (
 // exceed bufio.Scanner's default 64 KiB and the previous 1 MiB cap.
 const maxSSELineBytes = 32 << 20
 
-// errStreamTruncated reports that an upstream stream ended without its
-// terminal event, i.e. the answer the client received is incomplete.
-var errStreamTruncated = errors.New("upstream stream ended before completion")
+// ErrStreamTruncated reports that an upstream stream ended without its
+// terminal event, i.e. the answer the client received is incomplete. The
+// router also reports it for a stream that closes without sending any
+// chunk.
+var ErrStreamTruncated = errors.New("upstream stream ended before completion")
 
 // chunkEmitter sends chunks to the consumer and never blocks once the
 // request context is done, so a client disconnect cannot leak the
@@ -220,7 +222,7 @@ func streamOpenAIEvents(ctx context.Context, body io.ReadCloser, providerName st
 			return
 		}
 		if err == nil && !done && !sawFinish {
-			err = fmt.Errorf("%s: %w", providerName, errStreamTruncated)
+			err = fmt.Errorf("%s: %w", providerName, ErrStreamTruncated)
 		}
 		if err != nil {
 			emit.fail(err)

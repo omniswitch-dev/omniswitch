@@ -141,7 +141,7 @@ func streamAnthropic(ctx context.Context, body io.ReadCloser, fallbackModel stri
 			return
 		}
 		if err == nil && !finished {
-			err = fmt.Errorf("anthropic: %w", errStreamTruncated)
+			err = fmt.Errorf("anthropic: %w", ErrStreamTruncated)
 		}
 		if err != nil {
 			emit.fail(err)
@@ -268,7 +268,7 @@ func streamGemini(ctx context.Context, body io.ReadCloser, model string) <-chan 
 			return
 		}
 		if err == nil && !finished {
-			err = fmt.Errorf("gemini: %w", errStreamTruncated)
+			err = fmt.Errorf("gemini: %w", ErrStreamTruncated)
 		}
 		if err != nil {
 			emit.fail(err)

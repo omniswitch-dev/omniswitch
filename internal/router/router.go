@@ -716,14 +716,12 @@ func (r *Router) startStream(ctx context.Context, providerName string, streamer 
 			}
 			return fail(span, meta, cause)
 		}
-		// The upstream closed without sending anything: relay an empty
-		// stream as before.
-		stopFirstByte()
-		cancel()
-		finishProviderSpan(span, meta, nil)
-		empty := make(chan provider.ChatResponseChunk)
-		close(empty)
-		return empty, meta, nil
+		// The upstream closed without sending anything: no content, no
+		// finish reason and no error. Native adapters report a missing
+		// terminal event as ErrStreamTruncated; do the same here so the
+		// attempt counts as a failure (and may be retried or fall back)
+		// instead of being logged as an empty successful response.
+		return fail(span, meta, fmt.Errorf("provider %q: %w", providerName, provider.ErrStreamTruncated))
 	}
 	if !stopFirstByte() {
 		// The route timeout fired just as the first chunk arrived; the

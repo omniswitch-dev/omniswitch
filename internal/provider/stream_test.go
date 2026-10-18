@@ -109,7 +109,7 @@ func TestOpenAIStreamTruncatedAndMalformed(t *testing.T) {
 	got := collectChunks(streamOpenAIEvents(context.Background(), sseBody(
 		`data: {"id":"c","choices":[{"index":0,"delta":{"content":"par"}}]}`,
 	), "openai"))
-	if err := lastErr(t, got); !errors.Is(err, errStreamTruncated) {
+	if err := lastErr(t, got); !errors.Is(err, ErrStreamTruncated) {
 		t.Fatalf("truncated stream err = %v", err)
 	}
 	got = collectChunks(streamOpenAIEvents(context.Background(), sseBody(`data: {not json`), "openai"))
@@ -281,7 +281,7 @@ func TestAnthropicStreamErrorEventAndTruncation(t *testing.T) {
 		`data: {"type":"message_start","message":{"id":"m"}}`,
 		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"cut"}}`,
 	), "m"))
-	if err := lastErr(t, got); !errors.Is(err, errStreamTruncated) {
+	if err := lastErr(t, got); !errors.Is(err, ErrStreamTruncated) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -342,7 +342,7 @@ func TestGeminiStreamErrorsAndSafety(t *testing.T) {
 	got = collectChunks(streamGemini(context.Background(), sseBody(
 		`data: {"candidates":[{"content":{"parts":[{"text":"x"}]}}]}`,
 	), "g"))
-	if err := lastErr(t, got); !errors.Is(err, errStreamTruncated) {
+	if err := lastErr(t, got); !errors.Is(err, ErrStreamTruncated) {
 		t.Fatalf("err = %v", err)
 	}
 	got = collectChunks(streamGemini(context.Background(), sseBody(

@@ -282,6 +282,34 @@ func TestExecuteStreamFirstChunkErrorFallsBack(t *testing.T) {
 	}
 }
 
+// SF3: a stream that closes without any chunk is a failed attempt, not an
+// empty success, and the router falls back like for a first-chunk error.
+func TestExecuteStreamEmptyStreamFails(t *testing.T) {
+	empty := &scriptedStreamer{name: "empty", model: "m"}
+	registry := provider.NewRegistry()
+	registry.Register(empty)
+	rtr := New(registry)
+	rtr.SetRoute("m", Route{Provider: "empty"})
+	_, _, err := rtr.ExecuteStream(context.Background(), provider.ChatRequest{Model: "m"}, "")
+	if !errors.Is(err, provider.ErrStreamTruncated) {
+		t.Fatalf("ExecuteStream() error = %v, want ErrStreamTruncated", err)
+	}
+
+	fast := &scriptedStreamer{name: "fast", model: "m", chunks: 2}
+	registry.Register(fast)
+	rtr.SetRoute("m", Route{Provider: "empty", Fallbacks: []string{"fast"}})
+	chunks, meta, err := rtr.ExecuteStream(context.Background(), provider.ChatRequest{Model: "m"}, "")
+	if err != nil {
+		t.Fatalf("ExecuteStream() with fallback error = %v", err)
+	}
+	if meta.Provider != "fast" {
+		t.Fatalf("meta = %+v, want fast", meta)
+	}
+	if n, streamErr := collect(t, chunks); n != 2 || streamErr != nil {
+		t.Fatalf("got %d chunks, err %v", n, streamErr)
+	}
+}
+
 func TestExecuteStreamIdleTimeoutEndsWithError(t *testing.T) {
 	streamer := &scriptedStreamer{name: "s", model: "m", chunks: 5, hangAfter: 2, finished: make(chan struct{})}
 	registry := provider.NewRegistry()
