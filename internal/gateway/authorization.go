@@ -134,10 +134,21 @@ func (p *AuthorizationPolicy) Evaluate(r *http.Request, identity Identity) (bool
 }
 
 // modelFromRequest peeks at standard inference request bodies and restores the
-// reader so downstream handlers receive the original payload unchanged.
+// reader so downstream handlers receive the original payload unchanged. For
+// POST /a2a it resolves the model the same way the A2A handler does:
+// params.metadata.model when it is a non-empty string, otherwise the
+// x-omniswitch-model header.
 func modelFromRequest(r *http.Request) (string, error) {
-	if r.Method != http.MethodPost || !strings.HasPrefix(r.URL.Path, "/v1/") || r.Body == nil {
+	isA2A := r.URL.Path == "/a2a"
+	if r.Method != http.MethodPost || (!strings.HasPrefix(r.URL.Path, "/v1/") && !isA2A) {
 		return "", nil
+	}
+	headerModel := ""
+	if isA2A {
+		headerModel = strings.TrimSpace(r.Header.Get("x-omniswitch-model"))
+	}
+	if r.Body == nil || (isA2A && r.Body == http.NoBody) {
+		return headerModel, nil
 	}
 	const maxAuthorizationBody = 1 << 20
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxAuthorizationBody+1))
@@ -147,6 +158,20 @@ func modelFromRequest(r *http.Request) (string, error) {
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	if len(body) > maxAuthorizationBody {
 		return "", fmt.Errorf("request body exceeds authorization inspection limit")
+	}
+	if isA2A {
+		var request struct {
+			Params struct {
+				Metadata map[string]any `json:"metadata"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			return "", err
+		}
+		if configured, ok := request.Params.Metadata["model"].(string); ok && strings.TrimSpace(configured) != "" {
+			return strings.TrimSpace(configured), nil
+		}
+		return headerModel, nil
 	}
 	var request struct {
 		Model string `json:"model"`
