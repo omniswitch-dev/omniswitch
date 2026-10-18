@@ -22,6 +22,15 @@ type Event struct {
 	Rule       string        `json:"rule"`
 	Reason     string        `json:"reason"`
 	Latency    time.Duration `json:"latency"`
+	// Method is the MCP JSON-RPC method (for example "tools/call").
+	Method string `json:"method,omitempty"`
+	// Target is the MCP target that received (or would have received) the call.
+	Target string `json:"target,omitempty"`
+	// KeyID and Workspace identify the authenticated caller.
+	KeyID     string `json:"key_id,omitempty"`
+	Workspace string `json:"workspace_id,omitempty"`
+	Session   string `json:"session_id,omitempty"`
+	TraceID   string `json:"trace_id,omitempty"`
 }
 
 type Logger interface {
@@ -49,6 +58,9 @@ func NewEvent(req model.ToolRequest, decision model.Decision) Event {
 		Rule:       decision.Rule,
 		Reason:     decision.Reason,
 		Latency:    decision.EvaluationTime,
+		Target:     req.Target.Name,
+		KeyID:      req.Agent.ID,
+		Session:    req.Session.ID,
 	}
 }
 
