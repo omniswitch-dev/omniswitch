@@ -238,6 +238,10 @@ Raw `request_body` and `response_body` are present only when
 `log_payloads: true` is explicitly enabled; metadata, usage, cache, and status
 remain available by default.
 
+Each log row has `workspace_id` and `organization_id` when the caller that
+sent the request had a tenant. The results contain only rows of the caller's
+[tenant](#tenant-scope).
+
 ### `GET /api/metrics`
 
 Returns gateway metrics.
@@ -246,15 +250,20 @@ Query parameters:
 
 - `window`: `1h`, `6h`, `7d`, or `30d`
 
+The metrics count only requests of the caller's [tenant](#tenant-scope).
+
 ### `GET /api/metrics/providers`
 
-Returns per-provider aggregate metrics.
+Returns per-provider aggregate metrics for the caller's tenant.
 
 ### `GET /metrics`
 
 Returns Prometheus text-format gateway metrics for the last 24 hours when
 `prometheus_enabled` is true. With gateway authentication enabled, a viewer,
-member, admin, or owner key is required.
+member, admin, or owner key is required. These metrics cover all tenants, so
+a [scoped caller](#tenant-scope) gets `403`. With
+`OMNISWITCH_METRICS_PUBLIC=true`, the endpoint needs no key and any caller
+can read it.
 
 ### `GET /api/providers`
 
@@ -281,14 +290,16 @@ Aggregated spend from the request logs. Query parameters:
 {"groupBy": "model", "rows": [{"group": "gpt-4o-mini", "request_count": 12, "total_cost": 0.0042, "total_tokens": 9150, "avg_latency_ms": 640.5}]}
 ```
 
-Admins and owners see all keys; other roles see only their own key's rows.
+The rows cover only the caller's [tenant](#tenant-scope). Admins and owners
+see all keys of the tenant; other roles see only their own key's rows.
 
 ### `GET /api/traces/{trace_id}`
 
 Returns everything recorded for one `x-omniswitch-trace-id`:
 `{"trace_id", "logs", "guardrail_events", "shadow_logs", "feedback"}`.
-Returns `404` when the trace does not exist or is not visible to the caller's
-key (non-admin roles see only their own key's requests).
+Returns `404` when the trace does not exist or is not visible to the caller:
+the trace is outside the caller's [tenant](#tenant-scope), or, for non-admin
+roles, it has no request from the caller's own key.
 
 ### `GET /api/configs`
 
@@ -297,6 +308,9 @@ are included only with `include_disabled=true`. With `id=<id>` or
 `name=<name>`, returns a single enabled config (`404` if it is missing or
 disabled). Requires the `admin` role, because config bodies can contain
 secrets.
+
+Stored configs apply to all tenants. All `/api/configs` methods return `403`
+to a [scoped caller](#tenant-scope).
 
 ### `POST /api/configs`
 
@@ -320,6 +334,10 @@ config file (see [CONFIGURATION.md](CONFIGURATION.md)); `format` is `yaml`
 error returns `400`. An omitted `id` is generated; posting an existing `id`
 replaces that record. Returns `201` with the stored record.
 
+A create, update or delete takes effect at once on the replica that handles
+it. Other replicas cache stored configs for up to 5 seconds. See
+[Stored configs](CONFIGURATION.md#stored-configs).
+
 ### `PATCH /api/configs?id=<id>` (or `?name=<name>`)
 
 Body `{"enabled": true|false}` enables or disables a config. Requires `admin`.
@@ -333,11 +351,26 @@ Deletes a config and returns `{"deleted": true}`. Requires `admin`.
 Reads or replaces the gateway config file named by `OMNISWITCH_CONFIG`
 (`404` when no config file is configured). `GET` returns
 `{"path", "format", "body"}`. `POST` takes `{"body": "...", "format": "yaml"}`,
-validates it, writes the file, and returns `{"saved": true, "path": ...}`; the
-running gateway applies the reloadable parts (routes, guardrails, cache,
-shaping limits, shadow provider) within a few seconds; providers, identity and
-MCP targets need a restart. Both methods
-require `admin`.
+validates it, writes the file, and returns `{"saved": true, "path": ...}`.
+Both methods require `admin` and return `403` to a
+[scoped caller](#tenant-scope).
+
+The gateway checks the file every 2 seconds and applies these settings
+without a restart:
+
+- `routes` (requests that use a stored config get the new routes too);
+- guardrails, including `guardrails.stream_buffer`;
+- `cache_threshold`, `cache_ttl` and `cache_scope`;
+- `log_payloads` and `max_request_bytes`;
+- `shadow_provider`;
+- `alerts`;
+- `budget_fail_open` and `budget_refresh_interval`;
+- `circuit_breaker_failures` and `circuit_breaker_cooldown`. A change installs
+  a new breaker with all circuits closed. A reload without a change keeps
+  open circuits open.
+
+The gateway logs and skips a file that is not valid. Providers, identity,
+rate-limit backends and MCP targets need a restart.
 
 ### `POST /api/virtual-keys`
 
@@ -358,6 +391,9 @@ Stores an encrypted provider credential and exposes it as a virtual provider on 
 ```
 
 The response redacts `provider_key`. Use `OMNISWITCH_VAULT_KEY` to keep stored credentials decryptable across restarts.
+
+Virtual keys configure providers for the whole gateway. All virtual-key
+routes return `403` to a [scoped caller](#tenant-scope).
 
 ### `GET /api/virtual-keys`
 
@@ -380,7 +416,7 @@ Revokes a virtual key without deleting its audit history.
 
 ### `GET /api/feedback`
 
-Lists feedback entries.
+Lists feedback entries of the caller's [tenant](#tenant-scope).
 
 Query parameters:
 
@@ -406,6 +442,11 @@ Records human feedback.
 ```
 
 `score` must be `-1`, `0`, or `1`.
+
+The entry records the caller's tenant. A [scoped caller](#tenant-scope) can
+name only a `request_id` or `trace_id` of its own tenant. Otherwise the
+gateway returns `404` `request not found` or `trace not found`. A global
+caller can name any request or trace, including one that is not logged yet.
 
 ### `POST /api/keys`
 
@@ -436,15 +477,37 @@ All limits are optional; zero or a missing field means no limit.
 - `expires_in` is a Go duration such as `720h`. Day units such as `30d` are
   rejected.
 
-A request over a budget gets HTTP 402 with a message that names the budget.
+A request over a budget gets HTTP 402 `budget_exceeded` with a message that
+names the budget. When the gateway cannot read the key's budget state, the
+request gets HTTP 503 `budget_unavailable`, unless `budget_fail_open` is
+`true`:
+
+```json
+{"error": {"message": "budget state is temporarily unavailable; request rejected", "type": "budget_unavailable", "code": "budget_unavailable"}}
+```
+
+See [Key Budgets](CONFIGURATION.md#key-budgets) for how the gateway
+estimates and enforces budgets.
+
+A caller cannot create a key with a role above its own (`403`). A key
+without `workspace_id` is global. For a [scoped caller](#tenant-scope):
+
+- A workspace-scoped caller creates keys in its own workspace. An omitted
+  `workspace_id` uses that workspace. Another workspace returns `403`.
+- An organization-scoped caller must set `workspace_id` (`400` when it is
+  missing). A workspace outside its organization returns `404`.
 
 ### `GET /api/keys`
 
-Lists API keys.
+Lists API keys as `{"keys": [...]}`. A workspace-scoped caller sees the keys
+of its workspace. An organization-scoped caller sees the keys of all
+workspaces of its organization.
 
 ### `DELETE /api/keys?id=<key_id>`
 
-Disables an API key.
+Disables an API key and returns `{"status": "deleted"}`. A key that does not
+exist or that the caller cannot see returns `404`. A scoped caller cannot see
+global keys. A key with a role above the caller's role returns `403`.
 
 ### `POST /api/orgs`
 
@@ -459,9 +522,13 @@ Creates an organization.
 }
 ```
 
+Only global callers can create organizations. A
+[scoped caller](#tenant-scope) gets `403`.
+
 ### `GET /api/orgs`
 
-Lists organizations.
+Lists organizations as `{"organizations": [...]}`. A scoped caller sees only
+its own organization, or the organization that owns its workspace.
 
 ### `POST /api/workspaces`
 
@@ -474,24 +541,48 @@ Creates a workspace inside an organization.
 }
 ```
 
+A workspace-scoped caller gets `403`. For an organization-scoped caller,
+`organization_id` defaults to its own organization, and another organization
+returns `404`.
+
 ### `GET /api/workspaces`
 
-Lists workspaces. Use `organization_id` to filter.
+Lists workspaces of the caller's [tenant](#tenant-scope). Use
+`organization_id` to filter. A filter outside the tenant returns an empty
+list.
 
 ### `POST /api/users`
 
-Creates or updates a user.
+Creates or updates a user. `workspace_id` and `role` are optional. When
+`workspace_id` is set, the gateway also adds the user to that workspace with
+`role` (default `viewer`).
 
 ```json
 {
   "email": "ada@example.com",
-  "name": "Ada Lovelace"
+  "name": "Ada Lovelace",
+  "workspace_id": "ws_123",
+  "role": "member"
 }
 ```
 
+A [scoped caller](#tenant-scope) always creates a user together with a
+membership in one of its workspaces:
+
+- A workspace-scoped caller uses its own workspace when `workspace_id` is
+  omitted.
+- An organization-scoped caller must set `workspace_id` (`400` when it is
+  missing).
+- A workspace the caller cannot see returns `404`.
+- A role above the caller's role returns `403`. An existing member with a
+  role above the caller's role also returns `403`.
+- When the email exists, the gateway adds that user to the workspace and does
+  not change the user's name or metadata.
+
 ### `GET /api/users`
 
-Lists users.
+Lists users. A scoped caller sees only users that are members of a workspace
+of its tenant.
 
 ### `POST /api/workspace-members`
 
@@ -505,25 +596,44 @@ Creates or updates a workspace membership.
 }
 ```
 
+`role` defaults to `viewer`. For a [scoped caller](#tenant-scope), a
+workspace that the caller cannot see returns `404`, an unknown user returns
+`404`, and a role above the caller's role returns `403`. A member who has a
+role above the caller's role also returns `403`.
+
 ### `GET /api/workspace-members`
 
-Lists workspace memberships. Use `workspace_id` to filter.
+Lists workspace memberships of the caller's tenant. Use `workspace_id` to
+filter.
 
 ### `POST /api/prompts`
 
-Creates a prompt template. Reusing an existing `name` creates the next version.
+Creates a prompt template in the workspace given by the body's
+`workspace_id`. Reusing an existing `name` in the same workspace creates the
+next version.
+
+Prompts belong to a workspace. A global caller uses the global namespace by
+default and can set any `workspace_id`. A workspace-scoped caller always uses
+its own workspace, and another `workspace_id` returns `404`. An
+organization-scoped caller must set `workspace_id` (`400` when it is
+missing), and a workspace outside its organization returns `404`. Responses
+omit `workspace_id` for the global namespace.
 
 ### `GET /api/prompts`
 
-Lists prompt templates.
+Lists the prompt templates of one workspace. Use `?workspace_id=` to select
+it.
 
 ### `GET /api/prompts/versions?name=<prompt_name>`
 
-Lists all versions for a prompt name, newest version first.
+Lists all versions for a prompt name in one workspace, newest version first.
+Use `&workspace_id=` to select the workspace.
 
 ### `POST /api/prompts/render`
 
-Renders a prompt template with variables.
+Renders a prompt template with variables. A global caller without
+`workspace_id` can render any prompt by ID. Otherwise, a prompt outside the
+selected workspace returns `404`.
 
 ### `POST /api/evals/policy`
 
@@ -598,5 +708,49 @@ When `OMNISWITCH_AUTH=true`, API-key roles are `viewer`, `member`, `admin`, and
 
 Key, user, membership, and config routes need `admin` even to read, because
 they expose credential metadata, user emails, or raw configuration that can
-contain secrets. Admins and owners see global dashboard aggregates, while other
-roles are limited to their key's logs and metrics.
+contain secrets. In the dashboard reads (`/api/logs`, `/api/metrics`,
+`/api/metrics/providers`, `/api/analytics/cost` and `/api/traces/{trace_id}`),
+admins and owners see all keys of their tenant. Other roles see only the
+requests of their own key. [Tenant scope](#tenant-scope) sets the tenant.
+
+## Tenant scope
+
+Each caller has a tenant scope:
+
+- A **global** caller has no workspace and no organization. All callers are
+  global when authentication is off. A key without `workspace_id` is global.
+- A **workspace-scoped** caller has a workspace: an API key with
+  `workspace_id`, or an OIDC identity with a `workspace_claim`. An API key
+  also carries the organization that owns its workspace.
+- An **organization-scoped** caller has an organization and no workspace (an
+  OIDC identity with an `organization_claim`).
+
+Role checks apply to all callers. In addition, a scoped caller sees and
+changes only the records of its tenant: a workspace-scoped caller sees its
+workspace, and an organization-scoped caller sees all workspaces of its
+organization. A scoped caller never sees records that have no tenant.
+Request logs and feedback record the tenant of the caller that created
+them. Rows written before this release have no tenant, so only global
+callers see them.
+
+A record outside the caller's tenant returns `404`, the same as a missing
+record. Gateway-wide resources return `403` to scoped callers:
+
+| Route | Scoped callers |
+|---|---|
+| `/api/configs`, `/api/config/raw` | `403` |
+| `/api/virtual-keys`, `/api/virtual-keys/rotate` | `403` |
+| `/metrics` | `403`, unless `OMNISWITCH_METRICS_PUBLIC=true` |
+| `POST /api/orgs` | `403` |
+| `POST /api/workspaces` | `403` for workspace-scoped callers |
+
+`POST /api/evals/policy` replays policy files and reads no tenant records,
+so it is not tenant-scoped.
+
+## Request body limits
+
+`/api/*` request bodies are limited to 1 MiB. `/api/configs` and
+`/api/config/raw` accept up to 8 MiB. A larger body gets HTTP 413
+`request body too large`. The gateway rejects a body with a larger
+`Content-Length` before it reads it. `gateway.max_request_bytes` limits
+inference request bodies (see [docs/CONFIGURATION.md](CONFIGURATION.md)).
