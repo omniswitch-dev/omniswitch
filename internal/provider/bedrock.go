@@ -28,6 +28,8 @@ type Bedrock struct {
 	guardrailVersion string
 	models           []string
 	client           *http.Client
+	// endpoint overrides the regional bedrock-runtime base URL (tests only).
+	endpoint string
 }
 
 func NewBedrock(name, region, accessKeyID, secretAccessKey, sessionToken string, models []string) *Bedrock {
@@ -182,8 +184,7 @@ func (b *Bedrock) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResp
 		meta.Error = err.Error()
 		return ChatResponse{}, meta, err
 	}
-	endpoint := fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/converse", b.region, url.PathEscape(req.Model))
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.converseURL(req.Model), bytes.NewReader(body))
 	if err != nil {
 		meta.Error = err.Error()
 		return ChatResponse{}, meta, err
@@ -239,6 +240,13 @@ func (b *Bedrock) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResp
 		}},
 		Usage: usage,
 	}, meta, nil
+}
+
+func (b *Bedrock) converseURL(model string) string {
+	if b.endpoint != "" {
+		return b.endpoint + "/model/" + url.PathEscape(model) + "/converse"
+	}
+	return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/converse", b.region, url.PathEscape(model))
 }
 
 // toConverseRequest maps a ChatRequest onto AWS Bedrock's Converse API
@@ -481,7 +489,7 @@ func (b *Bedrock) sign(req *http.Request, payload []byte, now time.Time) error {
 	canonicalHeaders, signedHeaders := canonicalAWSHeaders(req)
 	canonicalRequest := strings.Join([]string{
 		req.Method,
-		req.URL.EscapedPath(),
+		canonicalAWSURI(req.URL),
 		req.URL.RawQuery,
 		canonicalHeaders,
 		signedHeaders,
@@ -504,6 +512,33 @@ func (b *Bedrock) sign(req *http.Request, payload []byte, now time.Time) error {
 		signature,
 	))
 	return nil
+}
+
+// canonicalAWSURI returns the SigV4 canonical URI. For every service except
+// S3, AWS URI-encodes the already-escaped request path once more (each
+// segment, keeping '/' separators), so a ':' that goes on the wire as ':'
+// is signed as %3A and an escaped %2F is signed as %252F. This matches
+// aws-sdk-go-v2's httpbinding.EscapePath(req.URL.EscapedPath(), false).
+func canonicalAWSURI(u *url.URL) string {
+	path := u.EscapedPath()
+	if path == "" {
+		return "/"
+	}
+	var b strings.Builder
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		if c == '/' || isAWSUnreserved(c) {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
+	}
+	return b.String()
+}
+
+func isAWSUnreserved(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+		c == '-' || c == '_' || c == '.' || c == '~'
 }
 
 func canonicalAWSHeaders(req *http.Request) (string, string) {
