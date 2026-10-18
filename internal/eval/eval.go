@@ -131,6 +131,10 @@ func (h *Handler) UpdateDataset(w http.ResponseWriter, r *http.Request) {
 	dataset.UpdatedAt = time.Now().UTC()
 
 	if err := h.store.UpdateDataset(r.Context(), dataset); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "dataset not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -165,6 +169,10 @@ func (h *Handler) AddExamples(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.AddExamples(r.Context(), req.DatasetID, req.Examples); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "dataset not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -205,10 +213,21 @@ func (h *Handler) CreateExperiment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Start experiment asynchronously
-	go h.runExperiment(r.Context(), exp)
+	// Respond with a snapshot taken before the run starts: runExperiment
+	// mutates its own copy, so encoding exp here cannot race with it.
+	response := *exp
 
-	writeJSON(w, http.StatusCreated, exp)
+	// The run outlives the request, so it must not use r.Context(), which
+	// is canceled as soon as this handler returns. Keep the request's
+	// values but detach its cancellation, and bound the run instead.
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), experimentRunTimeout)
+	run := *exp
+	go func() {
+		defer cancel()
+		h.runExperiment(runCtx, &run)
+	}()
+
+	writeJSON(w, http.StatusCreated, &response)
 }
 
 func (h *Handler) GetExperiment(w http.ResponseWriter, r *http.Request) {
@@ -268,6 +287,9 @@ func (h *Handler) GetExperimentResults(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, exp.Results)
 }
+
+// experimentRunTimeout bounds a background experiment run.
+const experimentRunTimeout = 30 * time.Minute
 
 func (h *Handler) runExperiment(ctx context.Context, exp *store.Experiment) {
 	// Update status to running
