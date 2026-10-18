@@ -29,12 +29,21 @@ service:
 secrets: {}
 existingSecret: ""    # use an existing Secret instead of creating one
 
-# First-start bootstrap admin key. When config.gateway.auth is true, the gateway
-# refuses to start until at least one API key exists, so it needs
-# OMNISWITCH_BOOTSTRAP_API_KEY on first start. Supply it in secrets or in
-# existingSecret. If neither is set, the chart generates a random key in the
-# chart Secret (kept across upgrades) when bootstrap.generate is true, and fails
-# rendering when it is false.
+# First-start bootstrap admin key. When config.gateway.auth is true and OIDC is
+# not configured, the gateway refuses to start until at least one API key
+# exists, so it needs OMNISWITCH_BOOTSTRAP_API_KEY on first start. Supply it in
+# secrets or in existingSecret (an empty value counts as not supplied). If
+# neither is set, the chart generates a random key in the chart Secret when
+# bootstrap.generate is true, and fails rendering when it is false. No key is
+# generated when auth is off or OIDC is configured (config.identity.oidc.jwks_url
+# or secrets.OMNISWITCH_OIDC_JWKS_URL).
+#
+# The generated key is kept across `helm install`/`helm upgrade` through a
+# cluster lookup. `helm template`, Argo CD, Flux post-rendering and other
+# template-based tools cannot read the cluster, so they render a new key on
+# every sync; the gateway then rotates the owner key on its next restart and
+# the saved key stops working. With those tools set bootstrap.generate: false
+# and supply the key yourself.
 bootstrap:
   generate: true
 

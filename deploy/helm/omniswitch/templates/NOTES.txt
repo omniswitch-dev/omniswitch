@@ -8,6 +8,12 @@ No bootstrap API key was supplied, so the chart generated one. Read it with:
   kubectl get secret -n {{ .Release.Namespace }} {{ include "omniswitch.secretName" . }} \
     -o jsonpath='{.data.OMNISWITCH_BOOTSTRAP_API_KEY}' | base64 -d
 Use it to create named keys, then treat it like any other owner key.
+Rendering with `helm template` (Argo CD, Flux post-rendering) creates a new key
+on every render and rotates the owner key; set bootstrap.generate=false and
+supply the key yourself with those tools.
+{{- else if and (eq (include "omniswitch.oidcEnabled" .) "true") (not .Values.existingSecret) (not (get (.Values.secrets | default dict) "OMNISWITCH_BOOTSTRAP_API_KEY")) }}
+OIDC is configured, so no bootstrap API key was generated. Callers authenticate
+with OIDC tokens until you create API keys.
 {{- end }}
 {{- else -}}
 WARNING: authentication is disabled (config.gateway.auth=false). Anyone who can
