@@ -234,6 +234,16 @@ func foldName(name string) string {
 	return strings.ToLower(strings.ToUpper(name))
 }
 
+// CheckDuplicateMembers walks a JSON document and fails when an object (at
+// any depth) has two member names that are equal under Unicode case folding.
+// Decoders disagree on which of such members wins (encoding/json struct
+// decoding merges them or matches case-insensitively, map decoding keeps the
+// last exact name), so callers that must see the same data as another
+// decoder reject such documents. body must be valid JSON.
+func CheckDuplicateMembers(body []byte) error {
+	return checkDuplicateKeys(body)
+}
+
 // checkDuplicateKeys walks the whole document and fails when an object has
 // two member names that are equal under Unicode case folding.
 func checkDuplicateKeys(body []byte) error {

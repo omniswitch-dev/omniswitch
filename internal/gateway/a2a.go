@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/omniswitch-dev/omniswitch/internal/adapter/mcp"
 	"github.com/omniswitch-dev/omniswitch/internal/provider"
 )
 
@@ -42,13 +44,9 @@ func (h *Handler) A2A(w http.ResponseWriter, r *http.Request) {
 		writeA2AError(w, nil, -32700, "Parse error")
 		return
 	}
-	if !json.Valid(raw) {
-		writeA2AError(w, nil, -32700, "Parse error")
-		return
-	}
-	var request a2aRPCRequest
-	if err := json.Unmarshal(raw, &request); err != nil || request.JSONRPC != "2.0" || len(request.ID) == 0 {
-		writeA2AError(w, request.ID, -32600, "Invalid Request")
+	request, rpcErr := parseA2ARequest(raw)
+	if rpcErr != nil {
+		writeA2AError(w, rpcErr.id, rpcErr.code, rpcErr.message)
 		return
 	}
 	switch request.Method {
@@ -74,6 +72,85 @@ type a2aRPCRequest struct {
 	Params  json.RawMessage `json:"params"`
 }
 
+// a2aRequestError is a JSON-RPC error detected while parsing an A2A request.
+type a2aRequestError struct {
+	code    int
+	message string
+	id      json.RawMessage
+}
+
+func (e *a2aRequestError) Error() string { return e.message }
+
+// decodeA2ARequest decodes the JSON-RPC envelope of an A2A request. It is
+// shared by the authorization check and the handler so both act on the same
+// data: documents with members whose names are equal under case folding (at
+// any depth) are rejected, because encoding/json merges or picks between
+// such members differently depending on the target type.
+func decodeA2ARequest(raw []byte) (a2aRPCRequest, *a2aRequestError) {
+	if !json.Valid(raw) {
+		return a2aRPCRequest{}, &a2aRequestError{code: -32700, message: "Parse error"}
+	}
+	var request a2aRPCRequest
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return a2aRPCRequest{}, &a2aRequestError{code: -32600, message: "Invalid Request"}
+	}
+	if err := mcp.CheckDuplicateMembers(raw); err != nil {
+		return a2aRPCRequest{}, &a2aRequestError{code: -32600, message: "Invalid Request: " + err.Error()}
+	}
+	return request, nil
+}
+
+// parseA2ARequest decodes and validates an A2A JSON-RPC request. The id must
+// be a string or a number; requests without a usable id are rejected with
+// id null because the A2A binding defines no notifications.
+func parseA2ARequest(raw []byte) (a2aRPCRequest, *a2aRequestError) {
+	request, rpcErr := decodeA2ARequest(raw)
+	if rpcErr != nil {
+		return a2aRPCRequest{}, rpcErr
+	}
+	if !validA2AID(request.ID) {
+		return a2aRPCRequest{}, &a2aRequestError{code: -32600, message: "Invalid Request"}
+	}
+	if request.JSONRPC != "2.0" {
+		return a2aRPCRequest{}, &a2aRequestError{code: -32600, message: "Invalid Request", id: request.ID}
+	}
+	return request, nil
+}
+
+// validA2AID reports whether id is a JSON string or number.
+func validA2AID(id json.RawMessage) bool {
+	id = bytes.TrimSpace(id)
+	if len(id) == 0 {
+		return false
+	}
+	switch first := id[0]; {
+	case first == '"', first == '-', first >= '0' && first <= '9':
+		return true
+	default:
+		return false
+	}
+}
+
+// a2aRequestModel resolves the model of an A2A request: params.metadata.model
+// when it is a non-empty string, otherwise the x-omniswitch-model header.
+func a2aRequestModel(params json.RawMessage, header string) (string, error) {
+	header = strings.TrimSpace(header)
+	params = bytes.TrimSpace(params)
+	if len(params) == 0 || string(params) == "null" {
+		return header, nil
+	}
+	var decoded struct {
+		Metadata map[string]any `json:"metadata"`
+	}
+	if err := json.Unmarshal(params, &decoded); err != nil {
+		return "", err
+	}
+	if configured, ok := decoded.Metadata["model"].(string); ok && strings.TrimSpace(configured) != "" {
+		return strings.TrimSpace(configured), nil
+	}
+	return header, nil
+}
+
 type a2aSendMessageRequest struct {
 	Message struct {
 		ContextID string `json:"contextId,omitempty"`
@@ -81,7 +158,6 @@ type a2aSendMessageRequest struct {
 			Text string `json:"text,omitempty"`
 		} `json:"parts"`
 	} `json:"message"`
-	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // a2aCaller identifies the authenticated caller that owns tasks. It prefers
@@ -110,9 +186,10 @@ func (h *Handler) a2aSendMessage(w http.ResponseWriter, r *http.Request, request
 		writeA2AError(w, request.ID, -32602, "message.parts must include text")
 		return
 	}
-	model := strings.TrimSpace(r.Header.Get("x-omniswitch-model"))
-	if configured, ok := input.Metadata["model"].(string); ok && strings.TrimSpace(configured) != "" {
-		model = strings.TrimSpace(configured)
+	model, err := a2aRequestModel(request.Params, r.Header.Get("x-omniswitch-model"))
+	if err != nil {
+		writeA2AError(w, request.ID, -32602, "Invalid params")
+		return
 	}
 	if model == "" {
 		writeA2AError(w, request.ID, -32602, "model is required in metadata.model or x-omniswitch-model")

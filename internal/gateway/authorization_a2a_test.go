@@ -35,6 +35,9 @@ func TestAuthorizationPolicyAppliesModelRulesToA2A(t *testing.T) {
 		{"a2a metadata wins over header", "/a2a", a2aBody("gpt-4o-mini"), "gpt-4o", true},
 		{"a2a other model allowed", "/a2a", a2aBody("gpt-4o-mini"), "", true},
 		{"a2a invalid json denied", "/a2a", `{`, "", false},
+		{"a2a duplicate params denied", "/a2a", `{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"metadata":{"model":"gpt-4o-mini"}},"params":{"message":{"parts":[{"text":"hi"}]}}}`, "gpt-4o", false},
+		{"a2a case-variant params denied", "/a2a", `{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"metadata":{"model":"gpt-4o-mini"}},"Params":{"message":{"parts":[{"text":"hi"}]}}}`, "gpt-4o", false},
+		{"a2a duplicate metadata denied", "/a2a", `{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"parts":[{"text":"hi"}]},"metadata":{"model":"gpt-4o-mini","Model":"gpt-4o"}}}`, "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

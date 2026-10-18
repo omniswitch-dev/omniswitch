@@ -160,18 +160,13 @@ func modelFromRequest(r *http.Request) (string, error) {
 		return "", fmt.Errorf("request body exceeds authorization inspection limit")
 	}
 	if isA2A {
-		var request struct {
-			Params struct {
-				Metadata map[string]any `json:"metadata"`
-			} `json:"params"`
+		// Use the handler's own parser so the model checked here is the
+		// model the handler runs; ambiguous bodies fail authorization.
+		request, rpcErr := decodeA2ARequest(body)
+		if rpcErr != nil {
+			return "", rpcErr
 		}
-		if err := json.Unmarshal(body, &request); err != nil {
-			return "", err
-		}
-		if configured, ok := request.Params.Metadata["model"].(string); ok && strings.TrimSpace(configured) != "" {
-			return strings.TrimSpace(configured), nil
-		}
-		return headerModel, nil
+		return a2aRequestModel(request.Params, headerModel)
 	}
 	var request struct {
 		Model string `json:"model"`

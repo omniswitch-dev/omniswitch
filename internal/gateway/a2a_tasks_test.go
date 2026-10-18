@@ -318,3 +318,42 @@ func TestA2AFollowsReloadedBodyLimit(t *testing.T) {
 		t.Fatalf("payload over the reloaded limit = %d %s, want a parse error", rec.Code, rec.Body.String())
 	}
 }
+
+func TestA2ARejectsAmbiguousAndInvalidRequests(t *testing.T) {
+	h := newA2ATestHandler(t)
+	cases := []struct {
+		name   string
+		body   string
+		code   int
+		wantID string
+	}{
+		{"duplicate params", `{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"metadata":{"model":"gpt-4o-mini"}},"params":{"message":{"parts":[{"text":"hi"}]}}}`, -32600, "null"},
+		{"case-variant member", `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"parts":[{"text":"hi"}]},"metadata":{"model":"test-model","MODEL":"x"}}}`, -32600, "null"},
+		{"invalid json", `{"jsonrpc":`, -32700, "null"},
+		{"null id", `{"jsonrpc":"2.0","id":null,"method":"GetTask","params":{"id":"x"}}`, -32600, "null"},
+		{"object id", `{"jsonrpc":"2.0","id":{"a":1},"method":"GetTask","params":{"id":"x"}}`, -32600, "null"},
+		{"array id", `{"jsonrpc":"2.0","id":[1],"method":"GetTask","params":{"id":"x"}}`, -32600, "null"},
+		{"bool id", `{"jsonrpc":"2.0","id":true,"method":"GetTask","params":{"id":"x"}}`, -32600, "null"},
+		{"missing id", `{"jsonrpc":"2.0","method":"GetTask","params":{"id":"x"}}`, -32600, "null"},
+		{"wrong version", `{"jsonrpc":"1.0","id":"a","method":"GetTask","params":{"id":"x"}}`, -32600, `"a"`},
+		{"string id accepted", `{"jsonrpc":"2.0","id":"a","method":"GetTask","params":{"id":"x"}}`, -32001, `"a"`},
+		{"number id accepted", `{"jsonrpc":"2.0","id":-2.5,"method":"GetTask","params":{"id":"x"}}`, -32001, "-2.5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := a2aCall(t, h, tc.body)
+			var resp struct {
+				ID    json.RawMessage `json:"id"`
+				Error *struct {
+					Code int `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("unmarshal: %v %s", err, rec.Body.String())
+			}
+			if resp.Error == nil || resp.Error.Code != tc.code || string(resp.ID) != tc.wantID {
+				t.Fatalf("response = %s, want code %d id %s", rec.Body.String(), tc.code, tc.wantID)
+			}
+		})
+	}
+}
