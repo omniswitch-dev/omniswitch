@@ -950,7 +950,14 @@ loop:
 			}
 			agg.add(chunk)
 			if chunk.Err != nil {
-				res.err = chunk.Err
+				// When the client leaves, the cancelled upstream can
+				// report the cancellation before ctx.Done is selected;
+				// that is a disconnect, not a provider failure.
+				if ctx.Err() != nil {
+					res.clientGone = true
+				} else {
+					res.err = chunk.Err
+				}
 				break loop
 			}
 			if isUsageOnlyChunk(chunk) && !sc.IncludeUsage {
