@@ -453,23 +453,6 @@ func mapBedrockToolChoice(choice any) *bedrockToolChoice {
 	return &bedrockToolChoice{Auto: &struct{}{}}
 }
 
-// bedrockPricing resolves catalog pricing by substring match against known
-// Claude model families, since Bedrock model IDs vary by cross-region
-// inference-profile prefix (e.g. "us.anthropic.claude-3-5-sonnet...") and
-// don't always exactly match the catalog's canonical "anthropic...." IDs.
-func bedrockPricing(model string) ModelPricing {
-	switch {
-	case strings.Contains(model, "claude-3-5-haiku"):
-		return catalogPricingOrZero("bedrock", "anthropic.claude-3-5-haiku-20241022-v1:0")
-	case strings.Contains(model, "claude-3-5-sonnet"):
-		return catalogPricingOrZero("bedrock", "anthropic.claude-3-5-sonnet-20241022-v2:0")
-	case strings.Contains(model, "claude-3-opus"):
-		return catalogPricingOrZero("bedrock", "anthropic.claude-3-opus-20240229-v1:0")
-	default:
-		return ModelPricing{}
-	}
-}
-
 func (b *Bedrock) sign(req *http.Request, payload []byte, now time.Time) error {
 	if b.accessKeyID == "" || b.secretAccessKey == "" {
 		return fmt.Errorf("bedrock AWS credentials are required")
