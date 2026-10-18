@@ -350,9 +350,10 @@ func toGeminiRequest(req ChatRequest) (geminiRequest, error) {
 			}
 		}
 		role := msg.Role
-		if role == "assistant" {
+		switch role {
+		case "assistant":
 			role = "model"
-		} else if role == "tool" {
+		case "tool":
 			role = "function"
 		}
 		parts := geminiMessageParts(msg, toolCallNames)

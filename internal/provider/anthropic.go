@@ -147,9 +147,10 @@ func (a *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 	var content string
 	var toolCalls []ToolCall
 	for _, block := range anthResp.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
 			content += block.Text
-		} else if block.Type == "tool_use" {
+		case "tool_use":
 			toolCalls = append(toolCalls, ToolCall{
 				ID:   block.ID,
 				Type: "function",
@@ -325,9 +326,10 @@ func toAnthropicRequest(req ChatRequest, stream bool) (anthropicRequest, error) 
 	if req.ToolChoice != nil {
 		switch v := req.ToolChoice.(type) {
 		case string:
-			if v == "auto" || v == "none" {
+			switch v {
+			case "auto", "none":
 				anthReq.ToolChoice = &anthropicToolChoice{Type: v}
-			} else if v == "required" {
+			case "required":
 				anthReq.ToolChoice = &anthropicToolChoice{Type: "any"}
 			}
 		case map[string]any:
