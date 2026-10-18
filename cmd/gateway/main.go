@@ -80,11 +80,11 @@ func runServe() {
 	// gateway.storage_url from the config file so an operator can always
 	// override storage without editing config-as-code.
 	var st *store.Store
-	dsn := strings.TrimSpace(os.Getenv("OMNISWITCH_DATABASE_URL"))
-	if dsn == "" {
-		dsn = strings.TrimSpace(settings.storageURL)
+	dsn, err := resolveStorageDSN(os.Getenv("OMNISWITCH_DATABASE_URL"), settings)
+	if err != nil {
+		log.Fatalf("invalid storage settings: %v", err)
 	}
-	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+	if dsn != "" {
 		st, err = store.OpenPostgres(dsn)
 		if err != nil {
 			log.Fatalf("failed to connect to postgres: %v", err)
@@ -95,9 +95,6 @@ func runServe() {
 		if err != nil {
 			log.Fatalf("failed to initialize store: %v", err)
 		}
-	}
-	if err != nil {
-		log.Fatalf("failed to initialize store: %v", err)
 	}
 	defer st.Close()
 	if err := ensureBootstrapKey(context.Background(), st, settings); err != nil {

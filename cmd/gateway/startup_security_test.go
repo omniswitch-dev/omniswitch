@@ -102,3 +102,39 @@ func TestMetricsPublicEnv(t *testing.T) {
 		t.Fatalf("metricsPublic = %v, err %v", settings.metricsPublic, err)
 	}
 }
+
+func TestResolveStorageDSN(t *testing.T) {
+	cases := []struct {
+		name     string
+		env      string
+		settings runtimeSettings
+		want     string
+		wantErr  string
+	}{
+		{name: "sqlite default"},
+		{name: "env postgres", env: "postgres://u@db/x", want: "postgres://u@db/x"},
+		{name: "env wins", env: "postgresql://a/b", settings: runtimeSettings{storageURL: "postgres://c/d"}, want: "postgresql://a/b"},
+		{name: "config url", settings: runtimeSettings{storageURL: "postgres://c/d"}, want: "postgres://c/d"},
+		{name: "typo env", env: "postgress://db/x", wantErr: "OMNISWITCH_DATABASE_URL"},
+		{name: "libpq form", env: "host=db dbname=x", wantErr: "OMNISWITCH_DATABASE_URL"},
+		{name: "postgres without dsn", settings: runtimeSettings{storageBackend: "postgres"}, wantErr: "gateway.storage"},
+		{name: "sqlite backend", settings: runtimeSettings{storageBackend: "sqlite"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveStorageDSN(tc.env, tc.settings)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want mention of %s", err, tc.wantErr)
+				}
+				if strings.Contains(err.Error(), "dbname") {
+					t.Fatalf("error echoes the DSN: %v", err)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}

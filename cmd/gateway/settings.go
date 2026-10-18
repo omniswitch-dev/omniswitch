@@ -49,36 +49,38 @@ type runtimeSettings struct {
 	idleTimeout            time.Duration
 	shadowProvider         string
 	storageURL             string
-	alerts                 gateway.AlertConfig
-	mcpEnabled             bool
-	mcpPolicyPath          string
-	mcpPolicyExplicit      bool
-	mcpUpstreamURL         string
-	mcpTargets             []gatewayconfig.MCPTarget
-	policyDir              string
-	routes                 map[string]router.Route
-	providerAccounts       []gatewayconfig.ProviderAccount
-	oidcJWKSURL            string
-	oidcIssuer             string
-	oidcAudience           string
-	oidcRoleClaim          string
-	oidcWorkspaceClaim     string
-	oidcOrganizationClaim  string
-	oidcCacheTTL           time.Duration
-	configPath             string
-	otelEnabled            bool
-	otelEndpoint           string
-	otelServiceName        string
-	otelHeaders            map[string]string
-	otelInsecure           bool
-	otelTimeout            time.Duration
-	prometheusEnabled      bool
-	vaultKey               string
-	bootstrapAPIKey        string
-	bootstrapWorkspaceID   string
-	bootstrapRole          string
-	shutdownTimeout        time.Duration
-	allowNoProviders       bool
+	// storageBackend is gateway.storage from the config file, if set.
+	storageBackend        string
+	alerts                gateway.AlertConfig
+	mcpEnabled            bool
+	mcpPolicyPath         string
+	mcpPolicyExplicit     bool
+	mcpUpstreamURL        string
+	mcpTargets            []gatewayconfig.MCPTarget
+	policyDir             string
+	routes                map[string]router.Route
+	providerAccounts      []gatewayconfig.ProviderAccount
+	oidcJWKSURL           string
+	oidcIssuer            string
+	oidcAudience          string
+	oidcRoleClaim         string
+	oidcWorkspaceClaim    string
+	oidcOrganizationClaim string
+	oidcCacheTTL          time.Duration
+	configPath            string
+	otelEnabled           bool
+	otelEndpoint          string
+	otelServiceName       string
+	otelHeaders           map[string]string
+	otelInsecure          bool
+	otelTimeout           time.Duration
+	prometheusEnabled     bool
+	vaultKey              string
+	bootstrapAPIKey       string
+	bootstrapWorkspaceID  string
+	bootstrapRole         string
+	shutdownTimeout       time.Duration
+	allowNoProviders      bool
 }
 
 // defaultInsecureListenAddr is the listen address used when authentication is
@@ -119,6 +121,31 @@ func displayBaseURL(listenAddr string) string {
 		host = "localhost"
 	}
 	return "http://" + net.JoinHostPort(host, port)
+}
+
+// resolveStorageDSN picks the store DSN: OMNISWITCH_DATABASE_URL (envDSN)
+// wins over gateway.storage_url. It returns "" for SQLite. A non-empty value
+// that is not a postgres:// or postgresql:// URL is an error rather than a
+// silent fallback to per-pod SQLite, and so is gateway.storage: postgres
+// without any DSN.
+func resolveStorageDSN(envDSN string, settings runtimeSettings) (string, error) {
+	dsn := strings.TrimSpace(envDSN)
+	source := "OMNISWITCH_DATABASE_URL"
+	if dsn == "" {
+		dsn = strings.TrimSpace(settings.storageURL)
+		source = "gateway.storage_url"
+	}
+	if dsn == "" {
+		if settings.storageBackend == "postgres" || settings.storageBackend == "postgresql" {
+			return "", fmt.Errorf("gateway.storage is %q but neither OMNISWITCH_DATABASE_URL nor gateway.storage_url is set", settings.storageBackend)
+		}
+		return "", nil
+	}
+	lower := strings.ToLower(dsn)
+	if !strings.HasPrefix(lower, "postgres://") && !strings.HasPrefix(lower, "postgresql://") {
+		return "", fmt.Errorf("%s must be a postgres:// or postgresql:// URL", source)
+	}
+	return dsn, nil
 }
 
 func loadRuntimeSettings() (runtimeSettings, error) {
@@ -347,6 +374,9 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 	}
 	if cfg.Gateway.StorageURL != "" {
 		settings.storageURL = cfg.Gateway.StorageURL
+	}
+	if storage := strings.ToLower(strings.TrimSpace(cfg.Gateway.Storage)); storage != "" {
+		settings.storageBackend = storage
 	}
 	if cfg.Gateway.Alerts != nil {
 		settings.alerts = gateway.AlertConfig{
