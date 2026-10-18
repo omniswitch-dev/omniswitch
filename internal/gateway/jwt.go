@@ -35,22 +35,37 @@ type JWTAuthenticatorConfig struct {
 	WorkspaceClaim    string
 	OrganizationClaim string
 	CacheTTL          time.Duration
-	HTTPClient        *http.Client
+	// StaleIfError is how long cached keys stay usable after CacheTTL when
+	// refreshing them fails (RFC 5861 stale-if-error), so an IdP outage does
+	// not reject every caller once the cache expires. Zero (the Go default)
+	// keeps the fail-closed behavior: expired keys are never used. The
+	// gateway binary defaults it to 24h (identity.oidc.stale_if_error).
+	StaleIfError time.Duration
+	HTTPClient   *http.Client
 }
 
 // JWTAuthenticator validates signed JWTs fetched from a configured JWKS URL.
 // It caches public keys and refreshes them when a token names a kid that is
 // not cached (an IdP key rotation). Forced refreshes are shared between
 // concurrent callers and happen at most once per minForcedRefreshInterval.
+// Expired keys are refreshed in the background while requests keep using
+// them; failed fetches back off exponentially (see jwks_cache.go).
 type JWTAuthenticator struct {
 	config JWTAuthenticatorConfig
 	client *http.Client
+	// now is the clock; tests replace it.
+	now func() time.Time
 
 	mu                sync.Mutex
 	keys              map[string]any
 	fetchedAt         time.Time
 	lastForcedRefresh time.Time
 	inflight          *jwksFetch
+	// failures counts consecutive failed fetches; retryAt is the end of the
+	// backoff after the last failure and lastErr its error.
+	failures int
+	retryAt  time.Time
+	lastErr  error
 }
 
 func NewJWTAuthenticator(config JWTAuthenticatorConfig) (*JWTAuthenticator, error) {
@@ -65,6 +80,9 @@ func NewJWTAuthenticator(config JWTAuthenticatorConfig) (*JWTAuthenticator, erro
 	if config.CacheTTL <= 0 {
 		config.CacheTTL = 5 * time.Minute
 	}
+	if config.StaleIfError < 0 {
+		config.StaleIfError = 0
+	}
 	if config.RoleClaim == "" {
 		config.RoleClaim = "role"
 	}
@@ -78,7 +96,7 @@ func NewJWTAuthenticator(config JWTAuthenticatorConfig) (*JWTAuthenticator, erro
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
 	}
-	return &JWTAuthenticator{config: config, client: client}, nil
+	return &JWTAuthenticator{config: config, client: client, now: time.Now}, nil
 }
 
 // MissingBindingWarnings describes issuer or audience checks that are not
@@ -174,61 +192,6 @@ const minForcedRefreshInterval = 30 * time.Second
 
 // maxJWKSBytes caps the JWKS document size.
 const maxJWKSBytes = 1 << 20
-
-// jwksFetch is one in-flight JWKS request shared by every caller that needs
-// fresh keys at the same time.
-type jwksFetch struct {
-	done chan struct{}
-	keys map[string]any
-	err  error
-}
-
-func (authenticator *JWTAuthenticator) currentKeys(ctx context.Context, forceRefresh bool) (map[string]any, error) {
-	authenticator.mu.Lock()
-	now := time.Now()
-	if len(authenticator.keys) > 0 {
-		fresh := now.Sub(authenticator.fetchedAt) < authenticator.config.CacheTTL
-		if !forceRefresh && fresh {
-			keys := authenticator.keys
-			authenticator.mu.Unlock()
-			return keys, nil
-		}
-		if forceRefresh && fresh && now.Sub(authenticator.lastForcedRefresh) < minForcedRefreshInterval {
-			keys := authenticator.keys
-			authenticator.mu.Unlock()
-			return keys, nil
-		}
-	}
-	if forceRefresh {
-		authenticator.lastForcedRefresh = now
-	}
-	call := authenticator.inflight
-	if call == nil {
-		call = &jwksFetch{done: make(chan struct{})}
-		authenticator.inflight = call
-		authenticator.mu.Unlock()
-		// The fetch is shared, so one caller's cancellation must not fail the
-		// others; the HTTP client timeout still bounds it.
-		keys, err := authenticator.fetchKeys(context.WithoutCancel(ctx))
-		authenticator.mu.Lock()
-		if err == nil {
-			authenticator.keys = keys
-			authenticator.fetchedAt = time.Now()
-		}
-		call.keys, call.err = keys, err
-		authenticator.inflight = nil
-		authenticator.mu.Unlock()
-		close(call.done)
-	} else {
-		authenticator.mu.Unlock()
-	}
-	select {
-	case <-call.done:
-		return call.keys, call.err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
 
 func (authenticator *JWTAuthenticator) fetchKeys(ctx context.Context) (map[string]any, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, authenticator.config.JWKSURL, nil)
