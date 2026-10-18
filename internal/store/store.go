@@ -1094,29 +1094,31 @@ func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
 		s := formatTime(*key.ExpiresAt)
 		expiresAt = &s
 	}
+	// One statement, so a concurrent IncrementAPIKeySpend can never land
+	// between an insert and a follow-up update. spend_usd is only written
+	// for a new key: re-running the upsert (the bootstrap key on every
+	// restart) must not reset accumulated spend.
 	_, err := s.exec(ctx,
-		`INSERT INTO api_keys (id, name, key_hash, key_prefix, created_at, expires_at, rate_limit, enabled, workspace_id, role, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO api_keys (id, name, key_hash, key_prefix, created_at, expires_at, rate_limit,
+			budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, workspace_id, role, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			key_hash = excluded.key_hash,
 			key_prefix = excluded.key_prefix,
 			expires_at = excluded.expires_at,
 			rate_limit = excluded.rate_limit,
+			budget_usd = excluded.budget_usd,
+			monthly_cost_budget = excluded.monthly_cost_budget,
+			monthly_token_budget = excluded.monthly_token_budget,
 			enabled = excluded.enabled,
 			workspace_id = excluded.workspace_id,
 			role = excluded.role,
 			metadata = excluded.metadata`,
 		key.ID, key.Name, key.KeyHash, key.KeyPrefix,
-		formatTime(key.CreatedAt), expiresAt,
-		key.RateLimit, boolToInt(key.Enabled), key.WorkspaceID, key.Role, string(meta),
-	)
-	if err != nil {
-		return err
-	}
-	_, err = s.exec(ctx,
-		"UPDATE api_keys SET budget_usd = ?, spend_usd = ?, monthly_cost_budget = ?, monthly_token_budget = ? WHERE id = ?",
-		firstPositive(key.BudgetUSD, key.MonthlyCostBudget), key.SpendUSD, key.MonthlyCostBudget, key.MonthlyTokenBudget, key.ID,
+		formatTime(key.CreatedAt), expiresAt, key.RateLimit,
+		firstPositive(key.BudgetUSD, key.MonthlyCostBudget), key.SpendUSD, key.MonthlyCostBudget, key.MonthlyTokenBudget,
+		boolToInt(key.Enabled), key.WorkspaceID, key.Role, string(meta),
 	)
 	return err
 }
