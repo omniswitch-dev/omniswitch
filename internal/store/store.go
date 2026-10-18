@@ -534,6 +534,28 @@ var schemaTables = []string{
 			updated_at TEXT NOT NULL,
 			enabled INTEGER DEFAULT 1
 		)`,
+	`CREATE TABLE IF NOT EXISTS datasets (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			description TEXT,
+			version INTEGER DEFAULT 1,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			metadata TEXT,
+			examples TEXT
+		)`,
+	`CREATE TABLE IF NOT EXISTS experiments (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			description TEXT,
+			dataset_id TEXT,
+			config TEXT,
+			status TEXT,
+			results TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			created_by TEXT
+		)`,
 }
 
 // schemaIndexes runs after every table and column exists, so an index may
@@ -557,6 +579,9 @@ var schemaIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_virtual_keys_name ON virtual_keys(name)`,
 	`CREATE INDEX IF NOT EXISTS idx_gateway_configs_name ON gateway_configs(name)`,
+	`CREATE INDEX IF NOT EXISTS idx_datasets_created ON datasets(created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_experiments_status_created ON experiments(status, created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_experiments_created ON experiments(created_at)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_key ON semantic_cache(cache_key) WHERE cache_key IS NOT NULL AND cache_key != ''`,
 	// Superseded by the composite indexes above, which cover the same
 	// prefix and also serve the ORDER BY / range part of the hot queries.
@@ -2350,7 +2375,7 @@ func (s *Store) CreateDataset(ctx context.Context, dataset *Dataset) error {
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	_, err = s.exec(ctx,
 		`INSERT INTO datasets (id, name, description, version, created_at, updated_at, metadata, examples)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		dataset.ID, dataset.Name, dataset.Description, dataset.Version,
@@ -2359,45 +2384,58 @@ func (s *Store) CreateDataset(ctx context.Context, dataset *Dataset) error {
 	return err
 }
 
+const datasetColumns = `id, name, COALESCE(description, ''), COALESCE(version, 1), created_at, updated_at,
+		COALESCE(metadata, ''), COALESCE(examples, '')`
+
+// scanDataset scans one datasetColumns row. Timestamps are stored as TEXT,
+// so they are scanned into strings and parsed rather than into time.Time.
+func scanDataset(row interface{ Scan(...any) error }) (*Dataset, error) {
+	var dataset Dataset
+	var createdAt, updatedAt, metadataJSON, examplesJSON string
+	if err := row.Scan(&dataset.ID, &dataset.Name, &dataset.Description, &dataset.Version,
+		&createdAt, &updatedAt, &metadataJSON, &examplesJSON); err != nil {
+		return nil, err
+	}
+	dataset.CreatedAt = parseTime(createdAt)
+	dataset.UpdatedAt = parseTime(updatedAt)
+	if err := unmarshalOptionalJSON(metadataJSON, &dataset.Metadata); err != nil {
+		return nil, fmt.Errorf("dataset %s metadata: %w", dataset.ID, err)
+	}
+	if err := unmarshalOptionalJSON(examplesJSON, &dataset.Examples); err != nil {
+		return nil, fmt.Errorf("dataset %s examples: %w", dataset.ID, err)
+	}
+	return &dataset, nil
+}
+
+// unmarshalOptionalJSON decodes raw into v, treating an empty column or a
+// JSON null as "no value".
+func unmarshalOptionalJSON(raw string, v any) error {
+	if raw == "" || raw == "null" {
+		return nil
+	}
+	return json.Unmarshal([]byte(raw), v)
+}
+
 // GetDataset retrieves a dataset by ID.
 func (s *Store) GetDataset(ctx context.Context, id string) (*Dataset, error) {
-	var dataset Dataset
-	var metadataJSON, examplesJSON string
-
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, name, description, version, created_at, updated_at, metadata, examples
-		FROM datasets WHERE id = ?`, id).Scan(
-		&dataset.ID, &dataset.Name, &dataset.Description, &dataset.Version,
-		&dataset.CreatedAt, &dataset.UpdatedAt, &metadataJSON, &examplesJSON)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, ErrNotFound
-		}
-		return nil, err
+	dataset, err := scanDataset(s.queryRow(ctx,
+		`SELECT `+datasetColumns+` FROM datasets WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
 	}
-
-	if err := json.Unmarshal([]byte(metadataJSON), &dataset.Metadata); err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal([]byte(examplesJSON), &dataset.Examples); err != nil {
-		return nil, err
-	}
-
-	return &dataset, nil
+	return dataset, err
 }
 
 // ListDatasets lists datasets with pagination.
 func (s *Store) ListDatasets(ctx context.Context, limit, offset int) ([]*Dataset, int, error) {
 	limit, offset = ClampPage(limit, offset)
 	var total int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM datasets`).Scan(&total)
-	if err != nil {
+	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM datasets`).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, description, version, created_at, updated_at, metadata, examples
-		FROM datasets ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+	rows, err := s.query(ctx,
+		`SELECT `+datasetColumns+` FROM datasets ORDER BY created_at DESC, id LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -2405,17 +2443,12 @@ func (s *Store) ListDatasets(ctx context.Context, limit, offset int) ([]*Dataset
 
 	var datasets []*Dataset
 	for rows.Next() {
-		var dataset Dataset
-		var metadataJSON, examplesJSON string
-		if err := rows.Scan(&dataset.ID, &dataset.Name, &dataset.Description, &dataset.Version,
-			&dataset.CreatedAt, &dataset.UpdatedAt, &metadataJSON, &examplesJSON); err != nil {
+		dataset, err := scanDataset(rows)
+		if err != nil {
 			return nil, 0, err
 		}
-		_ = json.Unmarshal([]byte(metadataJSON), &dataset.Metadata)
-		_ = json.Unmarshal([]byte(examplesJSON), &dataset.Examples)
-		datasets = append(datasets, &dataset)
+		datasets = append(datasets, dataset)
 	}
-
 	return datasets, total, rows.Err()
 }
 
@@ -2430,30 +2463,56 @@ func (s *Store) UpdateDataset(ctx context.Context, dataset *Dataset) error {
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	result, err := s.exec(ctx,
 		`UPDATE datasets SET name = ?, description = ?, version = ?, updated_at = ?, metadata = ?, examples = ?
 		WHERE id = ?`,
 		dataset.Name, dataset.Description, dataset.Version, formatTime(dataset.UpdatedAt),
 		string(metadataJSON), string(examplesJSON), dataset.ID)
-	return err
+	return notFoundIfNoRows(result, err)
 }
 
 // DeleteDataset deletes a dataset.
 func (s *Store) DeleteDataset(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM datasets WHERE id = ?`, id)
+	result, err := s.exec(ctx, `DELETE FROM datasets WHERE id = ?`, id)
+	return notFoundIfNoRows(result, err)
+}
+
+func notFoundIfNoRows(result sql.Result, err error) error {
 	if err != nil {
 		return err
 	}
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
 	if affected == 0 {
 		return ErrNotFound
 	}
 	return nil
 }
 
-// AddExamples adds examples to a dataset.
+// AddExamples appends examples to a dataset and bumps its version. The
+// read-modify-write of the examples blob runs in one write transaction so
+// concurrent calls cannot drop each other's examples: on SQLite the single
+// immediate-mode writer connection serializes it, and on PostgreSQL the
+// row is locked with SELECT ... FOR UPDATE.
 func (s *Store) AddExamples(ctx context.Context, datasetID string, examples []DatasetExample) error {
-	dataset, err := s.GetDataset(ctx, datasetID)
+	tx, err := s.wdb.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	selectQuery := `SELECT ` + datasetColumns + ` FROM datasets WHERE id = ?`
+	updateQuery := `UPDATE datasets SET examples = ?, version = ?, updated_at = ? WHERE id = ?`
+	if s.pg {
+		selectQuery = rewriteSQL(selectQuery + ` FOR UPDATE`)
+		updateQuery = rewriteSQL(updateQuery)
+	}
+	dataset, err := scanDataset(tx.QueryRowContext(ctx, selectQuery, datasetID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
 	if err != nil {
 		return err
 	}
@@ -2461,19 +2520,29 @@ func (s *Store) AddExamples(ctx context.Context, datasetID string, examples []Da
 	dataset.Examples = append(dataset.Examples, examples...)
 	dataset.Version++
 	dataset.UpdatedAt = time.Now().UTC()
-
 	examplesJSON, err := json.Marshal(dataset.Examples)
 	if err != nil {
 		return err
 	}
-
-	_, err = s.db.ExecContext(ctx,
-		`UPDATE datasets SET examples = ?, version = ?, updated_at = ? WHERE id = ?`,
-		string(examplesJSON), dataset.Version, formatTime(dataset.UpdatedAt), datasetID)
-	return err
+	if _, err := tx.ExecContext(ctx, updateQuery,
+		string(examplesJSON), dataset.Version, formatTime(dataset.UpdatedAt), datasetID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Experiment methods
+
+func marshalExperimentResults(results *ExperimentResult) (string, error) {
+	if results == nil {
+		return "{}", nil
+	}
+	b, err := json.Marshal(results)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
 
 // CreateExperiment creates a new experiment.
 func (s *Store) CreateExperiment(ctx context.Context, exp *Experiment) error {
@@ -2481,13 +2550,12 @@ func (s *Store) CreateExperiment(ctx context.Context, exp *Experiment) error {
 	if err != nil {
 		return err
 	}
-	resultsJSON := "{}"
-	if exp.Results != nil {
-		bytes, _ := json.Marshal(exp.Results)
-		resultsJSON = string(bytes)
+	resultsJSON, err := marshalExperimentResults(exp.Results)
+	if err != nil {
+		return err
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	_, err = s.exec(ctx,
 		`INSERT INTO experiments (id, name, description, dataset_id, config, status, results, created_at, updated_at, created_by)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		exp.ID, exp.Name, exp.Description, exp.DatasetID, string(configJSON),
@@ -2496,54 +2564,60 @@ func (s *Store) CreateExperiment(ctx context.Context, exp *Experiment) error {
 	return err
 }
 
-// GetExperiment retrieves an experiment by ID.
-func (s *Store) GetExperiment(ctx context.Context, id string) (*Experiment, error) {
-	var exp Experiment
-	var configJSON, resultsJSON string
+const experimentColumns = `id, name, COALESCE(description, ''), COALESCE(dataset_id, ''), COALESCE(config, ''),
+		COALESCE(status, ''), COALESCE(results, ''), created_at, updated_at, COALESCE(created_by, '')`
 
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, name, description, dataset_id, config, status, results, created_at, updated_at, created_by
-		FROM experiments WHERE id = ?`, id).Scan(
-		&exp.ID, &exp.Name, &exp.Description, &exp.DatasetID, &configJSON,
-		&exp.Status, &exp.Results, &exp.CreatedAt, &exp.UpdatedAt, &exp.CreatedBy)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, ErrNotFound
-		}
+// scanExperiment scans one experimentColumns row. results is a JSON TEXT
+// column; "{}" (what CreateExperiment stores for "no results yet") leaves
+// Results nil.
+func scanExperiment(row interface{ Scan(...any) error }) (*Experiment, error) {
+	var exp Experiment
+	var configJSON, resultsJSON, createdAt, updatedAt string
+	if err := row.Scan(&exp.ID, &exp.Name, &exp.Description, &exp.DatasetID, &configJSON,
+		&exp.Status, &resultsJSON, &createdAt, &updatedAt, &exp.CreatedBy); err != nil {
 		return nil, err
 	}
-
-	_ = json.Unmarshal([]byte(configJSON), &exp.Config)
-	_ = json.Unmarshal([]byte(resultsJSON), &exp.Results)
-
+	exp.CreatedAt = parseTime(createdAt)
+	exp.UpdatedAt = parseTime(updatedAt)
+	if err := unmarshalOptionalJSON(configJSON, &exp.Config); err != nil {
+		return nil, fmt.Errorf("experiment %s config: %w", exp.ID, err)
+	}
+	if resultsJSON != "{}" {
+		if err := unmarshalOptionalJSON(resultsJSON, &exp.Results); err != nil {
+			return nil, fmt.Errorf("experiment %s results: %w", exp.ID, err)
+		}
+	}
 	return &exp, nil
+}
+
+// GetExperiment retrieves an experiment by ID.
+func (s *Store) GetExperiment(ctx context.Context, id string) (*Experiment, error) {
+	exp, err := scanExperiment(s.queryRow(ctx,
+		`SELECT `+experimentColumns+` FROM experiments WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return exp, err
 }
 
 // ListExperiments lists experiments with pagination.
 func (s *Store) ListExperiments(ctx context.Context, limit, offset int, status string) ([]*Experiment, int, error) {
 	limit, offset = ClampPage(limit, offset)
-	query := `SELECT COUNT(*) FROM experiments`
+	where := ""
 	args := []any{}
 	if status != "" {
-		query += ` WHERE status = ?`
+		where = ` WHERE status = ?`
 		args = append(args, status)
 	}
 
 	var total int
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(&total)
-	if err != nil {
+	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM experiments`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
-	query = `SELECT id, name, description, dataset_id, config, status, results, created_at, updated_at, created_by
-		FROM experiments`
-	if status != "" {
-		query += ` WHERE status = ?`
-	}
-	query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
-	args = append(args, limit, offset)
-
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.query(ctx,
+		`SELECT `+experimentColumns+` FROM experiments`+where+` ORDER BY created_at DESC, id LIMIT ? OFFSET ?`,
+		append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -2551,20 +2625,12 @@ func (s *Store) ListExperiments(ctx context.Context, limit, offset int, status s
 
 	var experiments []*Experiment
 	for rows.Next() {
-		var exp Experiment
-		var configJSON, resultsJSON string
-		var createdAt, updatedAt string
-		if err := rows.Scan(&exp.ID, &exp.Name, &exp.Description, &exp.DatasetID, &configJSON,
-			&exp.Status, &exp.Results, &createdAt, &updatedAt, &exp.CreatedBy); err != nil {
+		exp, err := scanExperiment(rows)
+		if err != nil {
 			return nil, 0, err
 		}
-		_ = json.Unmarshal([]byte(configJSON), &exp.Config)
-		_ = json.Unmarshal([]byte(resultsJSON), &exp.Results)
-		exp.CreatedAt = parseTime(createdAt)
-		exp.UpdatedAt = parseTime(updatedAt)
-		experiments = append(experiments, &exp)
+		experiments = append(experiments, exp)
 	}
-
 	return experiments, total, rows.Err()
 }
 
@@ -2574,16 +2640,15 @@ func (s *Store) UpdateExperiment(ctx context.Context, exp *Experiment) error {
 	if err != nil {
 		return err
 	}
-	resultsJSON := "{}"
-	if exp.Results != nil {
-		bytes, _ := json.Marshal(exp.Results)
-		resultsJSON = string(bytes)
+	resultsJSON, err := marshalExperimentResults(exp.Results)
+	if err != nil {
+		return err
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	result, err := s.exec(ctx,
 		`UPDATE experiments SET name = ?, description = ?, dataset_id = ?, config = ?, status = ?, results = ?, updated_at = ?
 		WHERE id = ?`,
 		exp.Name, exp.Description, exp.DatasetID, string(configJSON), exp.Status, resultsJSON,
 		formatTime(exp.UpdatedAt), exp.ID)
-	return err
+	return notFoundIfNoRows(result, err)
 }
