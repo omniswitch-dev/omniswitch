@@ -523,7 +523,7 @@ func TestShadowTrafficBoundedAndIsolated(t *testing.T) {
 	if state := prodBreaker.State("shadow"); state != router.CircuitClosed {
 		t.Fatalf("production breaker state for shadow = %q, want closed", state)
 	}
-	if !prodBreaker.Allow("shadow") {
+	if !prodBreaker.Available("shadow") {
 		t.Fatalf("production breaker blocks the shadow provider after a shadow failure")
 	}
 }

@@ -194,7 +194,7 @@ func TestClientCancellationDoesNotTripBreaker(t *testing.T) {
 				call(rtr, ctx)
 				cancel()
 			}
-			if !rtr.allowProvider("p") {
+			if !rtr.CircuitBreaker().Available("p") {
 				t.Fatal("client cancellations opened the circuit breaker")
 			}
 		})
@@ -210,7 +210,7 @@ func TestRouteTimeoutStillCountsAsFailure(t *testing.T) {
 	if _, _, err := rtr.Execute(context.Background(), provider.ChatRequest{Model: "m"}, ""); err == nil {
 		t.Fatal("Execute() error = nil, want timeout")
 	}
-	if rtr.allowProvider("p") {
+	if rtr.CircuitBreaker().Available("p") {
 		t.Fatal("route timeout should count as a provider failure")
 	}
 }
@@ -257,7 +257,7 @@ func TestExecuteStreamFirstChunkTimeoutFallsBack(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("slow provider stream was not cancelled")
 	}
-	if rtr.allowProvider("slow") {
+	if rtr.CircuitBreaker().Available("slow") {
 		t.Fatal("first-chunk timeout should count as a provider failure")
 	}
 }

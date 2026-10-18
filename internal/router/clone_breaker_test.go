@@ -46,8 +46,8 @@ func TestCloneWithRoutesFollowsBaseBreaker(t *testing.T) {
 	if clone.CircuitBreaker() != first || nested.CircuitBreaker() != first {
 		t.Fatalf("clones do not share the base breaker")
 	}
-	clone.recordFailure("p")
-	if rtr.allowProvider("p") {
+	clone.CircuitBreaker().RecordFailure("p")
+	if rtr.CircuitBreaker().Available("p") {
 		t.Fatalf("failure recorded through the clone did not open the base circuit")
 	}
 	second := NewCircuitBreaker(3, time.Minute)

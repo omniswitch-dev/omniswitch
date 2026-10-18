@@ -295,7 +295,8 @@ func (r *Router) Embeddings(ctx context.Context, req provider.EmbeddingRequest, 
 			lastErr = fmt.Errorf("provider %q does not support embeddings", current.Name())
 			continue
 		}
-		if !r.allowProvider(current.Name()) {
+		admission, allowed := r.allowProvider(current.Name())
+		if !allowed {
 			lastErr = fmt.Errorf("provider %q circuit is open", current.Name())
 			continue
 		}
@@ -303,7 +304,7 @@ func (r *Router) Embeddings(ctx context.Context, req provider.EmbeddingRequest, 
 		response, meta, err := embeddingProvider.Embeddings(callCtx, req)
 		cancel()
 		if err == nil {
-			r.recordSuccess(current.Name())
+			admission.Success()
 			r.recordLatency(current.Name(), meta.Latency)
 			meta.Fallback = index > 0
 			if meta.Model == "" {
@@ -311,7 +312,7 @@ func (r *Router) Embeddings(ctx context.Context, req provider.EmbeddingRequest, 
 			}
 			return response, meta, nil
 		}
-		r.recordAttemptFailure(ctx, current.Name(), err)
+		r.recordAttemptFailure(ctx, admission, err)
 		lastErr = err
 		if ctx.Err() != nil {
 			break
@@ -334,7 +335,8 @@ func (r *Router) ImageGeneration(ctx context.Context, req provider.ImageRequest,
 			lastErr = fmt.Errorf("provider %q does not support image generation", current.Name())
 			continue
 		}
-		if !r.allowProvider(current.Name()) {
+		admission, allowed := r.allowProvider(current.Name())
+		if !allowed {
 			lastErr = fmt.Errorf("provider %q circuit is open", current.Name())
 			continue
 		}
@@ -342,7 +344,7 @@ func (r *Router) ImageGeneration(ctx context.Context, req provider.ImageRequest,
 		response, meta, err := imageProvider.ImageGeneration(callCtx, req)
 		cancel()
 		if err == nil {
-			r.recordSuccess(current.Name())
+			admission.Success()
 			r.recordLatency(current.Name(), meta.Latency)
 			meta.Fallback = index > 0
 			if meta.Model == "" {
@@ -350,7 +352,7 @@ func (r *Router) ImageGeneration(ctx context.Context, req provider.ImageRequest,
 			}
 			return response, meta, nil
 		}
-		r.recordAttemptFailure(ctx, current.Name(), err)
+		r.recordAttemptFailure(ctx, admission, err)
 		lastErr = err
 		if ctx.Err() != nil {
 			break
@@ -373,7 +375,8 @@ func (r *Router) Transcription(ctx context.Context, req provider.TranscriptionRe
 			lastErr = fmt.Errorf("provider %q does not support audio transcription", current.Name())
 			continue
 		}
-		if !r.allowProvider(current.Name()) {
+		admission, allowed := r.allowProvider(current.Name())
+		if !allowed {
 			lastErr = fmt.Errorf("provider %q circuit is open", current.Name())
 			continue
 		}
@@ -381,7 +384,7 @@ func (r *Router) Transcription(ctx context.Context, req provider.TranscriptionRe
 		response, meta, err := audioProvider.Transcription(callCtx, req)
 		cancel()
 		if err == nil {
-			r.recordSuccess(current.Name())
+			admission.Success()
 			r.recordLatency(current.Name(), meta.Latency)
 			meta.Fallback = index > 0
 			if meta.Model == "" {
@@ -389,7 +392,7 @@ func (r *Router) Transcription(ctx context.Context, req provider.TranscriptionRe
 			}
 			return response, meta, nil
 		}
-		r.recordAttemptFailure(ctx, current.Name(), err)
+		r.recordAttemptFailure(ctx, admission, err)
 		lastErr = err
 		if ctx.Err() != nil {
 			break
@@ -412,14 +415,15 @@ func (r *Router) Speech(ctx context.Context, req provider.SpeechRequest, provide
 			lastErr = fmt.Errorf("provider %q does not support audio speech", current.Name())
 			continue
 		}
-		if !r.allowProvider(current.Name()) {
+		admission, allowed := r.allowProvider(current.Name())
+		if !allowed {
 			lastErr = fmt.Errorf("provider %q circuit is open", current.Name())
 			continue
 		}
 		callCtx, cancel := withRouteTimeout(ctx, route.Timeout)
 		body, contentType, meta, err := audioProvider.Speech(callCtx, req)
 		if err == nil {
-			r.recordSuccess(current.Name())
+			admission.Success()
 			r.recordLatency(current.Name(), meta.Latency)
 			meta.Fallback = index > 0
 			if meta.Model == "" {
@@ -428,7 +432,7 @@ func (r *Router) Speech(ctx context.Context, req provider.SpeechRequest, provide
 			return &cancelReadCloser{ReadCloser: body, cancel: cancel}, contentType, meta, nil
 		}
 		cancel()
-		r.recordAttemptFailure(ctx, current.Name(), err)
+		r.recordAttemptFailure(ctx, admission, err)
 		lastErr = err
 		if ctx.Err() != nil {
 			break
@@ -475,7 +479,8 @@ func (r *Router) Rerank(ctx context.Context, req provider.RerankRequest, provide
 			lastErr = fmt.Errorf("provider %q does not support rerank", current.Name())
 			continue
 		}
-		if !r.allowProvider(current.Name()) {
+		admission, allowed := r.allowProvider(current.Name())
+		if !allowed {
 			lastErr = fmt.Errorf("provider %q circuit is open", current.Name())
 			continue
 		}
@@ -483,7 +488,7 @@ func (r *Router) Rerank(ctx context.Context, req provider.RerankRequest, provide
 		response, meta, err := rerankProvider.Rerank(callCtx, req)
 		cancel()
 		if err == nil {
-			r.recordSuccess(current.Name())
+			admission.Success()
 			r.recordLatency(current.Name(), meta.Latency)
 			meta.Fallback = index > 0
 			if meta.Model == "" {
@@ -491,7 +496,7 @@ func (r *Router) Rerank(ctx context.Context, req provider.RerankRequest, provide
 			}
 			return response, meta, nil
 		}
-		r.recordAttemptFailure(ctx, current.Name(), err)
+		r.recordAttemptFailure(ctx, admission, err)
 		lastErr = err
 		if ctx.Err() != nil {
 			break
@@ -522,7 +527,8 @@ func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, provider
 
 	var lastErr error
 	for i, prov := range providers {
-		if !r.allowProvider(prov.Name()) {
+		admission, allowed := r.allowProvider(prov.Name())
+		if !allowed {
 			lastErr = fmt.Errorf("provider %q circuit is open", prov.Name())
 			traceSkippedProvider(ctx, prov.Name(), req.Model, lastErr)
 			continue
@@ -533,12 +539,15 @@ func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, provider
 		}
 
 		for attempt := 0; attempt < maxRetries; attempt++ {
+			if attempt > 0 && !r.reacquire(prov.Name(), &admission, &lastErr) {
+				break
+			}
 			callCtx, cancel := withRouteTimeout(ctx, route.Timeout)
 			callCtx, span := startProviderSpan(callCtx, prov.Name(), req.Model, attempt, i > 0, false)
 			resp, meta, err := prov.ChatCompletion(callCtx, req)
 			cancel()
 			if err == nil {
-				r.recordSuccess(prov.Name())
+				admission.Success()
 				r.recordLatency(prov.Name(), meta.Latency)
 				meta.Retries = attempt
 				meta.Fallback = i > 0
@@ -549,7 +558,7 @@ func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, provider
 				return resp, meta, nil
 			}
 			finishProviderSpan(span, meta, err)
-			r.recordAttemptFailure(ctx, prov.Name(), err)
+			r.recordAttemptFailure(ctx, admission, err)
 			lastErr = err
 			meta.Retries = attempt
 
@@ -605,7 +614,8 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 	timeout := routeTimeout(route.Timeout)
 	var lastErr error
 	for i, prov := range providers {
-		if !r.allowProvider(prov.Name()) {
+		admission, allowed := r.allowProvider(prov.Name())
+		if !allowed {
 			lastErr = fmt.Errorf("provider %q circuit is open", prov.Name())
 			continue
 		}
@@ -616,9 +626,12 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 				attempts += route.MaxRetries
 			}
 			for attempt := 0; attempt < attempts; attempt++ {
+				if attempt > 0 && !r.reacquire(prov.Name(), &admission, &lastErr) {
+					break
+				}
 				chunks, meta, err := r.startStream(ctx, prov.Name(), streamer, req, timeout, attempt, i > 0)
 				if err == nil {
-					r.recordSuccess(prov.Name())
+					admission.Success()
 					r.recordLatency(prov.Name(), meta.Latency)
 					meta.Retries = attempt
 					meta.Fallback = i > 0
@@ -627,7 +640,7 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 					}
 					return chunks, meta, nil
 				}
-				r.recordAttemptFailure(ctx, prov.Name(), err)
+				r.recordAttemptFailure(ctx, admission, err)
 				lastErr = err
 				if ctx.Err() != nil {
 					return nil, meta, ctx.Err()
@@ -653,7 +666,7 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 		resp, meta, err := prov.ChatCompletion(callCtx, req)
 		cancel()
 		if err == nil {
-			r.recordSuccess(prov.Name())
+			admission.Success()
 			r.recordLatency(prov.Name(), meta.Latency)
 			meta.Fallback = i > 0
 			if meta.Model == "" {
@@ -663,7 +676,7 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 			return provider.StreamFromResponse(ctx, resp), meta, nil
 		}
 		finishProviderSpan(span, meta, err)
-		r.recordAttemptFailure(ctx, prov.Name(), err)
+		r.recordAttemptFailure(ctx, admission, err)
 		lastErr = err
 		if ctx.Err() != nil {
 			return nil, meta, ctx.Err()
@@ -940,38 +953,43 @@ func randomInt(max int) int {
 	return int(binary.BigEndian.Uint64(b[:]) % uint64(max))
 }
 
-func (r *Router) allowProvider(providerName string) bool {
+// allowProvider asks the circuit breaker whether a call to providerName may
+// go ahead. Every admitted call must end in exactly one report on the
+// returned Admission (Success, Failure or Release, usually through
+// recordAttemptFailure) so a half-open probe never stays taken.
+func (r *Router) allowProvider(providerName string) (Admission, bool) {
 	breaker := r.CircuitBreaker()
 	if breaker == nil {
-		return true
+		return Admission{}, true
 	}
-	return breaker.Allow(providerName)
+	return breaker.Acquire(providerName)
 }
 
-func (r *Router) recordSuccess(providerName string) {
-	breaker := r.CircuitBreaker()
-	if breaker != nil {
-		breaker.RecordSuccess(providerName)
+// reacquire asks the breaker again before a retry against the same
+// provider: the previous attempt's failure may have opened the circuit (or
+// ended the half-open probe), and then the retry must not go ahead.
+func (r *Router) reacquire(providerName string, admission *Admission, lastErr *error) bool {
+	next, ok := r.allowProvider(providerName)
+	if !ok {
+		*lastErr = fmt.Errorf("provider %q circuit is open", providerName)
+		return false
 	}
+	*admission = next
+	return true
 }
 
-func (r *Router) recordFailure(providerName string) {
-	breaker := r.CircuitBreaker()
-	if breaker != nil {
-		breaker.RecordFailure(providerName)
-	}
-}
-
-// recordAttemptFailure counts a failed provider call against the circuit
-// breaker unless the failure was caused by the caller: a cancelled request
-// (client disconnect) or an expired parent deadline says nothing about the
-// provider's health, and counting it would let a handful of aborted requests
-// take a healthy provider out of rotation for every tenant.
-func (r *Router) recordAttemptFailure(ctx context.Context, providerName string, err error) {
+// recordAttemptFailure reports a failed provider call to the circuit
+// breaker. A failure caused by the caller (a cancelled request or an expired
+// parent deadline) says nothing about the provider's health, and counting it
+// would let a handful of aborted requests take a healthy provider out of
+// rotation for every tenant, so it only releases the admission (freeing a
+// half-open probe slot) without changing the circuit state.
+func (r *Router) recordAttemptFailure(ctx context.Context, admission Admission, err error) {
 	if !countsAsProviderFailure(ctx, err) {
+		admission.Release()
 		return
 	}
-	r.recordFailure(providerName)
+	admission.Failure()
 }
 
 func (r *Router) recordLatency(providerName string, latency time.Duration) {
