@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -98,6 +99,7 @@ type geminiGenerationConfig struct {
 	Temperature      *float64 `json:"temperature,omitempty"`
 	MaxTokens        *int     `json:"maxOutputTokens,omitempty"`
 	TopP             *float64 `json:"topP,omitempty"`
+	StopSequences    []string `json:"stopSequences,omitempty"`
 	ResponseMimeType string   `json:"responseMimeType,omitempty"`
 	ResponseSchema   any      `json:"responseSchema,omitempty"`
 }
@@ -184,13 +186,13 @@ func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 		return ChatResponse{}, meta, err
 	}
 
-	url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", g.baseURL, req.Model, g.apiKey)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, g.modelURL(req.Model, ":generateContent"), bytes.NewReader(body))
 	if err != nil {
 		meta.Error = err.Error()
 		return ChatResponse{}, meta, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-goog-api-key", g.apiKey)
 
 	resp, err := g.client.Do(httpReq)
 	if err != nil {
@@ -290,13 +292,13 @@ func (g *Google) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-c
 	if err != nil {
 		return nil, meta, err
 	}
-	url := fmt.Sprintf("%s/models/%s:streamGenerateContent?alt=sse&key=%s", g.baseURL, req.Model, g.apiKey)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, g.modelURL(req.Model, ":streamGenerateContent?alt=sse"), bytes.NewReader(body))
 	if err != nil {
 		meta.Error = err.Error()
 		return nil, meta, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-goog-api-key", g.apiKey)
 
 	resp, err := streamingClient(g.client).Do(httpReq)
 	if err != nil {
@@ -313,6 +315,15 @@ func (g *Google) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-c
 	}
 	meta.Latency = time.Since(start)
 	return streamGemini(ctx, resp.Body, req.Model), meta, nil
+}
+
+// modelURL builds a Gemini model endpoint. The API key is sent in the
+// x-goog-api-key header rather than the ?key= query parameter, so it does
+// not end up in proxy/access logs or in error messages that echo the URL.
+// The model ID is path-escaped so it cannot alter the request path.
+func (g *Google) modelURL(model, method string) string {
+	model = strings.TrimPrefix(model, "models/")
+	return g.baseURL + "/models/" + url.PathEscape(model) + method
 }
 
 func toGeminiRequest(req ChatRequest) (geminiRequest, error) {
@@ -347,9 +358,10 @@ func toGeminiRequest(req ChatRequest) (geminiRequest, error) {
 	}
 	gemReq := geminiRequest{
 		GenerationConfig: &geminiGenerationConfig{
-			Temperature: req.Temperature,
-			MaxTokens:   maxTokens,
-			TopP:        req.TopP,
+			Temperature:   req.Temperature,
+			MaxTokens:     maxTokens,
+			TopP:          req.TopP,
+			StopSequences: append([]string(nil), req.Stop...),
 		},
 	}
 
@@ -390,10 +402,13 @@ func toGeminiRequest(req ChatRequest) (geminiRequest, error) {
 	}
 
 	toolCallNames := map[string]string{}
+	var systemParts []geminiPart
 	for _, msg := range req.Messages {
-		if msg.Role == "system" {
-			gemReq.SystemInstruction = &geminiContent{
-				Parts: []geminiPart{{Text: msg.Text()}},
+		// Every system/developer message becomes one systemInstruction part,
+		// in order; previously each one overwrote the last.
+		if msg.Role == "system" || msg.Role == "developer" {
+			if text := msg.Text(); text != "" {
+				systemParts = append(systemParts, geminiPart{Text: text})
 			}
 			continue
 		}
@@ -407,15 +422,37 @@ func toGeminiRequest(req ChatRequest) (geminiRequest, error) {
 		case "assistant":
 			role = "model"
 		case "tool":
-			role = "function"
+			// Gemini expects functionResponse parts in a user turn.
+			role = "user"
 		}
 		parts := geminiMessageParts(msg, toolCallNames)
+		if len(parts) == 0 {
+			continue
+		}
+		// Parallel tool results (consecutive tool messages) must reach
+		// Gemini as one turn holding every functionResponse part.
+		if n := len(gemReq.Contents); n > 0 && msg.Role == "tool" && gemReq.Contents[n-1].Role == "user" && isGeminiFunctionResponseTurn(gemReq.Contents[n-1]) {
+			gemReq.Contents[n-1].Parts = append(gemReq.Contents[n-1].Parts, parts...)
+			continue
+		}
 		gemReq.Contents = append(gemReq.Contents, geminiContent{
 			Role:  role,
 			Parts: parts,
 		})
 	}
+	if len(systemParts) > 0 {
+		gemReq.SystemInstruction = &geminiContent{Parts: systemParts}
+	}
 	return gemReq, nil
+}
+
+func isGeminiFunctionResponseTurn(content geminiContent) bool {
+	for _, part := range content.Parts {
+		if part.FunctionResponse == nil {
+			return false
+		}
+	}
+	return len(content.Parts) > 0
 }
 
 func geminiMessageParts(msg Message, toolCallNames map[string]string) []geminiPart {
@@ -434,6 +471,24 @@ func geminiMessageParts(msg Message, toolCallNames map[string]string) []geminiPa
 				Response: wrapped,
 			},
 		}}
+	}
+	if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+		// Prior assistant tool calls must be replayed as functionCall
+		// parts, or Gemini sees tool results with no matching call.
+		var parts []geminiPart
+		if text := msg.Text(); text != "" {
+			parts = append(parts, geminiPart{Text: text})
+		}
+		for _, call := range msg.ToolCalls {
+			args := map[string]any{}
+			if strings.TrimSpace(call.Function.Arguments) != "" {
+				if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+					args = map[string]any{"arguments": call.Function.Arguments}
+				}
+			}
+			parts = append(parts, geminiPart{FunctionCall: &geminiFunctionCall{Name: call.Function.Name, Args: args}})
+		}
+		return parts
 	}
 	if len(msg.ContentParts) == 0 {
 		if msg.Text() == "" {
