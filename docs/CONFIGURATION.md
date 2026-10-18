@@ -12,6 +12,11 @@ OMNISWITCH_CONFIG=examples/gateway-config.yaml go run ./cmd/gateway
 
 Environment variables are applied after the config file and override file values.
 
+The gateway checks the config file every 2 seconds and applies some changes
+without a restart. See
+[`GET /api/config/raw` and `POST /api/config/raw`](API.md#get-apiconfigraw-and-post-apiconfigraw)
+for the list of settings that reload.
+
 ## Example
 
 ```yaml
@@ -34,6 +39,8 @@ gateway:
   read_timeout: 30s
   write_timeout: 0s
   idle_timeout: 60s
+  budget_fail_open: false
+  budget_refresh_interval: 5s
 
 rate_limit:
   requests: 120
@@ -170,6 +177,11 @@ Retries, fallbacks and timeouts:
   so a long generation is not cut off.
 - The circuit breaker counts 5xx responses, 408, 429, timeouts and network
   errors. Other 4xx responses and client disconnects do not open it.
+  `circuit_breaker_failures` and `circuit_breaker_cooldown` reload with the
+  config file. A change to one of them installs a new breaker with all
+  circuits closed. A reload that does not change them keeps the current
+  breaker and its open circuits. Requests that use a stored config share
+  this breaker.
 - An invalid CEL `condition` is logged once when routes load, and that
   variant never matches.
 
@@ -259,6 +271,14 @@ provider named `bedrock` in `AWS_REGION` (then `AWS_DEFAULT_REGION`, then
 (comma-separated model or inference-profile IDs; defaults come from the model
 catalog), and `OMNISWITCH_BEDROCK_GUARDRAIL_ID` /
 `OMNISWITCH_BEDROCK_GUARDRAIL_VERSION`.
+
+### Claude sampling parameters
+
+Anthropic Claude models reject a request that sets both `temperature` and
+`top_p`. When a request sets both, the `anthropic` adapter sends only
+`temperature`. The `bedrock` adapter applies the same rule to Claude model
+IDs (IDs that contain `anthropic.` or `claude`). Other Bedrock models get
+both values. A request that sets only `top_p` keeps it.
 
 ### Cohere
 
@@ -353,7 +373,10 @@ Setting `OMNISWITCH_OTEL_ENDPOINT` also enables tracing.
 
 Set `prometheus_enabled: true` (the runtime default) to expose the lightweight
 Prometheus endpoint at `GET /metrics`. When authentication is enabled, this
-endpoint requires an authenticated viewer role or higher.
+endpoint requires an authenticated viewer role or higher. The metrics cover
+all tenants, so a workspace- or organization-scoped caller gets `403`. With
+`OMNISWITCH_METRICS_PUBLIC=true`, the endpoint needs no key and any caller
+can read it.
 
 ## Security and Runtime Limits
 
@@ -376,8 +399,25 @@ without it. The `OMNISWITCH_DATABASE_URL` environment variable always takes
 precedence over `gateway.storage_url`, so an operator can override storage
 without editing the config file.
 
-`gateway.alerts` sends threshold-based notifications (for example, elevated
-error rates) to a webhook and/or Slack incoming webhook URL:
+Upgrade note: on its first start after an upgrade, the gateway migrates the
+schema:
+
+- It adds `prompts.workspace_id` (empty for existing prompts, which then
+  belong to the global namespace) and `workspace_id` and `organization_id`
+  to `request_logs` and `feedback`. It does not backfill existing rows, so
+  only global callers see them.
+- It replaces the unique index `idx_prompts_name_version` with
+  `idx_prompts_workspace_name_version` on `(workspace_id, name, version)`. If
+  duplicate rows exist, the gateway logs a warning, keeps the old index and
+  starts. Find the duplicates with
+  `SELECT workspace_id, name, version, COUNT(*) FROM prompts GROUP BY workspace_id, name, version HAVING COUNT(*) > 1;`,
+  remove them, and restart. The gateway then creates the index.
+- It adds tenant indexes on `request_logs`, `feedback` and `workspaces`. On
+  PostgreSQL, the gateway builds non-unique indexes on large tables with
+  `CREATE INDEX CONCURRENTLY` in the background after startup.
+
+`gateway.alerts` sends key budget notifications to a webhook and/or Slack
+incoming webhook URL:
 
 ```yaml
 gateway:
@@ -388,7 +428,13 @@ gateway:
 ```
 
 `webhook_url` and `slack_url` must be absolute `http://` or `https://` URLs
-when set; `thresholds` are fractions in `(0, 1]`. Alerts reload alongside
+when set; `thresholds` are fractions in `(0, 1]`. The gateway checks the
+thresholds each time it records the cost of a request. An alert fires when a
+key's lifetime spend reaches a threshold of `budget_usd`, or when its spend in
+the current UTC month reaches a threshold of `monthly_cost_budget`. Monthly
+alerts name the key as `<key id> (monthly YYYY-MM)`. Each process sends an
+alert for one key and threshold once. A restart or a config file reload
+clears this record, so the alert can fire again. Alerts reload alongside
 guardrails when `OMNISWITCH_CONFIG` hot-reload is enabled.
 
 `authorization.external` (an out-of-process HTTP authorization callout) is not
@@ -410,6 +456,38 @@ local sliding window, suitable for one replica. With Redis, OmniSwitch uses an
 atomic fixed-window counter shared by all replicas. The startup check fails
 closed by default if Redis cannot be reached; `fail_open: true` lets traffic
 continue if Redis later becomes unavailable.
+
+## Key Budgets
+
+An API key can have a lifetime cost budget, a monthly cost budget and a
+monthly token budget (see [`POST /api/keys`](API.md#post-apikeys)). Before
+the gateway calls a provider, it reserves an estimate of the request's cost
+and tokens. The input estimate comes from the request body. The output
+estimate comes from `max_completion_tokens` or `max_tokens`, else 1024
+tokens. A request gets HTTP 402 `budget_exceeded` when its estimate does
+not fit in the remaining budget, less the estimates of requests in progress. When the request completes, its actual cost
+replaces the estimate.
+
+- `gateway.budget_refresh_interval` (`OMNISWITCH_BUDGET_REFRESH_INTERVAL`)
+  sets how often the gateway reads a key's committed usage from the store.
+  The default is `5s`. The value must be between `100ms` and `10m`; other
+  values fail config validation or stop startup.
+- `gateway.budget_fail_open` (`OMNISWITCH_BUDGET_FAIL_OPEN`) defaults to
+  `false`. When the gateway cannot read the budget state of a key that has a
+  budget, the request gets HTTP 503 `budget_unavailable`. With `true`, the
+  request continues without a budget check, and the gateway logs this at
+  most once every 30 seconds.
+
+Both settings reload with the config file.
+
+With several replicas, each replica enforces budgets exactly for its own
+requests and sees the spend of other replicas within one refresh interval.
+Together, the replicas can overspend a budget by about one estimate error
+per replica plus what the other replicas spend in one refresh interval.
+When refreshes fail, a replica uses its last usage snapshot for at most 12
+times the refresh interval, and at least 1 minute. After that, requests for
+keys with a budget get `budget_unavailable`, or continue when
+`budget_fail_open` is `true`.
 
 ## OIDC Workload Identity
 
@@ -441,8 +519,23 @@ always comes from the primary route. `gateway.shadow_provider` (or
 `OMNISWITCH_SHADOW_PROVIDER`) sets a gateway-wide shadow provider for routes
 that do not set their own. `default_params` fills absent values,
 `override_params` always wins, and `drop_params` is applied last. The current
-request-shaping fields are `model`, `temperature`, `max_tokens`, `top_p`,
-`stream`, and `stop`.
+request-shaping fields are `model`, `temperature`, `max_tokens`,
+`max_completion_tokens`, `top_p`, `stream`, `stop`, `n`, `seed`,
+`presence_penalty`, `frequency_penalty`, `user`, and `parallel_tool_calls`.
+
+### Stored configs
+
+A request can select a stored config with the `x-omniswitch-config` header
+(create one with [`POST /api/configs`](API.md#post-apiconfigs)). Only the
+`routes` of a stored config apply. They override the file routes with the
+same model name, and the other file routes stay in effect. File-route hot
+reloads apply to stored-config requests too.
+
+The gateway caches each resolved stored config in memory for 5 seconds and
+remembers unknown config names for 2 seconds. The cache holds at most 512
+entries (each config uses one entry for its name and one for its ID). A
+change made through `/api/configs` takes effect at once on the replica that
+handled it. Other replicas see the change within 5 seconds.
 
 ## Guardrails
 
@@ -496,8 +589,21 @@ responses with `text/event-stream` are streamed through without gateway
 buffering, so streamable HTTP and SSE-capable MCP servers work through the same
 endpoint. Set `forward_bearer_token: true` only for targets that require
 OAuth/OIDC delegation: it forwards the authenticated OIDC bearer token and
-never forwards a local OmniSwitch API key. Stdio targets use a persistent
-newline-delimited JSON-RPC child process and serialize calls per target.
+never forwards a local OmniSwitch API key.
+
+Stdio targets use a persistent child process that speaks newline-delimited
+JSON-RPC. Concurrent calls share the process: the gateway gives each call
+its own request ID and restores the client's ID in the response. A client's
+`notifications/cancelled` goes to the matching call. When the gateway stops
+waiting for a call (for example, at the timeout), it sends
+`notifications/cancelled` to the process. On shutdown, the gateway kills the
+whole process group.
+
+The gateway does the MCP handshake with a stdio server itself, with protocol
+version `2025-06-18`. It does this on first use and after each restart of
+the process. A client `initialize` request to a stdio target gets the
+server's stored initialize result, and a client `notifications/initialized`
+gets HTTP 202.
 
 ### Per-target timeout, metadata and token exchange
 
@@ -538,10 +644,25 @@ combinations:
 ### OpenAPI-to-MCP conversion
 
 Set `openapi_spec` on a target to expose an OpenAPI 3.x document's operations
-as synthetic MCP tools (local path or URL). Operation IDs become tool names;
-path parameters are substituted, remaining arguments become the JSON body
-(GET/DELETE: query string), and every call passes through the target policy,
-audit trail, and headers before plain HTTP execution.
+as synthetic MCP tools (local path or URL). Each operation becomes a tool
+named by its `operationId`, or by its method and path when it has no
+`operationId`. `tools/list` shows the tool as `<target>__<name>`. Every call
+passes through the target policy, audit trail, and headers before plain HTTP
+execution.
+
+Tool arguments map to the HTTP request as follows:
+
+- Arguments for declared `path`, `query`, `header` and `cookie` parameters go
+  to that location. A path value that is empty or `.`, or that contains `/`,
+  `\` or `..`, is rejected. A header value that contains CR or LF is
+  rejected.
+- The `body` argument is the whole JSON request body. A spec that declares a
+  parameter named `body` fails to load.
+- Other arguments become query parameters, for all methods.
+- The target's configured `headers` replace header arguments with the same
+  name.
+- The gateway sends W3C `traceparent` and `tracestate` HTTP headers.
+- The gateway follows only redirects to the same scheme, host and port.
 
 ```yaml
 mcp:
@@ -553,9 +674,9 @@ mcp:
         authorization: "Bearer ${PETSTORE_TOKEN}"
 ```
 
-Distributed trace context propagates into `params._meta.traceparent`
-(SEP-414) on forwarded and OpenAPI-executed calls, so downstream MCP servers
-can continue the gateway's OTel trace. A2A is not an MCP target type; it is
+On forwarded MCP calls, distributed trace context propagates into
+`params._meta.traceparent` (SEP-414), so downstream MCP servers can continue
+the gateway's OTel trace. A2A is not an MCP target type; it is
 served separately through public Agent Card discovery and `/a2a` JSON-RPC.
 
 ## Provider Vault
@@ -610,6 +731,8 @@ Go syntax such as `30s` or `5m`.
 - `OMNISWITCH_IDLE_TIMEOUT`
 - `OMNISWITCH_CIRCUIT_BREAKER_FAILURES`
 - `OMNISWITCH_CIRCUIT_BREAKER_COOLDOWN`
+- `OMNISWITCH_BUDGET_FAIL_OPEN` - defaults to `false`. See [Key Budgets](#key-budgets).
+- `OMNISWITCH_BUDGET_REFRESH_INTERVAL` - defaults to `5s`; allowed values are `100ms` to `10m`. See [Key Budgets](#key-budgets).
 - `OMNISWITCH_RATE_LIMIT_REQUESTS`
 - `OMNISWITCH_RATE_LIMIT_WINDOW`
 - `OMNISWITCH_RATE_LIMIT_REDIS_URL`
@@ -631,7 +754,7 @@ Go syntax such as `30s` or `5m`.
 - `OMNISWITCH_OTEL_INSECURE`
 - `OMNISWITCH_OTEL_TIMEOUT`
 - `OMNISWITCH_PROMETHEUS_ENABLED`
-- `OMNISWITCH_METRICS_PUBLIC` - defaults to `false`. When authentication is on, `/metrics` needs a valid key unless this is `true`.
+- `OMNISWITCH_METRICS_PUBLIC` - defaults to `false`. When authentication is on, `/metrics` needs a valid key of a global caller (no workspace and no organization) unless this is `true`. With `true`, any caller can read `/metrics`, including workspace- and organization-scoped callers.
 - `OMNISWITCH_VAULT_KEY`
 - `OMNISWITCH_MCP_ENABLED` - defaults to `false`. When enabled without `OMNISWITCH_MCP_POLICY` (or `mcp.policy`) set, the gateway falls back to a conservative embedded default policy rather than failing to start.
 - `OMNISWITCH_MCP_POLICY`
