@@ -90,6 +90,61 @@ See [`docs/KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
 - Config or behavior changes required to upgrade from the previous release, if any.
 ```
 
+## Publishing the SDKs
+
+The Python and Node.js SDKs are not on PyPI or npm yet, and the READMEs tell
+users to install them from this repository. In October 2026 nobody owned the
+name `omniswitch` on PyPI or npm (step 1 checks it again). The first upload
+gives the name to the uploading account, so publish from an account that the
+maintainers control, with two-factor authentication turned on. Do the steps by hand; no workflow
+publishes the SDKs.
+
+1. Check that the names are still free. A `404` means that nobody owns the
+   name:
+
+   ```bash
+   curl -s -o /dev/null -w "%{http_code}\n" https://pypi.org/pypi/omniswitch/json
+   curl -s -o /dev/null -w "%{http_code}\n" https://registry.npmjs.org/omniswitch
+   ```
+
+2. Set the version in `sdk/python/pyproject.toml` and `sdk/node/package.json`.
+   PyPI and npm never accept the same version twice, also after you delete it.
+
+3. Build, check and upload the Python package. `twine upload` asks for a PyPI
+   API token:
+
+   ```bash
+   cd sdk/python
+   python3 -m pip install --upgrade build twine
+   rm -rf dist build *.egg-info
+   python3 -m unittest discover -s tests
+   python3 -m build
+   python3 -m twine check dist/*
+   python3 -m twine upload dist/*
+   ```
+
+   The wheel must contain only `omniswitch.py` and its metadata.
+
+4. Test, check and publish the Node.js package:
+
+   ```bash
+   cd sdk/node
+   npm test
+   npm pack --dry-run
+   npm login
+   npm publish --access public
+   ```
+
+   `npm pack --dry-run` must list only `README.md`, `index.d.ts`, `index.js`
+   and `package.json`.
+
+5. Add a second maintainer as an owner of both packages on PyPI and npm.
+
+6. Change the install sections of `README.md`, `sdk/python/README.md` and
+   `sdk/node/README.md` to `pip install omniswitch` and
+   `npm install omniswitch openai`, and remove the warnings about the PyPI
+   and npm names.
+
 ## Rollback procedure
 
 If a release turns out to be broken:

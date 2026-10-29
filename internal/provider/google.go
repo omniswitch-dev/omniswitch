@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -23,7 +23,7 @@ func NewGoogle(apiKey string) *Google {
 	return &Google{
 		apiKey:  apiKey,
 		baseURL: "https://generativelanguage.googleapis.com/v1beta",
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  newProviderClient(defaultRequestTimeout),
 	}
 }
 
@@ -66,6 +66,7 @@ type geminiFileData struct {
 }
 
 type geminiFunctionCall struct {
+	ID   string         `json:"id,omitempty"`
 	Name string         `json:"name"`
 	Args map[string]any `json:"args,omitempty"`
 }
@@ -98,6 +99,7 @@ type geminiGenerationConfig struct {
 	Temperature      *float64 `json:"temperature,omitempty"`
 	MaxTokens        *int     `json:"maxOutputTokens,omitempty"`
 	TopP             *float64 `json:"topP,omitempty"`
+	StopSequences    []string `json:"stopSequences,omitempty"`
 	ResponseMimeType string   `json:"responseMimeType,omitempty"`
 	ResponseSchema   any      `json:"responseSchema,omitempty"`
 }
@@ -108,17 +110,64 @@ type geminiResponse struct {
 		Content struct {
 			Parts []struct {
 				Text         string              `json:"text"`
+				Thought      bool                `json:"thought,omitempty"`
 				FunctionCall *geminiFunctionCall `json:"functionCall,omitempty"`
 			} `json:"parts"`
 			Role string `json:"role"`
 		} `json:"content"`
 		FinishReason string `json:"finishReason"`
 	} `json:"candidates"`
-	UsageMetadata struct {
-		PromptTokenCount     int `json:"promptTokenCount"`
-		CandidatesTokenCount int `json:"candidatesTokenCount"`
-		TotalTokenCount      int `json:"totalTokenCount"`
-	} `json:"usageMetadata"`
+	PromptFeedback struct {
+		BlockReason string `json:"blockReason"`
+	} `json:"promptFeedback"`
+	UsageMetadata geminiUsageMetadata `json:"usageMetadata"`
+	// Error is set when the API reports a failure inside a 200 stream.
+	Error *geminiError `json:"error,omitempty"`
+}
+
+type geminiUsageMetadata struct {
+	PromptTokenCount        int `json:"promptTokenCount"`
+	CandidatesTokenCount    int `json:"candidatesTokenCount"`
+	ThoughtsTokenCount      int `json:"thoughtsTokenCount"`
+	CachedContentTokenCount int `json:"cachedContentTokenCount"`
+	TotalTokenCount         int `json:"totalTokenCount"`
+}
+
+type geminiError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Status  string `json:"status"`
+}
+
+// usage converts Gemini usage metadata to OpenAI usage. Thinking tokens are
+// billed as output tokens, so they count as completion tokens (and are
+// reported as reasoning_tokens), like OpenAI reasoning models.
+func (u geminiUsageMetadata) usage() Usage {
+	out := Usage{
+		PromptTokens:     u.PromptTokenCount,
+		CompletionTokens: u.CandidatesTokenCount + u.ThoughtsTokenCount,
+	}
+	out.TotalTokens = out.PromptTokens + out.CompletionTokens
+	if u.TotalTokenCount > out.TotalTokens {
+		out.TotalTokens = u.TotalTokenCount
+	}
+	if u.ThoughtsTokenCount > 0 {
+		out.CompletionTokensDetails = &CompletionTokensDetails{ReasoningTokens: u.ThoughtsTokenCount}
+	}
+	if u.CachedContentTokenCount > 0 {
+		out.PromptTokensDetails = &PromptTokensDetails{CachedTokens: u.CachedContentTokenCount}
+	}
+	return out
+}
+
+// geminiToolCallID returns the upstream function call ID when present, or a
+// unique synthetic one. Plain "call_<n>" IDs collide across turns and
+// confuse clients that key tool results by ID.
+func geminiToolCallID(call *geminiFunctionCall, prefix string, ordinal int) string {
+	if call != nil && call.ID != "" {
+		return call.ID
+	}
+	return fmt.Sprintf("call_%s_%d", prefix, ordinal)
 }
 
 func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResponse, ProviderMeta, error) {
@@ -137,13 +186,13 @@ func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 		return ChatResponse{}, meta, err
 	}
 
-	url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", g.baseURL, req.Model, g.apiKey)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, g.modelURL(req.Model, ":generateContent"), bytes.NewReader(body))
 	if err != nil {
 		meta.Error = err.Error()
 		return ChatResponse{}, meta, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-goog-api-key", g.apiKey)
 
 	resp, err := g.client.Do(httpReq)
 	if err != nil {
@@ -153,7 +202,13 @@ func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "gemini error", resp)
+		meta.Error = upstreamErr.Body
+		return ChatResponse{}, meta, upstreamErr
+	}
+	respBody, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
@@ -162,30 +217,31 @@ func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 
 	meta.Latency = time.Since(start)
 
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(respBody)
-		return ChatResponse{}, meta, fmt.Errorf("gemini error (status %d): %s", resp.StatusCode, string(respBody))
-	}
-
 	var gemResp geminiResponse
 	if err := json.Unmarshal(respBody, &gemResp); err != nil {
 		meta.Error = err.Error()
 		return ChatResponse{}, meta, err
 	}
 
+	id := fmt.Sprintf("gemini-%d", time.Now().UnixNano())
 	content := ""
-	finishReason := "stop"
+	reasoning := ""
+	finishReason := finishStop
 	var toolCalls []ToolCall
 	if len(gemResp.Candidates) > 0 {
 		candidate := gemResp.Candidates[0]
-		for index, part := range candidate.Content.Parts {
-			content += part.Text
+		for _, part := range candidate.Content.Parts {
+			if part.Thought {
+				reasoning += part.Text
+			} else {
+				content += part.Text
+			}
 			if part.FunctionCall != nil {
 				args, _ := json.Marshal(part.FunctionCall.Args)
-				i := index
+				ordinal := len(toolCalls)
 				toolCalls = append(toolCalls, ToolCall{
-					Index: &i,
-					ID:    fmt.Sprintf("call_%d", index),
+					Index: &ordinal,
+					ID:    geminiToolCallID(part.FunctionCall, id[len("gemini-"):], ordinal),
 					Type:  "function",
 					Function: FunctionCall{
 						Name:      part.FunctionCall.Name,
@@ -194,34 +250,33 @@ func (g *Google) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 				})
 			}
 		}
-		if candidate.FinishReason == "MAX_TOKENS" {
-			finishReason = "length"
+		if mapped := mapGeminiFinishReason(candidate.FinishReason); mapped != "" {
+			finishReason = mapped
 		}
-		if len(toolCalls) > 0 {
-			finishReason = "tool_calls"
+		if len(toolCalls) > 0 && finishReason == finishStop {
+			finishReason = finishToolCalls
 		}
+	} else if gemResp.PromptFeedback.BlockReason != "" {
+		finishReason = finishContentFilter
 	}
 
+	usage := gemResp.UsageMetadata.usage()
 	chatResp := ChatResponse{
-		ID:      fmt.Sprintf("gemini-%d", time.Now().UnixNano()),
+		ID:      id,
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
 		Model:   req.Model,
 		Choices: []Choice{
 			{
 				Index:        0,
-				Message:      Message{Role: "assistant", Content: content, ToolCalls: toolCalls},
+				Message:      Message{Role: "assistant", Content: content, ReasoningContent: reasoning, ToolCalls: toolCalls},
 				FinishReason: finishReason,
 			},
 		},
-		Usage: Usage{
-			PromptTokens:     gemResp.UsageMetadata.PromptTokenCount,
-			CompletionTokens: gemResp.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:      gemResp.UsageMetadata.TotalTokenCount,
-		},
+		Usage: usage,
 	}
 
-	meta.Cost = pricingFor("google", req.Model).Cost(gemResp.UsageMetadata.PromptTokenCount, gemResp.UsageMetadata.CandidatesTokenCount)
+	meta.Cost = pricingFor("google", req.Model).Cost(usage.PromptTokens, usage.CompletionTokens)
 	return chatResp, meta, nil
 }
 
@@ -237,29 +292,38 @@ func (g *Google) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-c
 	if err != nil {
 		return nil, meta, err
 	}
-	url := fmt.Sprintf("%s/models/%s:streamGenerateContent?alt=sse&key=%s", g.baseURL, req.Model, g.apiKey)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, g.modelURL(req.Model, ":streamGenerateContent?alt=sse"), bytes.NewReader(body))
 	if err != nil {
 		meta.Error = err.Error()
 		return nil, meta, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-goog-api-key", g.apiKey)
 
-	resp, err := g.client.Do(httpReq)
+	resp, err := streamingClient(g.client).Do(httpReq)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
 		return nil, meta, fmt.Errorf("gemini stream request: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(resp.Body)
-		meta.Error = string(respBody)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		meta.Latency = time.Since(start)
-		return nil, meta, fmt.Errorf("gemini stream error (status %d): %s", resp.StatusCode, string(respBody))
+		upstreamErr := newUpstreamError(meta.Provider, "gemini stream error", resp)
+		_ = resp.Body.Close()
+		meta.Error = upstreamErr.Body
+		return nil, meta, upstreamErr
 	}
 	meta.Latency = time.Since(start)
-	return streamGemini(ctx, resp.Body, req.Model, req.StreamOptions != nil && req.StreamOptions.IncludeUsage), meta, nil
+	return streamGemini(ctx, resp.Body, req.Model), meta, nil
+}
+
+// modelURL builds a Gemini model endpoint. The API key is sent in the
+// x-goog-api-key header rather than the ?key= query parameter, so it does
+// not end up in proxy/access logs or in error messages that echo the URL.
+// The model ID is path-escaped so it cannot alter the request path.
+func (g *Google) modelURL(model, method string) string {
+	model = strings.TrimPrefix(model, "models/")
+	return g.baseURL + "/models/" + url.PathEscape(model) + method
 }
 
 func toGeminiRequest(req ChatRequest) (geminiRequest, error) {
@@ -294,9 +358,10 @@ func toGeminiRequest(req ChatRequest) (geminiRequest, error) {
 	}
 	gemReq := geminiRequest{
 		GenerationConfig: &geminiGenerationConfig{
-			Temperature: req.Temperature,
-			MaxTokens:   maxTokens,
-			TopP:        req.TopP,
+			Temperature:   req.Temperature,
+			MaxTokens:     maxTokens,
+			TopP:          req.TopP,
+			StopSequences: append([]string(nil), req.Stop...),
 		},
 	}
 
@@ -337,10 +402,13 @@ func toGeminiRequest(req ChatRequest) (geminiRequest, error) {
 	}
 
 	toolCallNames := map[string]string{}
+	var systemParts []geminiPart
 	for _, msg := range req.Messages {
-		if msg.Role == "system" {
-			gemReq.SystemInstruction = &geminiContent{
-				Parts: []geminiPart{{Text: msg.Text()}},
+		// Every system/developer message becomes one systemInstruction part,
+		// in order; previously each one overwrote the last.
+		if msg.Role == "system" || msg.Role == "developer" {
+			if text := msg.Text(); text != "" {
+				systemParts = append(systemParts, geminiPart{Text: text})
 			}
 			continue
 		}
@@ -350,18 +418,41 @@ func toGeminiRequest(req ChatRequest) (geminiRequest, error) {
 			}
 		}
 		role := msg.Role
-		if role == "assistant" {
+		switch role {
+		case "assistant":
 			role = "model"
-		} else if role == "tool" {
-			role = "function"
+		case "tool":
+			// Gemini expects functionResponse parts in a user turn.
+			role = "user"
 		}
 		parts := geminiMessageParts(msg, toolCallNames)
+		if len(parts) == 0 {
+			continue
+		}
+		// Parallel tool results (consecutive tool messages) must reach
+		// Gemini as one turn holding every functionResponse part.
+		if n := len(gemReq.Contents); n > 0 && msg.Role == "tool" && gemReq.Contents[n-1].Role == "user" && isGeminiFunctionResponseTurn(gemReq.Contents[n-1]) {
+			gemReq.Contents[n-1].Parts = append(gemReq.Contents[n-1].Parts, parts...)
+			continue
+		}
 		gemReq.Contents = append(gemReq.Contents, geminiContent{
 			Role:  role,
 			Parts: parts,
 		})
 	}
+	if len(systemParts) > 0 {
+		gemReq.SystemInstruction = &geminiContent{Parts: systemParts}
+	}
 	return gemReq, nil
+}
+
+func isGeminiFunctionResponseTurn(content geminiContent) bool {
+	for _, part := range content.Parts {
+		if part.FunctionResponse == nil {
+			return false
+		}
+	}
+	return len(content.Parts) > 0
 }
 
 func geminiMessageParts(msg Message, toolCallNames map[string]string) []geminiPart {
@@ -380,6 +471,24 @@ func geminiMessageParts(msg Message, toolCallNames map[string]string) []geminiPa
 				Response: wrapped,
 			},
 		}}
+	}
+	if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+		// Prior assistant tool calls must be replayed as functionCall
+		// parts, or Gemini sees tool results with no matching call.
+		var parts []geminiPart
+		if text := msg.Text(); text != "" {
+			parts = append(parts, geminiPart{Text: text})
+		}
+		for _, call := range msg.ToolCalls {
+			args := map[string]any{}
+			if strings.TrimSpace(call.Function.Arguments) != "" {
+				if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+					args = map[string]any{"arguments": call.Function.Arguments}
+				}
+			}
+			parts = append(parts, geminiPart{FunctionCall: &geminiFunctionCall{Name: call.Function.Name, Args: args}})
+		}
+		return parts
 	}
 	if len(msg.ContentParts) == 0 {
 		if msg.Text() == "" {

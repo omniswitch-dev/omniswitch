@@ -49,7 +49,15 @@ type OIDC struct {
 	WorkspaceClaim    string    `json:"workspace_claim,omitempty" yaml:"workspace_claim,omitempty"`
 	OrganizationClaim string    `json:"organization_claim,omitempty" yaml:"organization_claim,omitempty"`
 	CacheTTL          *Duration `json:"cache_ttl,omitempty" yaml:"cache_ttl,omitempty"`
+	// StaleIfError is how long cached JWKS keys stay usable after cache_ttl
+	// while refreshing them fails (RFC 5861 stale-if-error). 0 fails closed.
+	StaleIfError *Duration `json:"stale_if_error,omitempty" yaml:"stale_if_error,omitempty"`
 }
+
+// MaxOIDCStaleIfError caps identity.oidc.stale_if_error. A week covers a long
+// IdP outage over a weekend; past that, a key the IdP revoked could be
+// trusted for too long.
+const MaxOIDCStaleIfError = 7 * 24 * time.Hour
 
 // Authorization configures CEL authorization after API-key authentication.
 // If one or more allow rules are present, every request must match an allow
@@ -105,6 +113,14 @@ type Gateway struct {
 	IdleTimeout            *Duration    `json:"idle_timeout,omitempty" yaml:"idle_timeout,omitempty"`
 	ShadowProvider         string       `json:"shadow_provider,omitempty" yaml:"shadow_provider,omitempty"`
 	Alerts                 *AlertConfig `json:"alerts,omitempty" yaml:"alerts,omitempty"`
+	// BudgetFailOpen lets requests of a key with a budget through when its
+	// budget state cannot be read. The default (false) rejects them with
+	// HTTP 503.
+	BudgetFailOpen *bool `json:"budget_fail_open,omitempty" yaml:"budget_fail_open,omitempty"`
+	// BudgetRefreshInterval is how often a key's committed usage is re-read
+	// from the store (default 5s). Spend from other replicas becomes
+	// visible within it.
+	BudgetRefreshInterval *Duration `json:"budget_refresh_interval,omitempty" yaml:"budget_refresh_interval,omitempty"`
 }
 
 type AlertConfig struct {
@@ -190,6 +206,31 @@ type MCPTarget struct {
 	ForwardBearerToken *bool             `json:"forward_bearer_token,omitempty" yaml:"forward_bearer_token,omitempty"`
 	OpenAPISpec        string            `json:"openapi_spec,omitempty" yaml:"openapi_spec,omitempty"`
 	Enabled            *bool             `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// TokenExchange swaps the OIDC caller's bearer token for a token issued
+	// for this target (RFC 8693) before each call to an HTTP target.
+	TokenExchange *MCPTokenExchange `json:"token_exchange,omitempty" yaml:"token_exchange,omitempty"`
+	// Timeout bounds one forwarded call. Unset uses the 2-minute default.
+	Timeout *Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	// Metadata holds operator-trusted policy attributes such as
+	// "environment" and "resource_type". Keys starting with "mcp." are
+	// reserved for attributes the gateway sets.
+	Metadata map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+}
+
+// MCPTokenExchange configures RFC 8693 token exchange for an MCP target.
+// client_id, client_secret and actor_token expand ${VAR} references.
+type MCPTokenExchange struct {
+	TokenURL           string    `json:"token_url" yaml:"token_url"`
+	ClientID           string    `json:"client_id" yaml:"client_id"`
+	ClientSecret       string    `json:"client_secret,omitempty" yaml:"client_secret,omitempty"`
+	SubjectTokenType   string    `json:"subject_token_type,omitempty" yaml:"subject_token_type,omitempty"`
+	RequestedTokenType string    `json:"requested_token_type,omitempty" yaml:"requested_token_type,omitempty"`
+	Scope              string    `json:"scope,omitempty" yaml:"scope,omitempty"`
+	Audience           string    `json:"audience,omitempty" yaml:"audience,omitempty"`
+	Resource           string    `json:"resource,omitempty" yaml:"resource,omitempty"`
+	ActorToken         string    `json:"actor_token,omitempty" yaml:"actor_token,omitempty"`
+	ActorTokenType     string    `json:"actor_token_type,omitempty" yaml:"actor_token_type,omitempty"`
+	TokenCacheTTL      *Duration `json:"token_cache_ttl,omitempty" yaml:"token_cache_ttl,omitempty"`
 }
 
 type Observability struct {
@@ -286,6 +327,11 @@ func Validate(cfg Config) error {
 	if cfg.Gateway.CircuitBreakerCooldown != nil && cfg.Gateway.CircuitBreakerCooldown.Duration <= 0 {
 		return fmt.Errorf("gateway.circuit_breaker_cooldown must be positive")
 	}
+	if cfg.Gateway.BudgetRefreshInterval != nil {
+		if interval := cfg.Gateway.BudgetRefreshInterval.Duration; interval < 100*time.Millisecond || interval > 10*time.Minute {
+			return fmt.Errorf("gateway.budget_refresh_interval must be between 100ms and 10m")
+		}
+	}
 	if cfg.Gateway.MaxRequestBytes < 0 {
 		return fmt.Errorf("gateway.max_request_bytes must be non-negative")
 	}
@@ -349,6 +395,9 @@ func Validate(cfg Config) error {
 	}
 	if cfg.Identity.OIDC.CacheTTL != nil && cfg.Identity.OIDC.CacheTTL.Duration <= 0 {
 		return fmt.Errorf("identity.oidc.cache_ttl must be positive")
+	}
+	if cfg.Identity.OIDC.StaleIfError != nil && (cfg.Identity.OIDC.StaleIfError.Duration < 0 || cfg.Identity.OIDC.StaleIfError.Duration > MaxOIDCStaleIfError) {
+		return fmt.Errorf("identity.oidc.stale_if_error must be between 0 and %s", MaxOIDCStaleIfError)
 	}
 	for index, rule := range cfg.Authorization.Rules {
 		if strings.TrimSpace(rule.When) == "" {
@@ -423,6 +472,9 @@ func Validate(cfg Config) error {
 			}
 		default:
 			return fmt.Errorf("mcp.targets[%d].transport must be http, streamable_http, or stdio", i)
+		}
+		if err := validateMCPTargetOptions(i, target); err != nil {
+			return err
 		}
 	}
 	for i, rule := range cfg.Guardrails.Rules {

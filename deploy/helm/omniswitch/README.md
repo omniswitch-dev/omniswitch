@@ -1,5 +1,64 @@
 # OmniSwitch Helm chart
 
+## Authentication and the bootstrap key
+
+`config.gateway.auth` defaults to `true`. With auth on and no OIDC, the gateway
+refuses to start until at least one API key exists, so the first start needs
+`OMNISWITCH_BOOTSTRAP_API_KEY`. Provide it in one of these ways:
+
+- `secrets.OMNISWITCH_BOOTSTRAP_API_KEY` (rendered into the chart Secret; an
+  empty value counts as not set), or
+- `existingSecret`, a Secret you manage that contains an
+  `OMNISWITCH_BOOTSTRAP_API_KEY` key (the chart cannot check its contents).
+
+If you set neither, the chart generates a random key in the chart Secret
+(`bootstrap.generate: true`, the default). The install NOTES print the command
+that reads the generated key. Set `bootstrap.generate: false` to make rendering
+fail instead when no key is supplied.
+
+The chart does not generate a key when auth is off or when the release
+authenticates through OIDC (`config.identity.oidc.jwks_url` or
+`secrets.OMNISWITCH_OIDC_JWKS_URL` is set): the gateway starts without API keys
+in that case, and you create keys later only if you need them.
+
+**`helm template`, Argo CD and other GitOps tools.** The chart keeps the
+generated key stable across `helm install` and `helm upgrade` by reading the
+existing Secret from the cluster (`lookup`). `helm template` cannot read the
+cluster, so every render produces a new random key. This affects
+`helm template | kubectl apply`, Argo CD (which renders with `helm template`),
+Flux with post-renderers, and any other tool that renders the chart offline.
+Each sync writes a new key, the gateway rotates the stored owner key to it on
+its next restart, and the key you saved stops working; Argo CD also shows the
+Secret as permanently out of sync. With these tools set
+`bootstrap.generate: false` and supply the key yourself through
+`existingSecret` (recommended, for example from a sealed or external secret) or
+`secrets.OMNISWITCH_BOOTSTRAP_API_KEY`. Keep the value unchanged afterwards:
+a different value rotates the owner key.
+
+The chart sets `config.gateway.listen: ":8080"`. Keep an explicit listen
+address: without one, the gateway binds `127.0.0.1` when auth is off, and the
+Service cannot reach it.
+
+## OpenTelemetry export headers
+
+`observability.otel.headers` is a map of OTLP export headers. The chart joins it
+into one comma-separated `key=value` value, stores it in a dedicated
+`<release>-otel` Secret, and passes it to the gateway as
+`OMNISWITCH_OTEL_HEADERS`. Header values must not contain commas. Because Helm
+keeps supplied values in its release history, prefer an existing Secret:
+
+```yaml
+observability:
+  otel:
+    enabled: true
+    endpoint: otel-collector.observability:4317
+    headersSecret:
+      name: otel-headers     # stringData: { headers: "authorization=Bearer <token>" }
+      key: headers           # optional; defaults to "headers"
+```
+
+`headersSecret` takes precedence over `headers`.
+
 ## Database and replicas
 
 Defaults run one gateway replica with SQLite on a 10 GiB PVC. More than one
@@ -30,8 +89,8 @@ separate top-level `secrets` or `existingSecret` settings.
 
 In Postgres mode the gateway PVC and its `/data` mount are omitted, even when
 `persistence.enabled=true`. **Existing SQLite data is not migrated to Postgres.**
-The local semantic cache remains ephemeral. Redis is needed for shared rate
-limits; set `redis.enabled=true` for the bundled instance or `redis.url` for an
+Exact and semantic cache entries are stored in Postgres and shared by all
+replicas. Redis is needed for shared rate limits; set `redis.enabled=true` for the bundled instance or `redis.url` for an
 external one. With neither configured, NOTES warns that multi-replica limits
 are per pod. The bundled Redis hostname follows the Helm release name.
 

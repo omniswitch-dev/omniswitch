@@ -64,10 +64,30 @@ OPENAI_API_KEY=sk-... go run ./cmd/gateway serve
 The gateway starts on `http://localhost:8080` and serves the dashboard at
 `http://localhost:8080/`.
 
-Run with Docker Compose:
+Authentication is **off by default**. With auth off and no listen address
+configured, the gateway listens on `127.0.0.1:8080` only, so it is reachable
+from the same machine and nowhere else. To accept traffic from other hosts,
+turn on authentication and give the first start a bootstrap admin key:
 
 ```bash
-docker compose up -d
+export OMNISWITCH_BOOTSTRAP_API_KEY=$(openssl rand -hex 32)
+OMNISWITCH_AUTH=true OMNISWITCH_LISTEN=:8080 OPENAI_API_KEY=sk-... omniswitch serve
+curl -H "Authorization: Bearer $OMNISWITCH_BOOTSTRAP_API_KEY" http://localhost:8080/v1/models
+```
+
+With auth on, the gateway refuses to start when no API key exists (unless OIDC
+is configured), so the first start needs `OMNISWITCH_BOOTSTRAP_API_KEY`. The
+bootstrap key is an owner key; use it to create named keys through `/api/keys`
+(see [docs/API.md](docs/API.md)).
+
+Run with Docker Compose (auth is on, so the first start needs the bootstrap
+key; on an empty database the gateway exits without it. Later runs may leave
+it unset, but if you set it again use the same value, since a new value
+rotates the owner key):
+
+```bash
+export OMNISWITCH_BOOTSTRAP_API_KEY=$(openssl rand -hex 32)
+OPENAI_API_KEY=sk-... docker compose up -d
 ```
 
 Run on Kubernetes:
@@ -169,6 +189,15 @@ OmniSwitch works with normal OpenAI-compatible clients by setting the base URL
 to your gateway and using an OmniSwitch API key when authentication is enabled.
 The lightweight SDK wrappers in `sdk/` add convenience headers for traces,
 sessions, provider overrides, dynamic configs, and virtual key routing.
+
+The SDKs are not published to PyPI or npm yet, so install them from this
+repository (see [sdk/python](sdk/python/README.md) and
+[sdk/node](sdk/node/README.md)):
+
+```bash
+pip install "git+https://github.com/omniswitch-dev/omniswitch#subdirectory=sdk/python"
+npm install openai ./omniswitch/sdk/node   # from a local clone
+```
 
 Python:
 

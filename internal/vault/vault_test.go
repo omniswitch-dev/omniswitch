@@ -3,6 +3,7 @@ package vault
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -110,4 +111,16 @@ func newTestStore(t *testing.T) *store.Store {
 		}
 	})
 	return st
+}
+
+func TestEphemeralMasterKeyIsRandom(t *testing.T) {
+	first := New(nil, "")
+	second := New(nil, "")
+	legacy := sha256.Sum256([]byte("sentinel-default-key"))
+	if bytes.Equal(first.masterKey, legacy[:]) || bytes.Equal(first.masterKey, second.masterKey) {
+		t.Fatal("empty passphrase must produce a fresh random master key")
+	}
+	if len(first.masterKey) != 32 {
+		t.Fatalf("master key length = %d, want 32", len(first.masterKey))
+	}
 }

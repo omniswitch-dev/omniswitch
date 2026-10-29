@@ -10,6 +10,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"runtime"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/tetratelabs/wazero"
@@ -40,16 +43,58 @@ type Match struct {
 	End       int
 }
 
-// Scanner evaluates newline-delimited regex patterns against payloads using
-// the Rust regex engine running in WASM. It is safe for concurrent use.
+// Scanner evaluates regex patterns against payloads using the Rust regex
+// engine running in WASM. It is safe for concurrent use: it keeps a small
+// pool of independent module instances so concurrent scans do not
+// serialise on a single lock.
 type Scanner struct {
+	patterns []string
+	max      int
+
 	mu      sync.Mutex
-	runtime wazero.Runtime
-	module  api.Module
-	handle  int32
-	inPtr   uint32
-	outPtr  uint32
-	bufCap  uint32
+	closed  bool
+	created int
+	idle    chan *instance
+	done    chan struct{}
+}
+
+// instance is one WASM module instance with a compiled scanner. It is used
+// by one goroutine at a time.
+type instance struct {
+	module api.Module
+	handle int32
+	inPtr  uint32
+	outPtr uint32
+	bufCap uint32
+}
+
+// maxPoolSize caps how many module instances one Scanner creates. Each
+// instance owns its own linear memory, so the pool stays small.
+const maxPoolSize = 4
+
+// sharedRuntime compiles the embedded module once per process. Every
+// scanner instance is an anonymous instantiation of that compiled module in
+// the shared runtime, with its own linear memory, so building a scanner no
+// longer recompiles the WASM binary (which took hundreds of milliseconds)
+// and closing one releases only its own instance.
+var sharedRuntime = sync.OnceValues(func() (*wasmRuntime, error) {
+	ctx := context.Background()
+	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCloseOnContextDone(true))
+	if _, err := wasi_snapshot_preview1.Instantiate(ctx, rt); err != nil {
+		_ = rt.Close(ctx)
+		return nil, fmt.Errorf("accel: wasi init failed: %w", err)
+	}
+	compiled, err := rt.CompileModule(ctx, wasmBinary)
+	if err != nil {
+		_ = rt.Close(ctx)
+		return nil, fmt.Errorf("accel: compile failed: %w", err)
+	}
+	return &wasmRuntime{runtime: rt, compiled: compiled}, nil
+})
+
+type wasmRuntime struct {
+	runtime  wazero.Runtime
+	compiled wazero.CompiledModule
 }
 
 // ValidatePatterns compiles patterns with the accelerator's engine and
@@ -65,7 +110,7 @@ func ValidatePatterns(patterns []string) ([]int, error) {
 	}
 	defer e.close()
 
-	cfg := joinPatterns(patterns)
+	cfg, unsafe := joinPatterns(patterns)
 	cfgPtr, err := e.alloc(uint32(len(cfg)))
 	if err != nil {
 		return nil, err
@@ -95,24 +140,59 @@ func ValidatePatterns(patterns []string) ([]int, error) {
 	if !ok {
 		return nil, fmt.Errorf("accel: validate result read failed")
 	}
-	rejected := make([]int, 0, count)
+	rejected := make([]int, 0, count+len(unsafe))
 	for i := 0; i < count; i++ {
 		rejected = append(rejected, int(binary.LittleEndian.Uint32(raw[i*4:])))
 	}
+	rejected = append(rejected, unsafe...)
+	sort.Ints(rejected)
 	return rejected, nil
 }
 
-// NewScanner compiles patterns into a reusable accelerator scanner.
+// NewScanner compiles patterns into a reusable accelerator scanner. Patterns
+// that cannot be encoded safely (see SafePattern) never match; callers
+// should evaluate them with the pure-Go path.
 func NewScanner(patterns []string) (*Scanner, error) {
 	if !Available() {
 		return nil, ErrUnavailable
 	}
+	size := runtime.GOMAXPROCS(0)
+	if size > maxPoolSize {
+		size = maxPoolSize
+	}
+	if size < 1 {
+		size = 1
+	}
+	s := &Scanner{
+		patterns: append([]string(nil), patterns...),
+		max:      size,
+		idle:     make(chan *instance, size),
+		done:     make(chan struct{}),
+	}
+	// Build the first instance eagerly so configuration errors surface
+	// here rather than on the first scan.
+	inst, err := s.newInstance()
+	if err != nil {
+		return nil, err
+	}
+	s.created = 1
+	s.idle <- inst
+	return s, nil
+}
+
+// SafePattern reports whether a pattern can be passed to the accelerator.
+// Patterns are sent newline-delimited, so a pattern containing a line
+// break would be split and shift every later rule index.
+func SafePattern(pattern string) bool {
+	return !strings.ContainsAny(pattern, "\r\n")
+}
+
+func (s *Scanner) newInstance() (*instance, error) {
 	e, err := newEngine()
 	if err != nil {
 		return nil, err
 	}
-
-	cfg := joinPatterns(patterns)
+	cfg, _ := joinPatterns(s.patterns)
 	cfgPtr, err := e.alloc(uint32(len(cfg)))
 	if err != nil {
 		e.close()
@@ -129,12 +209,65 @@ func NewScanner(patterns []string) (*Scanner, error) {
 		e.close()
 		return nil, fmt.Errorf("accel: scanner init failed: %v", err)
 	}
-	s := &Scanner{runtime: e.runtime, module: e.module, handle: int32(res[0])}
-	if err := s.ensureBuffers(4096); err != nil {
-		s.Close()
+	inst := &instance{module: e.module, handle: int32(res[0])}
+	if err := inst.ensureBuffers(4096); err != nil {
+		_ = inst.close()
 		return nil, err
 	}
-	return s, nil
+	return inst, nil
+}
+
+// acquire returns an idle instance, creating one while the pool is below
+// its cap, or waits for one to be released.
+func (s *Scanner) acquire() (*instance, error) {
+	select {
+	case inst := <-s.idle:
+		return inst, nil
+	default:
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, ErrUnavailable
+	}
+	if s.created < s.max {
+		s.created++
+		s.mu.Unlock()
+		inst, err := s.newInstance()
+		if err == nil {
+			return inst, nil
+		}
+		s.mu.Lock()
+		s.created--
+		none := s.created == 0
+		s.mu.Unlock()
+		if none {
+			// Nothing to wait for: no other instance exists.
+			return nil, err
+		}
+		// Fall through and wait for an existing instance.
+	} else {
+		s.mu.Unlock()
+	}
+	select {
+	case inst := <-s.idle:
+		return inst, nil
+	case <-s.done:
+		return nil, ErrUnavailable
+	}
+}
+
+// release returns an instance to the pool. A broken instance, or any
+// instance released after Close, is closed instead.
+func (s *Scanner) release(inst *instance, broken bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || broken {
+		s.created--
+		_ = inst.close()
+		return
+	}
+	s.idle <- inst // never blocks: at most max instances exist
 }
 
 // Scan returns every match of the compiled patterns inside data.
@@ -153,34 +286,44 @@ func (s *Scanner) scan(data []byte, export string) ([]Match, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.handle == 0 {
+	if s == nil {
 		return nil, ErrUnavailable
 	}
-	if err := s.ensureBuffers(uint32(len(data))); err != nil {
+	inst, err := s.acquire()
+	if err != nil {
 		return nil, err
 	}
-	if !s.memory().Write(s.inPtr, data) {
-		return nil, fmt.Errorf("accel: payload write failed")
+	matches, broken, err := inst.scan(data, export)
+	s.release(inst, broken)
+	return matches, err
+}
+
+// scan runs one scan. broken reports that the instance must not be reused
+// (the WASM call trapped or memory could not be accessed).
+func (inst *instance) scan(data []byte, export string) (matches []Match, broken bool, err error) {
+	if err := inst.ensureBuffers(uint32(len(data))); err != nil {
+		return nil, true, err
 	}
-	res, err := s.module.ExportedFunction(export).Call(
+	if !inst.memory().Write(inst.inPtr, data) {
+		return nil, true, fmt.Errorf("accel: payload write failed")
+	}
+	res, err := inst.module.ExportedFunction(export).Call(
 		context.Background(),
-		uint64(s.handle), uint64(s.inPtr), uint64(len(data)),
-		uint64(s.outPtr), uint64(s.bufCap),
+		uint64(inst.handle), uint64(inst.inPtr), uint64(len(data)),
+		uint64(inst.outPtr), uint64(inst.bufCap),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("accel: scan failed: %w", err)
+		return nil, true, fmt.Errorf("accel: scan failed: %w", err)
 	}
 	count := int(int32(res[0]))
 	if count < 0 {
-		return nil, fmt.Errorf("accel: scan rejected input (%d)", count)
+		return nil, false, fmt.Errorf("accel: scan rejected input (%d)", count)
 	}
-	raw, ok := s.memory().Read(s.outPtr, uint32(count*matchRecordSize))
+	raw, ok := inst.memory().Read(inst.outPtr, uint32(count*matchRecordSize))
 	if !ok {
-		return nil, fmt.Errorf("accel: scan result read failed")
+		return nil, true, fmt.Errorf("accel: scan result read failed")
 	}
-	matches := make([]Match, 0, count)
+	matches = make([]Match, 0, count)
 	for i := 0; i < count; i++ {
 		rec := raw[i*matchRecordSize:]
 		matches = append(matches, Match{
@@ -189,41 +332,74 @@ func (s *Scanner) scan(data []byte, export string) ([]Match, error) {
 			End:       int(binary.LittleEndian.Uint32(rec[8:])),
 		})
 	}
-	return matches, nil
+	return matches, false, nil
 }
 
-// Close releases the scanner and its WASM runtime.
+// Close releases the scanner and its WASM module instances. Idle ones are
+// closed immediately; instances in use by a concurrent scan are closed when
+// that scan finishes. Close is idempotent and Scan returns ErrUnavailable
+// afterwards.
 func (s *Scanner) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.handle == 0 {
+	if s == nil {
 		return nil
 	}
-	s.handle = 0
-	_, _ = s.module.ExportedFunction("scanner_free").Call(context.Background(), uint64(s.handle))
-	err := s.module.Close(context.Background())
-	if cerr := s.runtime.Close(context.Background()); err == nil {
-		err = cerr
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
 	}
-	return err
+	s.closed = true
+	close(s.done)
+	var err error
+	for {
+		select {
+		case inst := <-s.idle:
+			s.created--
+			if cerr := inst.close(); err == nil {
+				err = cerr
+			}
+		default:
+			return err
+		}
+	}
 }
 
-func joinPatterns(patterns []string) []byte {
-	cfg := make([]byte, 0, 64*len(patterns))
-	for _, p := range patterns {
+// close frees the scanner handle inside the module and releases the
+// module instance. The handle is captured before it is zeroed so the real
+// scanner is freed (previously handle 0 was passed to scanner_free).
+func (inst *instance) close() error {
+	handle := inst.handle
+	inst.handle = 0
+	if handle != 0 {
+		_, _ = inst.module.ExportedFunction("scanner_free").Call(context.Background(), uint64(handle))
+	}
+	return inst.module.Close(context.Background())
+}
+
+// joinPatterns encodes patterns newline-delimited, one per line, which is
+// the format the WASM module expects. A pattern that is not SafePattern is
+// written as a blank line (which never matches, keeping indexes aligned)
+// and its index is returned in unsafe.
+func joinPatterns(patterns []string) (cfg []byte, unsafe []int) {
+	cfg = make([]byte, 0, 64*len(patterns))
+	for i, p := range patterns {
+		if !SafePattern(p) {
+			unsafe = append(unsafe, i)
+			p = ""
+		}
 		cfg = append(cfg, []byte(p)...)
 		cfg = append(cfg, '\n')
 	}
-	return cfg
+	return cfg, unsafe
 }
 
-func (s *Scanner) ensureBuffers(dataLen uint32) error {
+func (inst *instance) ensureBuffers(dataLen uint32) error {
 	required := dataLen
 	outRequired := dataLen/2 + 4096
 	if required < 4096 {
 		required = 4096
 	}
-	if s.inPtr != 0 && required <= s.bufCap && outRequired <= s.bufCap {
+	if inst.inPtr != 0 && required <= inst.bufCap && outRequired <= inst.bufCap {
 		return nil
 	}
 	capacity := required
@@ -231,48 +407,45 @@ func (s *Scanner) ensureBuffers(dataLen uint32) error {
 		capacity = outRequired
 	}
 	capacity = (capacity + 4095) &^ 4095 // page-align growth
-	mem := s.memory()
+	mem := inst.memory()
 	if mem == nil {
 		return fmt.Errorf("accel: module memory unavailable")
 	}
-	if s.inPtr != 0 {
-		_, _ = s.module.ExportedFunction("omni_free").Call(context.Background(), uint64(s.inPtr), uint64(s.bufCap))
-		s.inPtr = 0
+	if inst.inPtr != 0 {
+		_, _ = inst.module.ExportedFunction("omni_free").Call(context.Background(), uint64(inst.inPtr), uint64(inst.bufCap))
+		inst.inPtr = 0
 	}
-	if s.outPtr != 0 {
-		_, _ = s.module.ExportedFunction("omni_free").Call(context.Background(), uint64(s.outPtr), uint64(s.bufCap))
-		s.outPtr = 0
+	if inst.outPtr != 0 {
+		_, _ = inst.module.ExportedFunction("omni_free").Call(context.Background(), uint64(inst.outPtr), uint64(inst.bufCap))
+		inst.outPtr = 0
 	}
 	var err error
-	if s.inPtr, err = s.alloc(capacity); err != nil {
+	if inst.inPtr, err = inst.alloc(capacity); err != nil {
 		return err
 	}
-	if s.outPtr, err = s.alloc(capacity); err != nil {
+	if inst.outPtr, err = inst.alloc(capacity); err != nil {
 		return err
 	}
-	s.bufCap = capacity
+	inst.bufCap = capacity
 	return nil
 }
 
 type engine struct {
-	ctx     context.Context
-	runtime wazero.Runtime
-	module  api.Module
+	ctx    context.Context
+	module api.Module
 }
 
 func newEngine() (*engine, error) {
 	ctx := context.Background()
-	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCloseOnContextDone(true))
-	if _, err := wasi_snapshot_preview1.Instantiate(ctx, rt); err != nil {
-		_ = rt.Close(ctx)
-		return nil, fmt.Errorf("accel: wasi init failed: %w", err)
-	}
-	mod, err := rt.Instantiate(ctx, wasmBinary)
+	shared, err := sharedRuntime()
 	if err != nil {
-		_ = rt.Close(ctx)
+		return nil, err
+	}
+	mod, err := shared.runtime.InstantiateModule(ctx, shared.compiled, wazero.NewModuleConfig().WithName(""))
+	if err != nil {
 		return nil, fmt.Errorf("accel: instantiate failed: %w", err)
 	}
-	return &engine{ctx: ctx, runtime: rt, module: mod}, nil
+	return &engine{ctx: ctx, module: mod}, nil
 }
 
 func (e *engine) memory() api.Memory { return e.module.Memory() }
@@ -301,14 +474,13 @@ func (e *engine) free(ptr uint32, size uint32) {
 
 func (e *engine) close() {
 	_ = e.module.Close(e.ctx)
-	_ = e.runtime.Close(e.ctx)
 }
 
-func (s *Scanner) alloc(size uint32) (uint32, error) {
+func (inst *instance) alloc(size uint32) (uint32, error) {
 	if size == 0 {
 		size = 1
 	}
-	res, err := s.module.ExportedFunction("omni_alloc").Call(context.Background(), uint64(size))
+	res, err := inst.module.ExportedFunction("omni_alloc").Call(context.Background(), uint64(size))
 	if err != nil {
 		return 0, fmt.Errorf("accel: alloc failed: %w", err)
 	}
@@ -319,4 +491,4 @@ func (s *Scanner) alloc(size uint32) (uint32, error) {
 	return ptr, nil
 }
 
-func (s *Scanner) memory() api.Memory { return s.module.Memory() }
+func (inst *instance) memory() api.Memory { return inst.module.Memory() }

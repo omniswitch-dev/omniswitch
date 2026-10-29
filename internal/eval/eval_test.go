@@ -12,7 +12,8 @@ import (
 )
 
 func TestReplayPolicies(t *testing.T) {
-	policyPath := filepath.Join(t.TempDir(), "production-delete.cel")
+	policyDir := t.TempDir()
+	policyPath := filepath.Join(policyDir, "production-delete.cel")
 	if err := os.WriteFile(policyPath, []byte(`
 // name: production-delete
 // reason: Production deletes are blocked.
@@ -28,9 +29,10 @@ resource.environment == "production" && action.name == "delete"
 	defer st.Close()
 
 	handler := NewHandler(st)
+	handler.SetPolicyRoot(policyDir)
 	rec := httptest.NewRecorder()
 	handler.ReplayPolicies(rec, httptest.NewRequest(http.MethodPost, "/api/evals/policy", strings.NewReader(`{
-		"policy_paths":["`+strings.ReplaceAll(policyPath, `\`, `\\`)+`"],
+		"policy_paths":["production-delete.cel"],
 		"requests":[
 			{
 				"agent":{"id":"coder"},

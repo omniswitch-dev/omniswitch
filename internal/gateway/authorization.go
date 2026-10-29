@@ -134,10 +134,21 @@ func (p *AuthorizationPolicy) Evaluate(r *http.Request, identity Identity) (bool
 }
 
 // modelFromRequest peeks at standard inference request bodies and restores the
-// reader so downstream handlers receive the original payload unchanged.
+// reader so downstream handlers receive the original payload unchanged. For
+// POST /a2a it resolves the model the same way the A2A handler does:
+// params.metadata.model when it is a non-empty string, otherwise the
+// x-omniswitch-model header.
 func modelFromRequest(r *http.Request) (string, error) {
-	if r.Method != http.MethodPost || !strings.HasPrefix(r.URL.Path, "/v1/") || r.Body == nil {
+	isA2A := r.URL.Path == "/a2a"
+	if r.Method != http.MethodPost || (!strings.HasPrefix(r.URL.Path, "/v1/") && !isA2A) {
 		return "", nil
+	}
+	headerModel := ""
+	if isA2A {
+		headerModel = strings.TrimSpace(r.Header.Get("x-omniswitch-model"))
+	}
+	if r.Body == nil || (isA2A && r.Body == http.NoBody) {
+		return headerModel, nil
 	}
 	const maxAuthorizationBody = 1 << 20
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxAuthorizationBody+1))
@@ -147,6 +158,15 @@ func modelFromRequest(r *http.Request) (string, error) {
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	if len(body) > maxAuthorizationBody {
 		return "", fmt.Errorf("request body exceeds authorization inspection limit")
+	}
+	if isA2A {
+		// Use the handler's own parser so the model checked here is the
+		// model the handler runs; ambiguous bodies fail authorization.
+		request, rpcErr := decodeA2ARequest(body)
+		if rpcErr != nil {
+			return "", rpcErr
+		}
+		return a2aRequestModel(request.Params, headerModel)
 	}
 	var request struct {
 		Model string `json:"model"`

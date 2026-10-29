@@ -12,6 +12,10 @@ import (
 // without shipping or locating a policy file on disk. Keep this in sync with
 // policies/production-delete.yaml (enforced by TestEmbeddedMCPPolicyMatchesSource).
 //
+// The policy is a single v2 CEL rule: it denies a delete action on a
+// production resource when the tool or target is "github" or the resource
+// is a repository. Every other call is allowed.
+//
 //go:embed embedded/production-delete.yaml
 var embeddedMCPPolicy []byte
 

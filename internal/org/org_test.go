@@ -85,3 +85,36 @@ func newOrgTestStore(t *testing.T) *store.Store {
 	t.Cleanup(func() { _ = st.Close() })
 	return st
 }
+
+// TestCreateUserDuplicateEmailReturnsStoredID covers STORE-13: creating a
+// user with an existing email responded with a fresh ID that was never
+// stored, so memberships created with it pointed at no user.
+func TestCreateUserDuplicateEmailReturnsStoredID(t *testing.T) {
+	st := newOrgTestStore(t)
+	handler := New(st)
+	create := func(body string) store.User {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		handler.CreateUser(rec, httptest.NewRequest(http.MethodPost, "/api/users", strings.NewReader(body)))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("CreateUser status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var user store.User
+		if err := json.Unmarshal(rec.Body.Bytes(), &user); err != nil {
+			t.Fatalf("decode user: %v", err)
+		}
+		return user
+	}
+	first := create(`{"email":"a@x.com","name":"A"}`)
+	second := create(`{"email":"A@X.com","name":"A2"}`)
+	if second.ID != first.ID {
+		t.Fatalf("second create returned ID %q, want stored ID %q", second.ID, first.ID)
+	}
+	users, err := st.ListUsers(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 || users[0].ID != first.ID || users[0].Name != "A2" {
+		t.Fatalf("stored users = %+v, want one user %q named A2", users, first.ID)
+	}
+}

@@ -61,3 +61,37 @@ Name of the Secret holding provider credentials.
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+True when the gateway authenticates through OIDC (config identity.oidc.jwks_url
+or OMNISWITCH_OIDC_JWKS_URL in secrets). The gateway then starts without any
+API key, so the chart does not need a bootstrap key.
+*/}}
+{{- define "omniswitch.oidcEnabled" -}}
+{{- if or (dig "identity" "oidc" "jwks_url" "" .Values.config) (get (.Values.secrets | default dict) "OMNISWITCH_OIDC_JWKS_URL") -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+True when the gateway needs a chart-generated bootstrap API key: auth is on,
+no existingSecret is used, secrets.OMNISWITCH_BOOTSTRAP_API_KEY is empty or
+unset, and the release does not use OIDC.
+*/}}
+{{- define "omniswitch.generateBootstrapKey" -}}
+{{- if and .Values.config.gateway.auth (not .Values.existingSecret) (not (get (.Values.secrets | default dict) "OMNISWITCH_BOOTSTRAP_API_KEY")) (ne (include "omniswitch.oidcEnabled" .) "true") -}}
+{{- if not .Values.bootstrap.generate -}}
+{{- fail "config.gateway.auth is true but no bootstrap API key is configured: set secrets.OMNISWITCH_BOOTSTRAP_API_KEY, set existingSecret (with an OMNISWITCH_BOOTSTRAP_API_KEY key), configure OIDC (config.identity.oidc.jwks_url), or set bootstrap.generate=true" -}}
+{{- end -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/* Name of the Secret holding OMNISWITCH_OTEL_HEADERS, if any. */}}
+{{- define "omniswitch.otelHeadersSecretName" -}}
+{{- if .Values.observability.otel.headersSecret.name -}}
+{{- .Values.observability.otel.headersSecret.name -}}
+{{- else if .Values.observability.otel.headers -}}
+{{- printf "%s-otel" (include "omniswitch.fullname" .) -}}
+{{- end -}}
+{{- end }}

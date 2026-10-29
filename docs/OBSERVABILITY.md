@@ -68,6 +68,12 @@ scrape_configs:
       - targets: ["omniswitch.internal:8080"]
 ```
 
+When authentication is on, `/metrics` needs an API key or OIDC token like
+other endpoints. The metrics cover the whole gateway, so a caller with a
+workspace or organization gets 403. Set `OMNISWITCH_METRICS_PUBLIC=true` to
+serve `/metrics` without authentication, for example to a scraper on a
+private network that cannot send a key.
+
 ## Built-in trace waterfall
 
 The dashboard renders per-request waterfalls from span data recorded in the

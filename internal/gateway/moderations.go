@@ -18,7 +18,8 @@ func (h *Handler) Moderations(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, h.maxRequestBytes)
+	r, cfg := h.withSettings(r)
+	r.Body = http.MaxBytesReader(w, r.Body, cfg.maxRequestBytes)
 	var request struct {
 		Model string `json:"model,omitempty"`
 		Input any    `json:"input"`

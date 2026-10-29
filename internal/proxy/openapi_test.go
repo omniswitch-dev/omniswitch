@@ -126,3 +126,48 @@ func TestOpenAPIFederation(t *testing.T) {
 		t.Fatalf("POST mapping wrong: %s %s body=%s", gotMethod, gotPath, gotBody)
 	}
 }
+
+func TestOpenAPIToolListUsesTargetNameAndAudits(t *testing.T) {
+	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer rest.Close()
+	specServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(sampleSpec))
+	}))
+	defer specServer.Close()
+
+	engine, err := policy.NewEngine(policy.Rule{Name: "hide-add", Expression: `tool.name == "addPet"`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditor := &memoryAuditor{}
+	handler, err := NewMultiHandler(engine, auditor, []TargetConfig{{
+		Name: "Pets", Transport: "http", Upstream: rest.URL, OpenAPISpec: specServer.URL,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handler.Close()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)))
+	body := rec.Body.String()
+	if !strings.Contains(body, `"Pets__getPetById"`) || strings.Contains(body, "addPet") {
+		t.Fatalf("tools/list = %s, want only Pets__getPetById", body)
+	}
+	decisions := map[string]string{}
+	for _, event := range auditor.events {
+		decisions[event.Tool] = event.Decision
+	}
+	if decisions["getPetById"] != "ALLOW" || decisions["addPet"] != "DENY" {
+		t.Fatalf("synthetic tool audit = %v", decisions)
+	}
+
+	// The listed name is callable.
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"Pets__getPetById","arguments":{"petId":1}}}`)))
+	if !strings.Contains(rec.Body.String(), `ok`) || strings.Contains(rec.Body.String(), `"isError":true`) {
+		t.Fatalf("tools/call = %s", rec.Body.String())
+	}
+}

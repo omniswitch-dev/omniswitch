@@ -27,7 +27,7 @@ func buildProviderRegistry(settings runtimeSettings, vaultManager *vault.Vault) 
 		registerProviderAccount(registry, account)
 	}
 	registerVaultProviders(registry, vaultManager)
-	registerOpenAICompatiblePresets(registry)
+	registerOpenAICompatiblePresets(registry, settings.providerAccounts)
 	return registry
 }
 
@@ -54,11 +54,19 @@ var openAICompatiblePresets = []openAICompatiblePreset{
 
 // registerOpenAICompatiblePresets lights up hosted providers whose credentials
 // are present in the environment, giving broad provider coverage without any
-// per-provider adapter code.
-func registerOpenAICompatiblePresets(registry *provider.Registry) {
+// per-provider adapter code. Presets run last and never replace an already
+// registered provider: if a provider with the preset's name exists, or a
+// config account of the preset's type was registered (e.g. pointing at a
+// regional or proxy base URL), the preset is skipped so it cannot steal that
+// account's name or model mappings.
+func registerOpenAICompatiblePresets(registry *provider.Registry, accounts []gatewayconfig.ProviderAccount) {
 	for _, preset := range openAICompatiblePresets {
 		apiKey := os.Getenv(preset.EnvKey)
 		if apiKey == "" {
+			continue
+		}
+		if owner, ok := presetOverriddenBy(registry, accounts, preset.Type); ok {
+			log.Printf("skipping %s preset from %s: provider %q is already registered", preset.Type, preset.EnvKey, owner)
 			continue
 		}
 		var opts []provider.CustomOption
@@ -69,6 +77,23 @@ func registerOpenAICompatiblePresets(registry *provider.Registry) {
 		registry.Register(p)
 		log.Printf("registered %s provider: %s (%s)", preset.Type, p.Name(), preset.BaseURL)
 	}
+}
+
+// presetOverriddenBy reports the registered provider that takes precedence
+// over the preset of the given type, if any.
+func presetOverriddenBy(registry *provider.Registry, accounts []gatewayconfig.ProviderAccount, presetType string) (string, bool) {
+	if _, err := registry.Get(presetType); err == nil {
+		return presetType, true
+	}
+	for _, account := range accounts {
+		if strings.ToLower(strings.TrimSpace(account.Type)) != presetType {
+			continue
+		}
+		if _, err := registry.Get(account.Name); err == nil {
+			return account.Name, true
+		}
+	}
+	return "", false
 }
 
 func presetForType(providerType string) *openAICompatiblePreset {

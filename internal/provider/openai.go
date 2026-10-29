@@ -24,7 +24,7 @@ func NewOpenAI(apiKey string) *OpenAI {
 	return &OpenAI{
 		apiKey:  apiKey,
 		baseURL: "https://api.openai.com/v1",
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  newProviderClient(defaultRequestTimeout),
 	}
 }
 
@@ -60,7 +60,13 @@ func (o *OpenAI) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "openai error", resp)
+		meta.Error = upstreamErr.Body
+		return ChatResponse{}, meta, upstreamErr
+	}
+	respBody, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
@@ -68,11 +74,6 @@ func (o *OpenAI) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 	}
 
 	meta.Latency = time.Since(start)
-
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(respBody)
-		return ChatResponse{}, meta, fmt.Errorf("openai error (status %d): %s", resp.StatusCode, string(respBody))
-	}
 
 	var chatResp ChatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
@@ -85,7 +86,7 @@ func (o *OpenAI) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespo
 }
 
 func (o *OpenAI) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan ChatResponseChunk, ProviderMeta, error) {
-	return streamOpenAICompatible(ctx, o.client, o.baseURL+"/chat/completions", o.apiKey, req, "openai", nil)
+	return streamOpenAICompatible(ctx, streamingClient(o.client), o.baseURL+"/chat/completions", o.apiKey, withStreamUsage(req), "openai", nil)
 }
 
 func (o *OpenAI) Embeddings(ctx context.Context, req EmbeddingRequest) (EmbeddingResponse, ProviderMeta, error) {
@@ -107,16 +108,18 @@ func (o *OpenAI) Embeddings(ctx context.Context, req EmbeddingRequest) (Embeddin
 		return EmbeddingResponse{}, meta, fmt.Errorf("openai embeddings request: %w", err)
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "openai embeddings error", resp)
+		meta.Error = upstreamErr.Body
+		return EmbeddingResponse{}, meta, upstreamErr
+	}
+	payload, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Latency = time.Since(start)
 		return EmbeddingResponse{}, meta, fmt.Errorf("read embeddings response: %w", err)
 	}
 	meta.Latency = time.Since(start)
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(payload)
-		return EmbeddingResponse{}, meta, fmt.Errorf("openai embeddings error (status %d): %s", resp.StatusCode, string(payload))
-	}
 	var response EmbeddingResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
 		return EmbeddingResponse{}, meta, fmt.Errorf("decode embeddings response: %w", err)
@@ -147,23 +150,25 @@ func (o *OpenAI) ImageGeneration(ctx context.Context, req ImageRequest) (ImageRe
 		return ImageResponse{}, meta, fmt.Errorf("openai image request: %w", err)
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "openai image error", resp)
+		meta.Error = upstreamErr.Body
+		return ImageResponse{}, meta, upstreamErr
+	}
+	payload, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
 		return ImageResponse{}, meta, fmt.Errorf("read image response: %w", err)
 	}
 	meta.Latency = time.Since(start)
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(payload)
-		return ImageResponse{}, meta, fmt.Errorf("openai image error (status %d): %s", resp.StatusCode, string(payload))
-	}
 	var response ImageResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
 		meta.Error = err.Error()
 		return ImageResponse{}, meta, fmt.Errorf("decode image response: %w", err)
 	}
-	meta.Cost = estimateOpenAIImageCost(req)
+	meta.Cost = estimateOpenAIImageCost(req, response.Usage)
 	return response, meta, nil
 }
 
@@ -217,17 +222,19 @@ func (o *OpenAI) Transcription(ctx context.Context, req TranscriptionRequest) (T
 		return TranscriptionResponse{}, meta, fmt.Errorf("openai transcription request: %w", err)
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "openai transcription error", resp)
+		meta.Error = upstreamErr.Body
+		return TranscriptionResponse{}, meta, upstreamErr
+	}
+	payload, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
 		return TranscriptionResponse{}, meta, fmt.Errorf("read transcription response: %w", err)
 	}
 	meta.Latency = time.Since(start)
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(payload)
-		return TranscriptionResponse{}, meta, fmt.Errorf("openai transcription error (status %d): %s", resp.StatusCode, string(payload))
-	}
 	var response TranscriptionResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
 		meta.Error = err.Error()
@@ -258,11 +265,12 @@ func (o *OpenAI) Speech(ctx context.Context, req SpeechRequest) (io.ReadCloser, 
 		return nil, "", meta, fmt.Errorf("openai speech request: %w", err)
 	}
 	meta.Latency = time.Since(start)
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		payload, _ := io.ReadAll(resp.Body)
-		meta.Error = string(payload)
-		return nil, "", meta, fmt.Errorf("openai speech error (status %d): %s", resp.StatusCode, string(payload))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "openai speech error", resp)
+		_ = resp.Body.Close()
+		meta.Error = upstreamErr.Body
+		return nil, "", meta, upstreamErr
 	}
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {
@@ -271,24 +279,81 @@ func (o *OpenAI) Speech(ctx context.Context, req SpeechRequest) (io.ReadCloser, 
 	return resp.Body, contentType, meta, nil
 }
 
-func estimateOpenAIImageCost(req ImageRequest) float64 {
+// OpenAI image prices, verified 2026-10-18 against
+// https://cdn.openai.com/API/docs/txt/llms-models-pricing.txt.
+var (
+	// dall-e-3 per-image price by quality, then by size class.
+	dallE3Prices = map[string]map[string]float64{
+		"standard": {"square": 0.04, "wide": 0.08},
+		"hd":       {"square": 0.08, "wide": 0.12},
+	}
+	// dall-e-2 per-image price by size.
+	dallE2Prices = map[string]float64{"256x256": 0.016, "512x512": 0.018, "1024x1024": 0.02}
+	// gpt-image-1 per-image price by quality, then by size class, used
+	// only when the response carries no token usage.
+	gptImage1Prices = map[string]map[string]float64{
+		"low":    {"square": 0.011, "wide": 0.016},
+		"medium": {"square": 0.042, "wide": 0.063},
+		"high":   {"square": 0.167, "wide": 0.25},
+	}
+)
+
+// gpt-image-1 token prices per million tokens.
+const (
+	gptImage1TextInputPerMillion  = 5.0
+	gptImage1ImageInputPerMillion = 10.0
+	gptImage1OutputPerMillion     = 40.0
+	// unknownImageModelPrice keeps the previous flat estimate for image
+	// models that are not in the tables above.
+	unknownImageModelPrice = 0.04
+)
+
+// estimateOpenAIImageCost returns the cost of an image generation call from
+// OpenAI's published per-image (DALL-E) or per-token (gpt-image-1) prices.
+func estimateOpenAIImageCost(req ImageRequest, usage *ImageUsage) float64 {
 	n := req.N
 	if n <= 0 {
 		n = 1
 	}
-	model := strings.ToLower(req.Model)
-	quality := strings.ToLower(req.Quality)
-	size := strings.ToLower(req.Size)
-	unit := 0.04
-	if strings.Contains(model, "dall-e-2") {
-		unit = 0.02
-	} else if strings.Contains(model, "gpt-image") {
-		unit = 0.04
+	model := strings.ToLower(strings.TrimSpace(req.Model))
+	quality := strings.ToLower(strings.TrimSpace(req.Quality))
+	size := strings.ToLower(strings.TrimSpace(req.Size))
+	sizeClass := "square"
+	if size != "" && size != "auto" && size != "1024x1024" {
+		sizeClass = "wide"
 	}
-	if quality == "hd" || strings.Contains(size, "1792") {
-		unit *= 2
+	switch {
+	case model == "gpt-image-1" || strings.HasPrefix(model, "gpt-image-1-2"):
+		if usage != nil && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
+			textIn, imageIn := usage.InputTokens, 0
+			if d := usage.InputTokensDetails; d != nil {
+				textIn, imageIn = d.TextTokens, d.ImageTokens
+			}
+			return (float64(textIn)*gptImage1TextInputPerMillion +
+				float64(imageIn)*gptImage1ImageInputPerMillion +
+				float64(usage.OutputTokens)*gptImage1OutputPerMillion) / 1_000_000
+		}
+		tier, ok := gptImage1Prices[quality]
+		if !ok {
+			// "auto" or unset: estimate at the medium tier.
+			tier = gptImage1Prices["medium"]
+		}
+		return float64(n) * tier[sizeClass]
+	case strings.HasPrefix(model, "dall-e-3"):
+		tier, ok := dallE3Prices[quality]
+		if !ok {
+			tier = dallE3Prices["standard"]
+		}
+		return float64(n) * tier[sizeClass]
+	case strings.HasPrefix(model, "dall-e-2"):
+		price, ok := dallE2Prices[size]
+		if !ok {
+			price = dallE2Prices["1024x1024"]
+		}
+		return float64(n) * price
+	default:
+		return float64(n) * unknownImageModelPrice
 	}
-	return float64(n) * unit
 }
 
 // Pricing for OpenAI models is resolved from the consolidated catalog

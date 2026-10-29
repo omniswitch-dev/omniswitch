@@ -64,7 +64,7 @@ func (p *AliasProvider) ChatCompletionStream(ctx context.Context, req ChatReques
 		meta.ProviderType = p.inner.Name()
 		meta.Provider = p.name
 		meta.Model = originalModel
-		return p.rewriteStreamModel(chunks, originalModel), meta, err
+		return p.rewriteStreamModel(ctx, chunks, originalModel), meta, err
 	}
 	resp, meta, err := p.inner.ChatCompletion(ctx, req)
 	if err != nil {
@@ -167,7 +167,7 @@ func (p *AliasProvider) modelID(model string) string {
 	return p.name + "/" + strings.TrimPrefix(model, "/")
 }
 
-func (p *AliasProvider) rewriteStreamModel(chunks <-chan ChatResponseChunk, model string) <-chan ChatResponseChunk {
+func (p *AliasProvider) rewriteStreamModel(ctx context.Context, chunks <-chan ChatResponseChunk, model string) <-chan ChatResponseChunk {
 	if chunks == nil {
 		return nil
 	}
@@ -178,7 +178,15 @@ func (p *AliasProvider) rewriteStreamModel(chunks <-chan ChatResponseChunk, mode
 			if chunk.Model != "" {
 				chunk.Model = model
 			}
-			out <- chunk
+			select {
+			case out <- chunk:
+			case <-ctx.Done():
+				// Keep draining so the inner producer can observe the
+				// cancelled context and exit instead of blocking forever.
+				for range chunks {
+				}
+				return
+			}
 		}
 	}()
 	return out

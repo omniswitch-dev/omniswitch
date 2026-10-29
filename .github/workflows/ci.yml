@@ -54,10 +54,11 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      # golangci-lint v1 cannot type-check Go 1.26 code; v2 is required.
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: v1.64.8
+          version: v2.15.0
           args: --timeout=5m
 
   bench:

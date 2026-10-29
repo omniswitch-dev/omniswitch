@@ -17,7 +17,14 @@ import (
 type SQLiteCache struct {
 	db  *sql.DB
 	ttl time.Duration
+	// now is the clock; tests replace it.
+	now func() time.Time
 }
+
+// sqliteTimeLayout has a fixed width, so timestamps compare correctly as
+// strings. RFC3339Nano drops trailing zeros, which sorts "12:00:01Z" after
+// "12:00:01.5Z".
+const sqliteTimeLayout = "2006-01-02T15:04:05.000000000Z"
 
 func NewSQLiteCache(dir string, ttl time.Duration) (*SQLiteCache, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -27,7 +34,7 @@ func NewSQLiteCache(dir string, ttl time.Duration) (*SQLiteCache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open cache database: %w", err)
 	}
-	cache := &SQLiteCache{db: db, ttl: ttl}
+	cache := &SQLiteCache{db: db, ttl: ttl, now: time.Now}
 	if err := cache.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -48,7 +55,7 @@ func (c *SQLiteCache) GetContext(ctx context.Context, key string) (*provider.Cha
 	err := c.db.QueryRowContext(ctx,
 		"SELECT response_json FROM cache_entries WHERE cache_key = ? AND expires_at > ?",
 		key,
-		time.Now().UTC().Format(time.RFC3339Nano),
+		c.now().UTC().Format(sqliteTimeLayout),
 	).Scan(&payload)
 	if err == sql.ErrNoRows {
 		return nil, false, nil
@@ -75,13 +82,14 @@ func (c *SQLiteCache) SetContext(ctx context.Context, key string, val *provider.
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
+	now := c.now().UTC()
 	_, err = c.db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO cache_entries (cache_key, response_json, created_at, expires_at)
 		VALUES (?, ?, ?, ?)`,
 		key,
 		string(payload),
-		time.Now().UTC().Format(time.RFC3339Nano),
-		time.Now().UTC().Add(ttl).Format(time.RFC3339Nano),
+		now.Format(sqliteTimeLayout),
+		now.Add(ttl).Format(sqliteTimeLayout),
 	)
 	return err
 }

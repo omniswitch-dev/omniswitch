@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/omniswitch-dev/omniswitch/internal/store"
@@ -66,6 +68,41 @@ func TestCreateListRenderPrompt(t *testing.T) {
 	}`)))
 	if renderRec.Code != http.StatusOK || !strings.Contains(renderRec.Body.String(), "Hello Ada, your ticket is INC-1. Ada") {
 		t.Fatalf("RenderPrompt status/body = %d/%s", renderRec.Code, renderRec.Body.String())
+	}
+}
+
+// TestCreatePromptConcurrentVersions: the handler read MAX(version)+1 and
+// then inserted, so concurrent creates for one name got the same version.
+func TestCreatePromptConcurrentVersions(t *testing.T) {
+	handler := New(newPromptTestStore(t))
+	const creates = 8
+	versions := make([]int, creates)
+	var wg sync.WaitGroup
+	for i := range creates {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			handler.CreatePrompt(rec, httptest.NewRequest(http.MethodPost, "/api/prompts",
+				strings.NewReader(`{"name":"support","template":"Hello {{name}}"}`)))
+			if rec.Code != http.StatusCreated {
+				t.Errorf("CreatePrompt status = %d, body = %s", rec.Code, rec.Body.String())
+				return
+			}
+			var created store.Prompt
+			if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+				t.Errorf("decode response: %v", err)
+				return
+			}
+			versions[i] = created.Version
+		}()
+	}
+	wg.Wait()
+	sort.Ints(versions)
+	for i, version := range versions {
+		if version != i+1 {
+			t.Fatalf("versions = %v, want 1..%d with no duplicates", versions, creates)
+		}
 	}
 }
 

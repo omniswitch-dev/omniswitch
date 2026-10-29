@@ -37,12 +37,12 @@ material.
 1. Any change to a competitor's row must cite a primary source (vendor
    docs, changelog, or the vendor's own repository/LICENSE file) in
    `source_url`. This project's own prior comparison docs
-   (`docs/PORTKEY_COMPARISON.md`, `comparison_iter5.md`, `comparison_iter7.md`)
-   are acceptable as a starting point but are marked as such in `detail` and
-   should be independently re-verified before a beta launch depends on them
-   -- those documents have already been found to disagree with each other
-   (for example, mTLS) and with the live website in prior research for this
-   project.
+   (`docs/PORTKEY_COMPARISON.md`) are acceptable as a starting point but are
+   marked as such in `detail` and should be independently re-verified before
+   a beta launch depends on them. The earlier root-level iteration notes
+   (`comparison_iter5.md`, `comparison_iter7.md`) were removed because they
+   disagreed with each other and with the code; rows that relied only on
+   them are now `unknown` until re-verified.
 2. Any change to an OmniSwitch row must cite the source file/test that was
    read, not just another doc. Prefer citing code over docs when they
    disagree.

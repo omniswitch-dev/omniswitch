@@ -12,6 +12,17 @@ const OpenAI = require("openai").default || require("openai");
 
 const DEFAULT_GATEWAY_URL = "http://localhost:8080/v1";
 
+// Environment variables read by the SDK, keyed by header. OMNISWITCH_CONFIG
+// and OMNISWITCH_SHADOW_PROVIDER are gateway settings, so the SDK uses the
+// OMNISWITCH_CLIENT_* names for those to avoid picking up gateway values.
+const HEADER_ENV = {
+  "x-omniswitch-config": "OMNISWITCH_CLIENT_CONFIG",
+  "x-omniswitch-provider": "OMNISWITCH_PROVIDER",
+  "x-omniswitch-trace-id": "OMNISWITCH_TRACE_ID",
+  "x-omniswitch-session-id": "OMNISWITCH_SESSION_ID",
+  "x-omniswitch-shadow-provider": "OMNISWITCH_CLIENT_SHADOW_PROVIDER",
+};
+
 function normalizeGatewayUrl(gatewayUrl) {
   const value = String(gatewayUrl || DEFAULT_GATEWAY_URL).trim() || DEFAULT_GATEWAY_URL;
   const trimmed = value.replace(/\/+$/, "");
@@ -25,6 +36,24 @@ function firstValue(...values) {
     }
   }
   return undefined;
+}
+
+// mergeHeaders returns base updated with overrides, replacing header names
+// case-insensitively so "X-OmniSwitch-Config" and "x-omniswitch-config" never
+// both end up on a request.
+function mergeHeaders(base = {}, overrides = {}) {
+  const headers = { ...base };
+  for (const [name, value] of Object.entries(overrides)) {
+    for (const existing of Object.keys(headers)) {
+      if (existing.toLowerCase() === name.toLowerCase()) delete headers[existing];
+    }
+    headers[name] = value;
+  }
+  return headers;
+}
+
+function hasHeader(headers, name) {
+  return Object.keys(headers).some((key) => key.toLowerCase() === name);
 }
 
 function buildHeaders(defaultHeaders = {}, options = {}) {
@@ -69,16 +98,21 @@ class OmniSwitch extends OpenAI {
       process.env.SENTINEL_API_KEY,
       "omniswitch-no-auth",
     );
-    const headers = buildHeaders(defaultHeaders, {
-      config: firstValue(config, process.env.OMNISWITCH_CONFIG),
-      provider: firstValue(provider, process.env.OMNISWITCH_PROVIDER),
-      traceId: firstValue(traceId, process.env.OMNISWITCH_TRACE_ID),
-      sessionId: firstValue(sessionId, process.env.OMNISWITCH_SESSION_ID),
-      shadowProvider: firstValue(
-        shadowProvider,
-        process.env.OMNISWITCH_SHADOW_PROVIDER,
-      ),
+    // Precedence: explicit option > caller-supplied defaultHeaders (which
+    // includes headers set by withConfig/withTrace/withProvider) > env vars.
+    const explicit = buildHeaders({}, {
+      config: firstValue(config),
+      provider: firstValue(provider),
+      traceId: firstValue(traceId),
+      sessionId: firstValue(sessionId),
+      shadowProvider: firstValue(shadowProvider),
     });
+    let headers = { ...(defaultHeaders || {}) };
+    for (const [name, envName] of Object.entries(HEADER_ENV)) {
+      const value = firstValue(process.env[envName]);
+      if (value !== undefined && !hasHeader(headers, name)) headers[name] = value;
+    }
+    headers = mergeHeaders(headers, explicit);
 
     super({
       ...openaiOptions,
@@ -101,10 +135,9 @@ class OmniSwitch extends OpenAI {
    * @returns {OmniSwitch}
    */
   withConfig(config) {
-    return this._clone({
-      ...this._omniswitch.headers,
-      "x-omniswitch-config": config,
-    });
+    return this._clone(
+      mergeHeaders(this._omniswitch.headers, { "x-omniswitch-config": config }),
+    );
   }
 
   /**
@@ -114,14 +147,11 @@ class OmniSwitch extends OpenAI {
    * @returns {OmniSwitch}
    */
   withTrace(traceId, sessionId) {
-    const headers = {
-      ...this._omniswitch.headers,
-      "x-omniswitch-trace-id": traceId,
-    };
+    const overrides = { "x-omniswitch-trace-id": traceId };
     if (sessionId !== undefined) {
-      headers["x-omniswitch-session-id"] = sessionId;
+      overrides["x-omniswitch-session-id"] = sessionId;
     }
-    return this._clone(headers);
+    return this._clone(mergeHeaders(this._omniswitch.headers, overrides));
   }
 
   /**
@@ -130,10 +160,9 @@ class OmniSwitch extends OpenAI {
    * @returns {OmniSwitch}
    */
   withProvider(provider) {
-    return this._clone({
-      ...this._omniswitch.headers,
-      "x-omniswitch-provider": provider,
-    });
+    return this._clone(
+      mergeHeaders(this._omniswitch.headers, { "x-omniswitch-provider": provider }),
+    );
   }
 
   _clone(headers) {

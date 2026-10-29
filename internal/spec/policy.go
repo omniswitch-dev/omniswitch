@@ -41,6 +41,7 @@ type Match struct {
 	Department   string `json:"department,omitempty" yaml:"department,omitempty"`
 	Role         string `json:"role,omitempty" yaml:"role,omitempty"`
 	Tool         string `json:"tool,omitempty" yaml:"tool,omitempty"`
+	Target       string `json:"target,omitempty" yaml:"target,omitempty"`
 	Action       string `json:"action,omitempty" yaml:"action,omitempty"`
 	Resource     string `json:"resource,omitempty" yaml:"resource,omitempty"`
 	ResourceType string `json:"resourceType,omitempty" yaml:"resourceType,omitempty"`
@@ -105,6 +106,7 @@ func (p Policy) Expression() (string, error) {
 	add("agent.department", p.Spec.Match.Department)
 	add("agent.role", p.Spec.Match.Role)
 	add("tool.name", p.Spec.Match.Tool)
+	add("target.name", p.Spec.Match.Target)
 	add("action.name", p.Spec.Match.Action)
 	add("resource.name", p.Spec.Match.Resource)
 	add("resource.type", p.Spec.Match.ResourceType)
@@ -121,6 +123,7 @@ func (m Match) Empty() bool {
 		m.Department == "" &&
 		m.Role == "" &&
 		m.Tool == "" &&
+		m.Target == "" &&
 		m.Action == "" &&
 		m.Resource == "" &&
 		m.ResourceType == "" &&

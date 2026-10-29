@@ -9,8 +9,12 @@ OmniSwitch is in public beta. This page lists limitations that are current, know
 
 ## API surface
 
-- **Responses API and Anthropic Messages API support a documented subset**, not full parity with the upstream vendor APIs. Structured outputs, some tool-use flows, and certain streaming edge cases may not be forwarded; unsupported fields are either translated on a best-effort basis or rejected rather than silently dropped where practical (see `CHANGELOG.md` for the passthrough-fidelity work).
-- **A2A (Agent-to-Agent) support covers the v1 task lifecycle** (create, poll, cancel) with SSE streaming for task updates. Push notifications and an outbound A2A client (OmniSwitch acting as an A2A caller rather than callee) are not implemented.
+- **Responses API and Anthropic Messages API support a documented subset**, not full parity with the upstream vendor APIs (see `CHANGELOG.md` for the passthrough-fidelity work).
+  - `/v1/responses` accepts message input items with text and image content, function tools and `tool_choice`. It returns and streams text and function calls. It rejects built-in tools (for example `web_search`), input items other than messages, and audio or file content with HTTP 400. Because it rejects `function_call_output` items, a client cannot send tool results back through `/v1/responses`. It ignores other fields, for example `previous_response_id`, `store`, `background`, `text.format` and `reasoning`: there is no stored response state, background mode or structured output.
+  - `/v1/messages` accepts `model`, `messages`, `system` (a string), `max_tokens`, `temperature`, `top_p` and `stream`. It ignores client `tools`.
+- **A2A (Agent-to-Agent) support covers the v1 task lifecycle** (create, poll, cancel) with single-shot SSE: a streaming request gets status and artifact frames for one completed response, not incremental tokens. There is no `tasks/resubscribe`. Tasks are kept in memory (at most 10,000 in total and 1,000 per API key and workspace, for one hour), so they are lost on restart and are not shared between replicas. Push notifications and an outbound A2A client (OmniSwitch acting as an A2A caller rather than callee) are not implemented.
+- **MCP token exchange covers RFC 8693 only.** `mcp.targets[].token_exchange` exchanges the OIDC caller's token for HTTP targets. There is no RFC 7523 JWT bearer grant, no client-credentials flow for API-key callers, and no exchange for OpenAPI targets or stdio targets.
+- **Non-default streamable-HTTP MCP targets** that require their own MCP session are not initialized by the gateway. The client's `Mcp-Session-Id` is forwarded only to the first target.
 
 ## Identity and transport security
 
@@ -23,7 +27,7 @@ OmniSwitch is in public beta. This page lists limitations that are current, know
 
 ## Caching
 
-- **Semantic cache is token-frequency cosine similarity, not embeddings.** OmniSwitch's semantic cache matches requests using cosine similarity over token-frequency vectors of the prompt text — it does not call an embedding model. This is cheaper and dependency-free, but it is a weaker notion of "semantic" than a vector-embedding-based cache: it will miss paraphrases that an embedding model would catch, and can occasionally match on superficial token overlap rather than true meaning. Treat it as an exact-ish cache with some tolerance for whitespace/formatting differences, not as embedding-quality semantic matching.
+- **Semantic cache is token-frequency cosine similarity, not embeddings.** OmniSwitch's semantic cache matches requests using cosine similarity over role- and order-aware token and bigram vectors of the conversation — it does not call an embedding model. Prompts with images, audio, other non-text parts or tool calls match only prompts with exactly the same media and tool calls. This is cheaper and dependency-free, but it is a weaker notion of "semantic" than a vector-embedding-based cache: it will miss paraphrases that an embedding model would catch, and can occasionally match on superficial token overlap rather than true meaning. Treat it as an exact-ish cache with some tolerance for whitespace/formatting differences, not as embedding-quality semantic matching.
 
 ## Authorization
 

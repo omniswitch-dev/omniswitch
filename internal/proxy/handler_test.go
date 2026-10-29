@@ -201,7 +201,7 @@ func TestHandlerForwardsToStdioTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMultiHandler() error = %v", err)
 	}
-	t.Cleanup(func() { handler.targets["local"].stdio.stop() })
+	t.Cleanup(func() { handler.targets["local"].stdio.close() })
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}`))
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, req)

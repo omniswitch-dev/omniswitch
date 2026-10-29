@@ -19,15 +19,15 @@ import (
 // not (yet) model by name, instead of silently dropping them. See
 // UnmarshalJSON/MarshalJSON below.
 type ChatRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Temperature *float64  `json:"temperature,omitempty"`
-	MaxTokens   *int      `json:"max_tokens,omitempty"`
-	TopP        *float64  `json:"top_p,omitempty"`
-	Stream      bool      `json:"stream,omitempty"`
-	Stop        []string  `json:"stop,omitempty"`
-	Tools       []Tool    `json:"tools,omitempty"`
-	ToolChoice  any       `json:"tool_choice,omitempty"`
+	Model       string        `json:"model"`
+	Messages    []Message     `json:"messages"`
+	Temperature *float64      `json:"temperature,omitempty"`
+	MaxTokens   *int          `json:"max_tokens,omitempty"`
+	TopP        *float64      `json:"top_p,omitempty"`
+	Stream      bool          `json:"stream,omitempty"`
+	Stop        StopSequences `json:"stop,omitempty"`
+	Tools       []Tool        `json:"tools,omitempty"`
+	ToolChoice  any           `json:"tool_choice,omitempty"`
 
 	// ResponseFormat requests structured output (text, json_object, or
 	// json_schema). Adapters that cannot honour a schema natively must
@@ -72,6 +72,38 @@ type JSONSchemaSpec struct {
 	Description string `json:"description,omitempty"`
 	Schema      any    `json:"schema,omitempty"`
 	Strict      *bool  `json:"strict,omitempty"`
+}
+
+// StopSequences is the OpenAI "stop" request field. The OpenAI API accepts
+// either a single string or an array of up to four strings; both decode to
+// a slice, and it always encodes as an array.
+type StopSequences []string
+
+// UnmarshalJSON accepts a string, an array of strings, or null.
+func (s *StopSequences) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "null" {
+		*s = nil
+		return nil
+	}
+	if strings.HasPrefix(trimmed, `"`) {
+		var one string
+		if err := json.Unmarshal(data, &one); err != nil {
+			return err
+		}
+		if one == "" {
+			*s = nil
+		} else {
+			*s = StopSequences{one}
+		}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(data, &many); err != nil {
+		return fmt.Errorf("stop must be a string or an array of strings: %w", err)
+	}
+	*s = many
+	return nil
 }
 
 // StreamOptions mirrors the OpenAI stream_options request field.
@@ -190,6 +222,15 @@ type Message struct {
 	ContentParts []ContentPart `json:"-"`
 	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
 	ToolCallID   string        `json:"tool_call_id,omitempty"`
+	// Refusal carries an assistant refusal message (OpenAI structured
+	// outputs). It round-trips in requests and responses.
+	Refusal string `json:"refusal,omitempty"`
+	// ReasoningContent carries reasoning/thinking text returned by
+	// reasoning models (DeepSeek, xAI, Groq, many OpenAI-compatible
+	// servers). It is passed through in responses and stream deltas but
+	// is not sent back upstream in requests, where several providers
+	// reject it.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 type ContentPart struct {
@@ -216,10 +257,14 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		Content    json.RawMessage `json:"content"`
 		ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
 		ToolCallID string          `json:"tool_call_id,omitempty"`
+		Refusal    string          `json:"refusal,omitempty"`
+		Reasoning  string          `json:"reasoning_content,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
+	m.Refusal = raw.Refusal
+	m.ReasoningContent = raw.Reasoning
 	m.Role = raw.Role
 	m.Name = raw.Name
 	m.ToolCalls = raw.ToolCalls
@@ -251,6 +296,7 @@ func (m Message) MarshalJSON() ([]byte, error) {
 		Content    any        `json:"content"`
 		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 		ToolCallID string     `json:"tool_call_id,omitempty"`
+		Refusal    string     `json:"refusal,omitempty"`
 	}
 	w := wire{
 		Role:       m.Role,
@@ -258,11 +304,45 @@ func (m Message) MarshalJSON() ([]byte, error) {
 		Content:    m.Content,
 		ToolCalls:  m.ToolCalls,
 		ToolCallID: m.ToolCallID,
+		Refusal:    m.Refusal,
 	}
 	if len(m.ContentParts) > 0 {
 		w.Content = m.ContentParts
 	}
 	return json.Marshal(w)
+}
+
+// responseMessageWire is the JSON shape of an assistant message in a
+// response (choices[].message) or a stream delta (choices[].delta).
+type responseMessageWire struct {
+	Role             string     `json:"role,omitempty"`
+	Name             string     `json:"name,omitempty"`
+	Content          *string    `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	Refusal          string     `json:"refusal,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
+}
+
+func (m Message) responseWire(delta bool) responseMessageWire {
+	w := responseMessageWire{
+		Role:             m.Role,
+		Name:             m.Name,
+		ReasoningContent: m.ReasoningContent,
+		Refusal:          m.Refusal,
+		ToolCalls:        m.ToolCalls,
+		ToolCallID:       m.ToolCallID,
+	}
+	content := m.Content
+	if len(m.ContentParts) > 0 {
+		content = contentPartsText(m.ContentParts)
+	}
+	// A full message always carries content (null-free string, as before);
+	// a delta carries it only when there is new text, like OpenAI.
+	if !delta || content != "" {
+		w.Content = &content
+	}
+	return w
 }
 
 func (m Message) Text() string {
@@ -284,12 +364,14 @@ func contentPartsText(parts []ContentPart) string {
 
 // ChatResponse is the OpenAI-compatible chat completion response format.
 type ChatResponse struct {
-	ID      string   `json:"id"`
-	Object  string   `json:"object"`
-	Created int64    `json:"created"`
-	Model   string   `json:"model"`
-	Choices []Choice `json:"choices"`
-	Usage   Usage    `json:"usage"`
+	ID                string   `json:"id"`
+	Object            string   `json:"object"`
+	Created           int64    `json:"created"`
+	Model             string   `json:"model"`
+	SystemFingerprint string   `json:"system_fingerprint,omitempty"`
+	ServiceTier       string   `json:"service_tier,omitempty"`
+	Choices           []Choice `json:"choices"`
+	Usage             Usage    `json:"usage"`
 }
 
 // Choice represents a single completion choice.
@@ -297,13 +379,52 @@ type Choice struct {
 	Index        int     `json:"index"`
 	Message      Message `json:"message"`
 	FinishReason string  `json:"finish_reason"`
+	// Logprobs is passed through verbatim from upstreams that return it.
+	Logprobs json.RawMessage `json:"logprobs,omitempty"`
+}
+
+// MarshalJSON writes the message in response form, so reasoning_content
+// reaches clients.
+func (c Choice) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Index        int                 `json:"index"`
+		Message      responseMessageWire `json:"message"`
+		Logprobs     json.RawMessage     `json:"logprobs,omitempty"`
+		FinishReason string              `json:"finish_reason"`
+	}{c.Index, c.Message.responseWire(false), nonNullRaw(c.Logprobs), c.FinishReason})
 }
 
 // Usage tracks token consumption for a single request.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int                      `json:"prompt_tokens"`
+	CompletionTokens        int                      `json:"completion_tokens"`
+	TotalTokens             int                      `json:"total_tokens"`
+	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+	// SearchUnits is set by search-unit-billed endpoints (Cohere rerank).
+	SearchUnits int `json:"search_units,omitempty"`
+}
+
+// PromptTokensDetails breaks down prompt tokens (OpenAI usage format).
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+	AudioTokens  int `json:"audio_tokens,omitempty"`
+}
+
+// CompletionTokensDetails breaks down completion tokens. ReasoningTokens
+// are already included in CompletionTokens.
+type CompletionTokensDetails struct {
+	ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+	AudioTokens              int `json:"audio_tokens,omitempty"`
+	AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
+	RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
+}
+
+func nonNullRaw(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	return raw
 }
 
 // ModelInfo describes a model exposed through the gateway.
@@ -374,6 +495,22 @@ type ImageRequest struct {
 type ImageResponse struct {
 	Created int64       `json:"created"`
 	Data    []ImageData `json:"data"`
+	// Usage is returned by token-billed image models (gpt-image-1).
+	Usage *ImageUsage `json:"usage,omitempty"`
+}
+
+// ImageUsage is the token usage reported by gpt-image-* models.
+type ImageUsage struct {
+	InputTokens        int                      `json:"input_tokens"`
+	OutputTokens       int                      `json:"output_tokens"`
+	TotalTokens        int                      `json:"total_tokens"`
+	InputTokensDetails *ImageInputTokensDetails `json:"input_tokens_details,omitempty"`
+}
+
+// ImageInputTokensDetails splits image-model input tokens by modality.
+type ImageInputTokensDetails struct {
+	TextTokens  int `json:"text_tokens"`
+	ImageTokens int `json:"image_tokens"`
 }
 
 type ImageData struct {
@@ -424,6 +561,8 @@ type RerankRequest struct {
 	TopN            *int   `json:"top_n,omitempty"`
 	ReturnDocuments bool   `json:"return_documents,omitempty"`
 	MaxChunksPerDoc *int   `json:"max_chunks_per_doc,omitempty"`
+	// MaxTokensPerDoc is Cohere v2's per-document truncation limit.
+	MaxTokensPerDoc *int   `json:"max_tokens_per_doc,omitempty"`
 	User            string `json:"user,omitempty"`
 }
 
@@ -446,18 +585,53 @@ type RerankProvider interface {
 }
 
 type ChatResponseChunk struct {
-	ID      string        `json:"id"`
-	Object  string        `json:"object"`
-	Created int64         `json:"created"`
-	Model   string        `json:"model"`
-	Choices []ChunkChoice `json:"choices"`
-	Usage   *Usage        `json:"usage,omitempty"`
+	ID                string        `json:"id"`
+	Object            string        `json:"object"`
+	Created           int64         `json:"created"`
+	Model             string        `json:"model"`
+	SystemFingerprint string        `json:"system_fingerprint,omitempty"`
+	ServiceTier       string        `json:"service_tier,omitempty"`
+	Choices           []ChunkChoice `json:"choices"`
+	Usage             *Usage        `json:"usage,omitempty"`
+
+	// Err reports that the stream ended abnormally: a transport or read
+	// error, an idle or route timeout, an oversized event, or an error
+	// event sent by the upstream. Producers set it only on the last chunk
+	// before they close the channel, and that chunk carries no choices.
+	// Consumers must treat the response as failed (no caching, no success
+	// log) and tell the client. Err is never serialized.
+	Err error `json:"-"`
+}
+
+// MarshalJSON writes an empty choices array (never null) on usage-only
+// chunks, matching OpenAI's final stream_options.include_usage chunk.
+func (c ChatResponseChunk) MarshalJSON() ([]byte, error) {
+	type wire ChatResponseChunk
+	w := wire(c)
+	if w.Choices == nil {
+		w.Choices = []ChunkChoice{}
+	}
+	return json.Marshal(w)
 }
 
 type ChunkChoice struct {
 	Index        int     `json:"index"`
 	Delta        Message `json:"delta"`
 	FinishReason string  `json:"finish_reason,omitempty"`
+	// Logprobs is passed through verbatim from upstreams that return it.
+	Logprobs json.RawMessage `json:"logprobs,omitempty"`
+}
+
+// MarshalJSON writes the delta like OpenAI does: role only when present
+// (normally the first chunk) and content only when it carries new text, so
+// tool-call and finish deltas do not contain "role":"" or "content":"".
+func (c ChunkChoice) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Index        int                 `json:"index"`
+		Delta        responseMessageWire `json:"delta"`
+		Logprobs     json.RawMessage     `json:"logprobs,omitempty"`
+		FinishReason string              `json:"finish_reason,omitempty"`
+	}{c.Index, c.Delta.responseWire(true), nonNullRaw(c.Logprobs), c.FinishReason})
 }
 
 // UnsupportedParameterError signals that an adapter received a request field

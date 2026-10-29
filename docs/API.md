@@ -39,6 +39,12 @@ behave differently than requested:
 ```
 
 This applies to both the non-streaming and streaming (`stream: true`) paths.
+
+A request can set both `temperature` and `top_p`. When it sets both, the
+`anthropic` adapter and the `bedrock` adapter for Claude models send only
+`temperature`, because those models reject the pair. See
+[Claude sampling parameters](CONFIGURATION.md#claude-sampling-parameters).
+
 Requests to OpenAI-compatible upstreams (`openai`, `azure`, `groq`, `custom`,
 and any preset built on `custom`) never hit this path: every field above,
 plus any field OmniSwitch does not model by name, is forwarded verbatim.
@@ -53,7 +59,9 @@ Headers:
 
 - `Authorization: Bearer <omniswitch-api-key>` when `OMNISWITCH_AUTH=true`
 - `x-omniswitch-provider`: force a provider or provider alias
-- `x-omniswitch-config`: use a dynamic gateway config by name or ID
+- `x-omniswitch-config`: use a dynamic gateway config by name or ID (create
+  one with [`POST /api/configs`](#post-apiconfigs)); an unknown or disabled
+  config returns `400`
 - `x-omniswitch-shadow-provider`: run a secondary provider asynchronously
 - `x-omniswitch-trace-id`: group calls into a trace
 - `x-omniswitch-session-id`: group calls into an agent session
@@ -64,18 +72,52 @@ be enforced.
 
 ### `POST /v1/responses`
 
-Implements the practical text/messages subset of the OpenAI Responses API:
-`model`, a string or message-array `input`, `instructions`, `temperature`,
-`max_output_tokens`, and `top_p`. It uses the same routing, cache, budget,
-guardrail, and logging path as chat completions. Responses streaming, tools,
-background mode, and other advanced Responses features are not yet supported.
+Implements a subset of the OpenAI Responses API. It uses the same routing,
+cache, budget, guardrail, and logging path as chat completions.
+
+Supported request fields:
+
+- `model`, `instructions`, `temperature`, `max_output_tokens`, `top_p`.
+- `input` as a string or as an array of `message` items. A message's content
+  is a string or an array of `input_text`, `output_text`, `text`,
+  `input_image` and `image_url` parts.
+- `tools` with named `function` tools, and `tool_choice` (`auto`, `none`,
+  `required`, or a named function).
+- `stream`.
+
+The endpoint returns HTTP 400 for:
+
+- built-in tools (for example `web_search` or `file_search`) and function
+  tools without a name;
+- other input item types, including `function_call_output`;
+- other content part types, such as audio and file parts.
+
+A client cannot send tool results back through this endpoint. Use
+[`POST /v1/chat/completions`](#post-v1chatcompletions) for multi-turn tool use.
+
+The endpoint ignores `previous_response_id`, `store`, `background`,
+`text.format`, `reasoning`, and other fields that are not in the list above.
+
+A response puts the assistant text in a `message` output item and each tool
+call in a `function_call` output item. With `stream: true`, the endpoint
+sends these SSE events: `response.created`, `response.output_text.delta`,
+`response.output_item.added`, `response.function_call_arguments.delta`,
+`response.function_call_arguments.done`, `response.output_item.done`, and
+`response.completed`, then `[DONE]`. An error after the stream starts sends
+`response.failed`.
 
 ### `POST /v1/messages`
 
 Accepts the core Anthropic Messages shape (`model`, `messages`, `system`,
-`max_tokens`, `temperature`, `top_p`) and returns an Anthropic-style message
-result through the common OmniSwitch path. Streaming and Anthropic tool use are
-not yet supported.
+`max_tokens`, `temperature`, `top_p`, `stream`) and returns an
+Anthropic-style message result through the common OmniSwitch path.
+
+The endpoint does not accept or forward client `tools`, so the routed model
+normally returns text only. The non-streaming response has one `text`
+content block. With `stream: true`, the endpoint sends Anthropic SSE events.
+If the upstream returns tool calls, the stream sends them as `tool_use`
+content blocks with `input_json_delta` deltas and ends with `stop_reason:
+tool_use`.
 
 ### `POST /v1/embeddings`
 
@@ -112,24 +154,74 @@ A2A clients with `Cache-Control` and `ETag` validators.
 
 ### `POST /a2a`
 
-Accepts A2A v1 JSON-RPC requests. `SendMessage` supports direct text message
-responses by converting message text into the same chat-completions path used
-by OpenAI-compatible clients. Provide the model with `metadata.model` or the
-`x-omniswitch-model` header.
+Accepts A2A v1 JSON-RPC requests. A message's text parts go through the same
+chat-completions path that OpenAI-compatible clients use. Provide the model
+with `metadata.model` or the `x-omniswitch-model` header.
 
 Supported A2A methods:
 
-- `SendMessage`
+- `SendMessage` (alias `message/send`): runs the inference and returns the
+  completed task, with the reply as an artifact.
+- `SendMessageStream` (alias `message/stream`): returns SSE frames, each
+  `data: <JSON-RPC response>`. The first frame is a `status-update` with the
+  `working` state. After the inference completes, the stream sends an
+  `artifact-update` with the whole reply and a final `status-update`. The
+  stream does not send tokens incrementally.
+- `GetTask` (alias `tasks/get`): returns a task.
+- `CancelTask` (alias `tasks/cancel`): cancels a working task and stops its
+  inference. A finished task returns error `-32002`.
 - `GetExtendedAgentCard`
 
-Task lifecycle methods, streaming, push notifications, and outbound A2A client
-calls are not yet implemented.
+Each task belongs to the API key and workspace that created it. A task that
+is unknown, expired or owned by another caller returns error `-32001` (task
+not found). A request with an invalid JSON-RPC envelope, duplicate members or
+members that differ only in case returns `-32600`.
+
+The gateway keeps tasks in memory for 1 hour, at most 10,000 in total and at
+most 1,000 for each owner. When an owner reaches its limit, the gateway
+removes that owner's oldest task, finished tasks first. When the total limit
+is reached, the owner with the most tasks loses one. A removed working task
+is canceled. Tasks are not shared between replicas and do not survive a
+restart.
+
+When authorization rules are configured, the gateway reads at most 1 MiB of
+a `POST /a2a` or `POST /v1/*` body to evaluate them. A larger body gets HTTP
+403 `invalid request body for authorization policy`.
+
+Push notifications and outbound A2A client calls are not implemented.
+
+## Health Checks
+
+`/healthz` and `/readyz` are served ahead of the authentication, authorization
+and rate-limit middleware, so orchestrators can probe them without a key.
+Both accept `GET` and `HEAD`.
+
+### `GET /healthz`
+
+Liveness. Returns `200 {"status":"ok"}` whenever the process is serving HTTP;
+it never touches the store or providers.
+
+### `GET /readyz`
+
+Readiness. Returns `200 {"status":"ready"}` when the store answers a ping and
+at least one provider is registered (or `OMNISWITCH_ALLOW_NO_PROVIDERS=true`).
+Otherwise returns `503 {"status":"not ready","reasons":[...]}`.
 
 ## Management API
 
 ### `GET /api/health`
 
 Returns health information.
+
+### `GET /api/version`
+
+Returns the build metadata of the running binary:
+
+```json
+{"version": "0.2.0-beta", "commit": "abc1234", "built": "2026-01-01T00:00:00Z"}
+```
+
+Builds without release metadata report `dev`, `none` and `unknown`.
 
 ### `GET /api/logs`
 
@@ -146,6 +238,10 @@ Raw `request_body` and `response_body` are present only when
 `log_payloads: true` is explicitly enabled; metadata, usage, cache, and status
 remain available by default.
 
+Each log row has `workspace_id` and `organization_id` when the caller that
+sent the request had a tenant. The results contain only rows of the caller's
+[tenant](#tenant-scope).
+
 ### `GET /api/metrics`
 
 Returns gateway metrics.
@@ -154,15 +250,20 @@ Query parameters:
 
 - `window`: `1h`, `6h`, `7d`, or `30d`
 
+The metrics count only requests of the caller's [tenant](#tenant-scope).
+
 ### `GET /api/metrics/providers`
 
-Returns per-provider aggregate metrics.
+Returns per-provider aggregate metrics for the caller's tenant.
 
 ### `GET /metrics`
 
 Returns Prometheus text-format gateway metrics for the last 24 hours when
 `prometheus_enabled` is true. With gateway authentication enabled, a viewer,
-member, admin, or owner key is required.
+member, admin, or owner key is required. These metrics cover all tenants, so
+a [scoped caller](#tenant-scope) gets `403`. With
+`OMNISWITCH_METRICS_PUBLIC=true`, the endpoint needs no key and any caller
+can read it.
 
 ### `GET /api/providers`
 
@@ -176,6 +277,100 @@ authorization rule names/effects, guardrail rule/webhook names, provider counts,
 route summaries, MCP target posture, and A2A capability flags. It does not
 return bootstrap keys, provider credentials, target headers, webhook URLs,
 provider base URLs, Redis URLs, or policy expressions.
+
+### `GET /api/analytics/cost`
+
+Aggregated spend from the request logs. Query parameters:
+
+- `window`: `1h`, `6h`, `24h` (default), `7d`, or `30d`
+- `groupBy`: `day` (default), `provider`, `model`, `api_key_id`, `session_id`,
+  or `status`; any other value returns `400`
+
+```json
+{"groupBy": "model", "rows": [{"group": "gpt-4o-mini", "request_count": 12, "total_cost": 0.0042, "total_tokens": 9150, "avg_latency_ms": 640.5}]}
+```
+
+The rows cover only the caller's [tenant](#tenant-scope). Admins and owners
+see all keys of the tenant; other roles see only their own key's rows.
+
+### `GET /api/traces/{trace_id}`
+
+Returns everything recorded for one `x-omniswitch-trace-id`:
+`{"trace_id", "logs", "guardrail_events", "shadow_logs", "feedback"}`.
+Returns `404` when the trace does not exist or is not visible to the caller:
+the trace is outside the caller's [tenant](#tenant-scope), or, for non-admin
+roles, it has no request from the caller's own key.
+
+### `GET /api/configs`
+
+Lists stored dynamic gateway configs as `{"configs": [...]}`. Disabled configs
+are included only with `include_disabled=true`. With `id=<id>` or
+`name=<name>`, returns a single enabled config (`404` if it is missing or
+disabled). Requires the `admin` role, because config bodies can contain
+secrets.
+
+Stored configs apply to all tenants. All `/api/configs` methods return `403`
+to a [scoped caller](#tenant-scope).
+
+### `POST /api/configs`
+
+Creates or replaces a dynamic config that requests can select with the
+`x-omniswitch-config` header. Requires `admin`.
+
+```json
+{
+  "id": "cfg_optional",
+  "name": "cheap-routing",
+  "description": "optional",
+  "format": "yaml",
+  "body": "routes:\n  gpt-4o:\n    provider: groq\n    model: llama-3.3-70b-versatile\n",
+  "enabled": true
+}
+```
+
+`name` and `body` are required. `body` uses the same schema as the gateway
+config file (see [CONFIGURATION.md](CONFIGURATION.md)); `format` is `yaml`
+(default) or `json`. The body is parsed before it is stored, and a parse
+error returns `400`. An omitted `id` is generated; posting an existing `id`
+replaces that record. Returns `201` with the stored record.
+
+A create, update or delete takes effect at once on the replica that handles
+it. Other replicas cache stored configs for up to 5 seconds. See
+[Stored configs](CONFIGURATION.md#stored-configs).
+
+### `PATCH /api/configs?id=<id>` (or `?name=<name>`)
+
+Body `{"enabled": true|false}` enables or disables a config. Requires `admin`.
+
+### `DELETE /api/configs?id=<id>` (or `?name=<name>`)
+
+Deletes a config and returns `{"deleted": true}`. Requires `admin`.
+
+### `GET /api/config/raw` and `POST /api/config/raw`
+
+Reads or replaces the gateway config file named by `OMNISWITCH_CONFIG`
+(`404` when no config file is configured). `GET` returns
+`{"path", "format", "body"}`. `POST` takes `{"body": "...", "format": "yaml"}`,
+validates it, writes the file, and returns `{"saved": true, "path": ...}`.
+Both methods require `admin` and return `403` to a
+[scoped caller](#tenant-scope).
+
+The gateway checks the file every 2 seconds and applies these settings
+without a restart:
+
+- `routes` (requests that use a stored config get the new routes too);
+- guardrails, including `guardrails.stream_buffer`;
+- `cache_threshold`, `cache_ttl` and `cache_scope`;
+- `log_payloads` and `max_request_bytes`;
+- `shadow_provider`;
+- `alerts`;
+- `budget_fail_open` and `budget_refresh_interval`;
+- `circuit_breaker_failures` and `circuit_breaker_cooldown`. A change installs
+  a new breaker with all circuits closed, for client traffic and for shadow
+  traffic. A reload without a change keeps open circuits open.
+
+The gateway logs and skips a file that is not valid. Providers, identity,
+rate-limit backends and MCP targets need a restart.
 
 ### `POST /api/virtual-keys`
 
@@ -196,6 +391,9 @@ Stores an encrypted provider credential and exposes it as a virtual provider on 
 ```
 
 The response redacts `provider_key`. Use `OMNISWITCH_VAULT_KEY` to keep stored credentials decryptable across restarts.
+
+Virtual keys configure providers for the whole gateway. All virtual-key
+routes return `403` to a [scoped caller](#tenant-scope).
 
 ### `GET /api/virtual-keys`
 
@@ -218,7 +416,7 @@ Revokes a virtual key without deleting its audit history.
 
 ### `GET /api/feedback`
 
-Lists feedback entries.
+Lists feedback entries of the caller's [tenant](#tenant-scope).
 
 Query parameters:
 
@@ -245,6 +443,11 @@ Records human feedback.
 
 `score` must be `-1`, `0`, or `1`.
 
+The entry records the caller's tenant. A [scoped caller](#tenant-scope) can
+name only a `request_id` or `trace_id` of its own tenant. Otherwise the
+gateway returns `404` `request not found` or `trace not found`. A global
+caller can name any request or trace, including one that is not logged yet.
+
 ### `POST /api/keys`
 
 Creates a OmniSwitch API key.
@@ -255,18 +458,56 @@ Creates a OmniSwitch API key.
   "workspace_id": "ws_123",
   "role": "admin",
   "rate_limit": 120,
+  "budget_usd": 500,
   "monthly_cost_budget": 50,
-  "monthly_token_budget": 1000000
+  "monthly_token_budget": 1000000,
+  "expires_in": "720h"
 }
 ```
 
+All limits are optional; zero or a missing field means no limit.
+
+- `budget_usd` is a lifetime cap. It is compared with the key's total spend
+  and never resets.
+- `monthly_cost_budget` (USD) and `monthly_token_budget` are compared with
+  the key's usage since the start of the current UTC month, so they reset
+  every month. Usage counts every request that incurred upstream cost,
+  including a response that a guardrail denied after generation. Cache hits
+  do not count.
+- `expires_in` is a Go duration such as `720h`. Day units such as `30d` are
+  rejected.
+
+A request over a budget gets HTTP 402 `budget_exceeded` with a message that
+names the budget. When the gateway cannot read the key's budget state, the
+request gets HTTP 503 `budget_unavailable`, unless `budget_fail_open` is
+`true`:
+
+```json
+{"error": {"message": "budget state is temporarily unavailable; request rejected", "type": "budget_unavailable", "code": "budget_unavailable"}}
+```
+
+See [Key Budgets](CONFIGURATION.md#key-budgets) for how the gateway
+estimates and enforces budgets.
+
+A caller cannot create a key with a role above its own (`403`). A key
+without `workspace_id` is global. For a [scoped caller](#tenant-scope):
+
+- A workspace-scoped caller creates keys in its own workspace. An omitted
+  `workspace_id` uses that workspace. Another workspace returns `403`.
+- An organization-scoped caller must set `workspace_id` (`400` when it is
+  missing). A workspace outside its organization returns `404`.
+
 ### `GET /api/keys`
 
-Lists API keys.
+Lists API keys as `{"keys": [...]}`. A workspace-scoped caller sees the keys
+of its workspace. An organization-scoped caller sees the keys of all
+workspaces of its organization.
 
 ### `DELETE /api/keys?id=<key_id>`
 
-Disables an API key.
+Disables an API key and returns `{"status": "deleted"}`. A key that does not
+exist or that the caller cannot see returns `404`. A scoped caller cannot see
+global keys. A key with a role above the caller's role returns `403`.
 
 ### `POST /api/orgs`
 
@@ -281,9 +522,13 @@ Creates an organization.
 }
 ```
 
+Only global callers can create organizations. A
+[scoped caller](#tenant-scope) gets `403`.
+
 ### `GET /api/orgs`
 
-Lists organizations.
+Lists organizations as `{"organizations": [...]}`. A scoped caller sees only
+its own organization, or the organization that owns its workspace.
 
 ### `POST /api/workspaces`
 
@@ -296,24 +541,48 @@ Creates a workspace inside an organization.
 }
 ```
 
+A workspace-scoped caller gets `403`. For an organization-scoped caller,
+`organization_id` defaults to its own organization, and another organization
+returns `404`.
+
 ### `GET /api/workspaces`
 
-Lists workspaces. Use `organization_id` to filter.
+Lists workspaces of the caller's [tenant](#tenant-scope). Use
+`organization_id` to filter. A filter outside the tenant returns an empty
+list.
 
 ### `POST /api/users`
 
-Creates or updates a user.
+Creates or updates a user. `workspace_id` and `role` are optional. When
+`workspace_id` is set, the gateway also adds the user to that workspace with
+`role` (default `viewer`).
 
 ```json
 {
   "email": "ada@example.com",
-  "name": "Ada Lovelace"
+  "name": "Ada Lovelace",
+  "workspace_id": "ws_123",
+  "role": "member"
 }
 ```
 
+A [scoped caller](#tenant-scope) always creates a user together with a
+membership in one of its workspaces:
+
+- A workspace-scoped caller uses its own workspace when `workspace_id` is
+  omitted.
+- An organization-scoped caller must set `workspace_id` (`400` when it is
+  missing).
+- A workspace the caller cannot see returns `404`.
+- A role above the caller's role returns `403`. An existing member with a
+  role above the caller's role also returns `403`.
+- When the email exists, the gateway adds that user to the workspace and does
+  not change the user's name or metadata.
+
 ### `GET /api/users`
 
-Lists users.
+Lists users. A scoped caller sees only users that are members of a workspace
+of its tenant.
 
 ### `POST /api/workspace-members`
 
@@ -327,25 +596,44 @@ Creates or updates a workspace membership.
 }
 ```
 
+`role` defaults to `viewer`. For a [scoped caller](#tenant-scope), a
+workspace that the caller cannot see returns `404`, an unknown user returns
+`404`, and a role above the caller's role returns `403`. A member who has a
+role above the caller's role also returns `403`.
+
 ### `GET /api/workspace-members`
 
-Lists workspace memberships. Use `workspace_id` to filter.
+Lists workspace memberships of the caller's tenant. Use `workspace_id` to
+filter.
 
 ### `POST /api/prompts`
 
-Creates a prompt template. Reusing an existing `name` creates the next version.
+Creates a prompt template in the workspace given by the body's
+`workspace_id`. Reusing an existing `name` in the same workspace creates the
+next version.
+
+Prompts belong to a workspace. A global caller uses the global namespace by
+default and can set any `workspace_id`. A workspace-scoped caller always uses
+its own workspace, and another `workspace_id` returns `404`. An
+organization-scoped caller must set `workspace_id` (`400` when it is
+missing), and a workspace outside its organization returns `404`. Responses
+omit `workspace_id` for the global namespace.
 
 ### `GET /api/prompts`
 
-Lists prompt templates.
+Lists the prompt templates of one workspace. Use `?workspace_id=` to select
+it.
 
 ### `GET /api/prompts/versions?name=<prompt_name>`
 
-Lists all versions for a prompt name, newest version first.
+Lists all versions for a prompt name in one workspace, newest version first.
+Use `&workspace_id=` to select the workspace.
 
 ### `POST /api/prompts/render`
 
-Renders a prompt template with variables.
+Renders a prompt template with variables. A global caller without
+`workspace_id` can render any prompt by ID. Otherwise, a prompt outside the
+selected workspace returns `404`.
 
 ### `POST /api/evals/policy`
 
@@ -393,16 +681,76 @@ Alias for the MCP tool-call gateway.
 The MCP gateway supports JSON-RPC over HTTP, including streaming
 `text/event-stream` responses from streamable HTTP/SSE-capable upstreams.
 Targets can opt into OIDC bearer-token delegation with
-`forward_bearer_token: true`; local OmniSwitch API keys are never forwarded.
-It supports persistent stdio targets as well as HTTP and streamable HTTP. It
-does not yet implement OpenAPI conversion. A2A is exposed separately through
+`forward_bearer_token: true`, or exchange the OIDC caller's token for a
+target token with `token_exchange` (RFC 8693). Local OmniSwitch API keys are
+never forwarded or exchanged. A call that exceeds the target `timeout` (default
+2 minutes, measured to the upstream response headers) gets HTTP 502 with a
+JSON-RPC `-32603` error.
+It supports persistent stdio targets, HTTP and streamable HTTP, and targets
+that set `openapi_spec` (see "OpenAPI-to-MCP conversion" in
+[`CONFIGURATION.md`](CONFIGURATION.md)). A2A is exposed separately through
 the `/.well-known/agent-card.json` and `/a2a` endpoints.
 
 ## Roles and Scopes
 
 When `OMNISWITCH_AUTH=true`, API-key roles are `viewer`, `member`, `admin`, and
-`owner`. All valid keys can call inference and MCP. Viewers can read dashboard
-data (scoped to their own key); members can change prompts and run policy evals;
-admins/owners can mutate keys, virtual keys, and organization/workspace data.
-Admins and owners see global dashboard aggregates, while other roles are
-limited to their key's logs and metrics.
+`owner` (`editor` is an alias for `member`). All valid keys can call inference
+(`/v1/*`) and MCP (`/mcp`). For `/api/*` routes the gateway requires:
+
+| Route | Read (`GET`, `HEAD`, `OPTIONS`) | Write (any other method) |
+|---|---|---|
+| `/api/health` | none | none |
+| `/api/keys`, `/api/virtual-keys`, `/api/virtual-keys/rotate`, `/api/users`, `/api/workspace-members`, `/api/configs`, `/api/config/raw` | `admin` | `admin` |
+| `/api/orgs`, `/api/workspaces` | `viewer` | `admin` |
+| `/api/prompts`, `/api/prompts/versions`, `/api/prompts/render`, `/api/evals/policy` | `viewer` | `member` |
+| `/api/feedback` | `viewer` | `viewer` |
+| Any other `/api/*` route | `viewer` | `admin` |
+
+Key, user, membership, and config routes need `admin` even to read, because
+they expose credential metadata, user emails, or raw configuration that can
+contain secrets. In the dashboard reads (`/api/logs`, `/api/metrics`,
+`/api/metrics/providers`, `/api/analytics/cost` and `/api/traces/{trace_id}`),
+admins and owners see all keys of their tenant. Other roles see only the
+requests of their own key. [Tenant scope](#tenant-scope) sets the tenant.
+
+## Tenant scope
+
+Each caller has a tenant scope:
+
+- A **global** caller has no workspace and no organization. All callers are
+  global when authentication is off. A key without `workspace_id` is global.
+- A **workspace-scoped** caller has a workspace: an API key with
+  `workspace_id`, or an OIDC identity with a `workspace_claim`. An API key
+  also carries the organization that owns its workspace.
+- An **organization-scoped** caller has an organization and no workspace (an
+  OIDC identity with an `organization_claim`).
+
+Role checks apply to all callers. In addition, a scoped caller sees and
+changes only the records of its tenant: a workspace-scoped caller sees its
+workspace, and an organization-scoped caller sees all workspaces of its
+organization. A scoped caller never sees records that have no tenant.
+Request logs and feedback record the tenant of the caller that created
+them. Rows written before this release have no tenant, so only global
+callers see them.
+
+A record outside the caller's tenant returns `404`, the same as a missing
+record. Gateway-wide resources return `403` to scoped callers:
+
+| Route | Scoped callers |
+|---|---|
+| `/api/configs`, `/api/config/raw` | `403` |
+| `/api/virtual-keys`, `/api/virtual-keys/rotate` | `403` |
+| `/metrics` | `403`, unless `OMNISWITCH_METRICS_PUBLIC=true` |
+| `POST /api/orgs` | `403` |
+| `POST /api/workspaces` | `403` for workspace-scoped callers |
+
+`POST /api/evals/policy` replays policy files and reads no tenant records,
+so it is not tenant-scoped.
+
+## Request body limits
+
+`/api/*` request bodies are limited to 1 MiB. `/api/configs` and
+`/api/config/raw` accept up to 8 MiB. A larger body gets HTTP 413
+`request body too large`. The gateway rejects a body with a larger
+`Content-Length` before it reads it. `gateway.max_request_bytes` limits
+inference request bodies (see [docs/CONFIGURATION.md](CONFIGURATION.md)).

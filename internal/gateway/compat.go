@@ -13,14 +13,16 @@ import (
 )
 
 // Responses provides a pragmatic OpenAI Responses compatibility layer. It
-// translates the text/message subset to OmniSwitch's common chat pipeline, so
-// budgets, guardrails, cache isolation, logging, and routing are identical.
+// translates the text/message subset (plus function tools and image inputs)
+// to OmniSwitch's common chat pipeline, so budgets, guardrails, cache
+// isolation, logging, and routing are identical.
 func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, h.maxRequestBytes)
+	r, cfg := h.withSettings(r)
+	r.Body = http.MaxBytesReader(w, r.Body, cfg.maxRequestBytes)
 	var request responsesRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -32,7 +34,6 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if request.Stream {
-		chatRequest.Stream = true
 		h.streamResponsesCompat(w, r, chatRequest)
 		return
 	}
@@ -43,28 +44,46 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(body)
 		return
 	}
-	content := ""
+	writeJSON(w, http.StatusOK, responsesFromChat(chat))
+}
+
+func responsesFromChat(chat provider.ChatResponse) map[string]any {
+	output := []any{}
 	if len(chat.Choices) > 0 {
-		content = chat.Choices[0].Message.Content
+		message := chat.Choices[0].Message
+		if message.Content != "" || len(message.ToolCalls) == 0 {
+			output = append(output, map[string]any{
+				"id":      "msg_" + chat.ID,
+				"type":    "message",
+				"role":    "assistant",
+				"status":  "completed",
+				"content": []any{map[string]any{"type": "output_text", "text": message.Content, "annotations": []any{}}},
+			})
+		}
+		for _, call := range message.ToolCalls {
+			output = append(output, map[string]any{
+				"id":        "fc_" + call.ID,
+				"type":      "function_call",
+				"status":    "completed",
+				"call_id":   call.ID,
+				"name":      call.Function.Name,
+				"arguments": call.Function.Arguments,
+			})
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"id":         strings.Replace(chat.ID, "chat_", "resp_", 1),
 		"object":     "response",
 		"created_at": chat.Created,
 		"status":     "completed",
 		"model":      chat.Model,
-		"output": []any{map[string]any{
-			"id":      "msg_" + chat.ID,
-			"type":    "message",
-			"role":    "assistant",
-			"content": []any{map[string]string{"type": "output_text", "text": content}},
-		}},
+		"output":     output,
 		"usage": map[string]int{
 			"input_tokens":  chat.Usage.PromptTokens,
 			"output_tokens": chat.Usage.CompletionTokens,
 			"total_tokens":  chat.Usage.TotalTokens,
 		},
-	})
+	}
 }
 
 // Messages accepts the core Anthropic Messages shape and returns its response
@@ -74,7 +93,8 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, h.maxRequestBytes)
+	r, cfg := h.withSettings(r)
+	r.Body = http.MaxBytesReader(w, r.Body, cfg.maxRequestBytes)
 	var request anthropicMessagesRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -89,7 +109,6 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if request.Stream {
-		chatRequest.Stream = true
 		h.streamMessagesCompat(w, r, chatRequest)
 		return
 	}
@@ -104,9 +123,7 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 	stopReason := "end_turn"
 	if len(chat.Choices) > 0 {
 		content = chat.Choices[0].Message.Content
-		if chat.Choices[0].FinishReason != "" {
-			stopReason = chat.Choices[0].FinishReason
-		}
+		stopReason = mapOpenAIStopReason(chat.Choices[0].FinishReason)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":          chat.ID,
@@ -130,6 +147,17 @@ type responsesRequest struct {
 	MaxOutputTokens *int            `json:"max_output_tokens,omitempty"`
 	TopP            *float64        `json:"top_p,omitempty"`
 	Stream          bool            `json:"stream,omitempty"`
+	Tools           []responsesTool `json:"tools,omitempty"`
+	ToolChoice      json.RawMessage `json:"tool_choice,omitempty"`
+}
+
+// responsesTool is a Responses API tool definition. Only function tools can
+// be expressed as chat-completions tools.
+type responsesTool struct {
+	Type        string `json:"type"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Parameters  any    `json:"parameters,omitempty"`
 }
 
 func (r responsesRequest) toChatRequest() (provider.ChatRequest, error) {
@@ -146,7 +174,55 @@ func (r responsesRequest) toChatRequest() (provider.ChatRequest, error) {
 	if len(messages) == 0 {
 		return provider.ChatRequest{}, fmt.Errorf("input is required")
 	}
-	return provider.ChatRequest{Model: r.Model, Messages: messages, Temperature: r.Temperature, MaxTokens: r.MaxOutputTokens, TopP: r.TopP}, nil
+	request := provider.ChatRequest{Model: r.Model, Messages: messages, Temperature: r.Temperature, MaxTokens: r.MaxOutputTokens, TopP: r.TopP}
+	for _, tool := range r.Tools {
+		if tool.Type != "function" || strings.TrimSpace(tool.Name) == "" {
+			return provider.ChatRequest{}, fmt.Errorf("unsupported tool %q of type %q: only named function tools are supported", tool.Name, tool.Type)
+		}
+		request.Tools = append(request.Tools, provider.Tool{
+			Type:     "function",
+			Function: provider.ToolFunction{Name: tool.Name, Description: tool.Description, Parameters: tool.Parameters},
+		})
+	}
+	if choice, err := responsesToolChoice(r.ToolChoice); err != nil {
+		return provider.ChatRequest{}, err
+	} else if choice != nil {
+		request.ToolChoice = choice
+	}
+	return request, nil
+}
+
+func responsesToolChoice(raw json.RawMessage) (any, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var mode string
+	if err := json.Unmarshal(raw, &mode); err == nil {
+		return mode, nil
+	}
+	var named struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &named); err != nil || named.Type != "function" || named.Name == "" {
+		return nil, fmt.Errorf("unsupported tool_choice: only auto, none, required, or a named function are supported")
+	}
+	return map[string]any{"type": "function", "function": map[string]string{"name": named.Name}}, nil
+}
+
+// responsesInputItem is one item of a Responses API input array.
+type responsesInputItem struct {
+	Type    string          `json:"type"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
+// responsesContentPart is one typed content item of a Responses message.
+type responsesContentPart struct {
+	Type     string          `json:"type"`
+	Text     string          `json:"text"`
+	ImageURL json.RawMessage `json:"image_url"`
+	Detail   string          `json:"detail"`
 }
 
 func responseInputMessages(raw json.RawMessage) ([]provider.Message, error) {
@@ -154,11 +230,73 @@ func responseInputMessages(raw json.RawMessage) ([]provider.Message, error) {
 	if err := json.Unmarshal(raw, &text); err == nil {
 		return []provider.Message{{Role: "user", Content: text}}, nil
 	}
-	var messages []provider.Message
-	if err := json.Unmarshal(raw, &messages); err == nil && len(messages) > 0 {
-		return messages, nil
+	var items []responsesInputItem
+	if err := json.Unmarshal(raw, &items); err != nil || len(items) == 0 {
+		return nil, fmt.Errorf("input must be a string or message array")
 	}
-	return nil, fmt.Errorf("input must be a string or message array")
+	messages := make([]provider.Message, 0, len(items))
+	for _, item := range items {
+		if item.Type != "" && item.Type != "message" {
+			return nil, fmt.Errorf("unsupported input item type %q", item.Type)
+		}
+		message, err := responsesInputMessage(item)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	return messages, nil
+}
+
+func responsesInputMessage(item responsesInputItem) (provider.Message, error) {
+	message := provider.Message{Role: firstNonEmpty(item.Role, "user")}
+	if len(item.Content) == 0 || string(item.Content) == "null" {
+		return message, nil
+	}
+	var text string
+	if err := json.Unmarshal(item.Content, &text); err == nil {
+		message.Content = text
+		return message, nil
+	}
+	var parts []responsesContentPart
+	if err := json.Unmarshal(item.Content, &parts); err != nil {
+		return provider.Message{}, fmt.Errorf("input message content must be a string or content array")
+	}
+	texts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		switch part.Type {
+		case "input_text", "output_text", "text":
+			message.ContentParts = append(message.ContentParts, provider.ContentPart{Type: "text", Text: part.Text})
+			texts = append(texts, part.Text)
+		case "input_image", "image_url":
+			image, err := responsesImageURL(part)
+			if err != nil {
+				return provider.Message{}, err
+			}
+			message.ContentParts = append(message.ContentParts, provider.ContentPart{Type: "image_url", ImageURL: image})
+		default:
+			return provider.Message{}, fmt.Errorf("unsupported input content type %q", part.Type)
+		}
+	}
+	message.Content = strings.Join(texts, "\n")
+	return message, nil
+}
+
+// responsesImageURL accepts the Responses form ("image_url": "<url>") and the
+// chat-completions form ("image_url": {"url": "<url>"}).
+func responsesImageURL(part responsesContentPart) (*provider.ImageURL, error) {
+	var url string
+	if err := json.Unmarshal(part.ImageURL, &url); err == nil && url != "" {
+		return &provider.ImageURL{URL: url, Detail: part.Detail}, nil
+	}
+	var image provider.ImageURL
+	if err := json.Unmarshal(part.ImageURL, &image); err == nil && image.URL != "" {
+		if image.Detail == "" {
+			image.Detail = part.Detail
+		}
+		return &image, nil
+	}
+	return nil, fmt.Errorf("input_image requires an image_url")
 }
 
 type anthropicMessagesRequest struct {
@@ -204,6 +342,10 @@ func (h *Handler) streamMessagesCompat(w http.ResponseWriter, r *http.Request, r
 }
 
 func (h *Handler) executeCompatibleStream(w http.ResponseWriter, r *http.Request, request provider.ChatRequest, translator sseTranslator) {
+	request.Stream = true
+	// The translated formats report usage in their final events, so ask the
+	// chat pipeline to forward the usage chunk.
+	request.StreamOptions = &provider.StreamOptions{IncludeUsage: true}
 	body, err := json.Marshal(request)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -226,11 +368,14 @@ type sseEvent struct {
 	Done  bool
 }
 
+// transformResponseWriter translates the chat-completions SSE stream written
+// by ChatCompletions into another streaming format. Non-stream responses
+// (errors, guardrail denials) pass through unchanged.
 type transformResponseWriter struct {
 	target     http.ResponseWriter
 	translator sseTranslator
 	header     http.Header
-	buffer     string
+	buffer     bytes.Buffer
 	streaming  bool
 	wrote      bool
 }
@@ -241,47 +386,62 @@ func newTransformResponseWriter(target http.ResponseWriter, translator sseTransl
 
 func (w *transformResponseWriter) Header() http.Header { return w.header }
 
+// WriteHeader copies the headers to the target exactly once and commits the
+// status.
 func (w *transformResponseWriter) WriteHeader(status int) {
 	if w.wrote {
 		return
 	}
-	copyHeaders(w.target.Header(), w.header)
-	w.target.WriteHeader(status)
 	w.wrote = true
+	w.streaming = strings.Contains(strings.ToLower(w.header.Get("Content-Type")), "text/event-stream")
+	copyHeaders(w.target.Header(), w.header)
+	if w.streaming {
+		w.target.Header().Set("Content-Type", "text/event-stream")
+		w.target.Header().Del("Content-Length")
+	}
+	w.target.WriteHeader(status)
 }
 
 func (w *transformResponseWriter) Write(data []byte) (int, error) {
-	if !w.streaming {
-		if strings.Contains(strings.ToLower(w.header.Get("Content-Type")), "text/event-stream") {
-			w.streaming = true
-			copyHeaders(w.target.Header(), w.header)
-			w.target.Header().Set("Content-Type", "text/event-stream")
-			if !w.wrote {
-				w.target.WriteHeader(http.StatusOK)
-				w.wrote = true
-			}
-		} else {
-			if !w.wrote {
-				w.WriteHeader(http.StatusOK)
-			}
-			_, err := w.target.Write(data)
-			return len(data), err
-		}
+	if !w.wrote {
+		w.WriteHeader(http.StatusOK)
 	}
-	w.buffer += string(data)
-	for {
-		index := strings.Index(w.buffer, "\n\n")
-		if index < 0 {
-			break
-		}
-		event := w.buffer[:index]
-		w.buffer = w.buffer[index+2:]
-		w.writeTranslatedEvent(event)
+	if !w.streaming {
+		return w.target.Write(data)
+	}
+	w.buffer.Write(data)
+	if err := w.translateCompleteEvents(); err != nil {
+		return 0, err
 	}
 	return len(data), nil
 }
 
-func (w *transformResponseWriter) writeTranslatedEvent(raw string) {
+// Flush emits every complete translated event and flushes the target.
+func (w *transformResponseWriter) Flush() {
+	if w.streaming {
+		_ = w.translateCompleteEvents()
+	}
+	if flusher, ok := w.target.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *transformResponseWriter) translateCompleteEvents() error {
+	for {
+		pending := w.buffer.Bytes()
+		index := bytes.Index(pending, []byte("\n\n"))
+		if index < 0 {
+			return nil
+		}
+		event := string(pending[:index])
+		w.buffer.Next(index + 2)
+		if err := w.writeTranslatedEvent(event); err != nil {
+			return err
+		}
+	}
+}
+
+func (w *transformResponseWriter) writeTranslatedEvent(raw string) error {
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "data:") {
@@ -289,26 +449,118 @@ func (w *transformResponseWriter) writeTranslatedEvent(raw string) {
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		for _, event := range w.translator.Translate(payload) {
-			writeNamedSSE(w.target, event.Event, event.Data, event.Done)
-		}
-		if flusher, ok := w.target.(http.Flusher); ok {
-			flusher.Flush()
+			if err := writeNamedSSE(w.target, event.Event, event.Data, event.Done); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
+}
+
+// streamErrorMessage extracts the message of a gateway stream error event
+// ({"error":{"message":...}}). ok is false for ordinary chunks.
+func streamErrorMessage(payload string) (string, bool) {
+	if !strings.Contains(payload, `"error"`) {
+		return "", false
+	}
+	var envelope struct {
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(payload), &envelope); err != nil || envelope.Error == nil {
+		return "", false
+	}
+	return firstNonEmpty(envelope.Error.Message, "upstream stream failed"), true
+}
+
+// streamToolCall accumulates one streamed tool call. Chat-completions
+// streams send the id and function name on the first delta of a call and
+// append argument fragments on later deltas with the same index.
+type streamToolCall struct {
+	id        string
+	name      string
+	arguments strings.Builder
+	// position is the output_index (Responses) or content block index
+	// (Messages) assigned when the call was first seen.
+	position int
+}
+
+// streamToolCalls collects tool-call deltas keyed by their stream index, in
+// the order they were first seen.
+type streamToolCalls struct {
+	calls   []*streamToolCall
+	byIndex map[int]*streamToolCall
+}
+
+// add merges one delta. It returns the call and whether the delta opened
+// it. A delta without an index continues the most recent call unless it
+// carries a new id.
+func (s *streamToolCalls) add(delta provider.ToolCall, position int) (*streamToolCall, bool) {
+	if s.byIndex == nil {
+		s.byIndex = make(map[int]*streamToolCall)
+	}
+	var call *streamToolCall
+	if delta.Index != nil {
+		call = s.byIndex[*delta.Index]
+	} else if n := len(s.calls); n > 0 && (delta.ID == "" || delta.ID == s.calls[n-1].id) {
+		call = s.calls[n-1]
+	}
+	opened := false
+	if call == nil {
+		call = &streamToolCall{position: position}
+		index := len(s.calls)
+		if delta.Index != nil {
+			index = *delta.Index
+		}
+		s.byIndex[index] = call
+		s.calls = append(s.calls, call)
+		opened = true
+	}
+	if call.id == "" {
+		call.id = delta.ID
+	}
+	if call.name == "" {
+		call.name = delta.Function.Name
+	}
+	call.arguments.WriteString(delta.Function.Arguments)
+	return call, opened
 }
 
 type responsesStreamTranslator struct {
 	id        string
 	model     string
 	usage     *provider.Usage
+	started   bool
 	completed bool
+	// text is the streamed assistant text; messageIndex is the output_index
+	// of the message item (-1 until the first text delta).
+	text         strings.Builder
+	messageIndex int
+	outputs      int
+	toolCalls    streamToolCalls
 }
 
-func newResponsesStreamTranslator() *responsesStreamTranslator { return &responsesStreamTranslator{} }
+func newResponsesStreamTranslator() *responsesStreamTranslator {
+	return &responsesStreamTranslator{messageIndex: -1}
+}
 
 func (t *responsesStreamTranslator) Translate(payload string) []sseEvent {
+	if t.completed {
+		return nil
+	}
 	if payload == "[DONE]" {
 		return t.completedEvents()
+	}
+	if message, ok := streamErrorMessage(payload); ok {
+		t.completed = true
+		return []sseEvent{{Event: "response.failed", Data: map[string]any{
+			"type": "response.failed",
+			"response": map[string]any{
+				"id": firstNonEmpty(t.id, "resp_stream"), "object": "response", "status": "failed", "model": t.model,
+				"error": map[string]string{"code": "upstream_stream_error", "message": message},
+			},
+		}}}
 	}
 	var chunk provider.ChatResponseChunk
 	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
@@ -324,45 +576,133 @@ func (t *responsesStreamTranslator) Translate(payload string) []sseEvent {
 		t.usage = chunk.Usage
 	}
 	var events []sseEvent
+	if !t.started {
+		t.started = true
+		events = append(events, sseEvent{Event: "response.created", Data: map[string]any{
+			"type":     "response.created",
+			"response": map[string]any{"id": firstNonEmpty(t.id, "resp_stream"), "object": "response", "status": "in_progress", "model": t.model},
+		}})
+	}
 	for _, choice := range chunk.Choices {
 		if choice.Delta.Content != "" {
+			if t.messageIndex < 0 {
+				t.messageIndex = t.outputs
+				t.outputs++
+			}
+			t.text.WriteString(choice.Delta.Content)
 			events = append(events, sseEvent{
 				Event: "response.output_text.delta",
 				Data: map[string]any{
 					"type":          "response.output_text.delta",
 					"response_id":   firstNonEmpty(t.id, "resp_stream"),
-					"item_id":       "msg_" + firstNonEmpty(t.id, "stream"),
-					"output_index":  0,
+					"item_id":       t.messageItemID(),
+					"output_index":  t.messageIndex,
 					"content_index": choice.Index,
 					"delta":         choice.Delta.Content,
 				},
 			})
 		}
-		if choice.FinishReason != "" {
-			events = append(events, t.completedEvents()...)
+		for _, delta := range choice.Delta.ToolCalls {
+			call, opened := t.toolCalls.add(delta, t.outputs)
+			if opened {
+				t.outputs++
+				events = append(events, sseEvent{Event: "response.output_item.added", Data: map[string]any{
+					"type":         "response.output_item.added",
+					"response_id":  firstNonEmpty(t.id, "resp_stream"),
+					"output_index": call.position,
+					"item":         t.functionCallItem(call, "in_progress", ""),
+				}})
+			}
+			if delta.Function.Arguments != "" {
+				events = append(events, sseEvent{Event: "response.function_call_arguments.delta", Data: map[string]any{
+					"type":         "response.function_call_arguments.delta",
+					"response_id":  firstNonEmpty(t.id, "resp_stream"),
+					"item_id":      t.functionCallItemID(call),
+					"output_index": call.position,
+					"delta":        delta.Function.Arguments,
+				}})
+			}
 		}
 	}
+	// Completion waits for [DONE]: the usage chunk arrives after the
+	// finish_reason chunk.
 	return events
 }
 
-func (t *responsesStreamTranslator) completedEvents() []sseEvent {
-	if t.completed {
-		return []sseEvent{{Done: true}}
+func (t *responsesStreamTranslator) messageItemID() string {
+	return "msg_" + firstNonEmpty(t.id, "stream")
+}
+
+// functionCallItemID matches the non-stream path ("fc_" + call id) and
+// falls back to the output index when the upstream sent no call id.
+func (t *responsesStreamTranslator) functionCallItemID(call *streamToolCall) string {
+	if call.id != "" {
+		return "fc_" + call.id
 	}
+	return fmt.Sprintf("fc_%s_%d", firstNonEmpty(t.id, "stream"), call.position)
+}
+
+func (t *responsesStreamTranslator) functionCallItem(call *streamToolCall, status, arguments string) map[string]any {
+	return map[string]any{
+		"id":        t.functionCallItemID(call),
+		"type":      "function_call",
+		"status":    status,
+		"call_id":   call.id,
+		"name":      call.name,
+		"arguments": arguments,
+	}
+}
+
+func (t *responsesStreamTranslator) completedEvents() []sseEvent {
 	t.completed = true
 	usage := map[string]int{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 	if t.usage != nil {
 		usage = map[string]int{"input_tokens": t.usage.PromptTokens, "output_tokens": t.usage.CompletionTokens, "total_tokens": t.usage.TotalTokens}
 	}
-	return []sseEvent{
-		{Event: "response.completed", Data: map[string]any{
+	response := map[string]any{"id": firstNonEmpty(t.id, "resp_stream"), "object": "response", "status": "completed", "model": t.model, "usage": usage}
+	var events []sseEvent
+	if len(t.toolCalls.calls) > 0 {
+		// The output list mirrors the non-stream response: the message
+		// item (when text was streamed) followed by the function calls,
+		// ordered by output_index.
+		output := make([]any, t.outputs)
+		if t.messageIndex >= 0 {
+			output[t.messageIndex] = map[string]any{
+				"id": t.messageItemID(), "type": "message", "role": "assistant", "status": "completed",
+				"content": []any{map[string]any{"type": "output_text", "text": t.text.String(), "annotations": []any{}}},
+			}
+		}
+		for _, call := range t.toolCalls.calls {
+			arguments := call.arguments.String()
+			item := t.functionCallItem(call, "completed", arguments)
+			output[call.position] = item
+			events = append(events,
+				sseEvent{Event: "response.function_call_arguments.done", Data: map[string]any{
+					"type":         "response.function_call_arguments.done",
+					"response_id":  firstNonEmpty(t.id, "resp_stream"),
+					"item_id":      t.functionCallItemID(call),
+					"output_index": call.position,
+					"arguments":    arguments,
+				}},
+				sseEvent{Event: "response.output_item.done", Data: map[string]any{
+					"type":         "response.output_item.done",
+					"response_id":  firstNonEmpty(t.id, "resp_stream"),
+					"output_index": call.position,
+					"item":         item,
+				}},
+			)
+		}
+		response["output"] = output
+	}
+	return append(events,
+		sseEvent{Event: "response.completed", Data: map[string]any{
 			"type":       "response.completed",
-			"response":   map[string]any{"id": firstNonEmpty(t.id, "resp_stream"), "object": "response", "status": "completed", "model": t.model, "usage": usage},
+			"response":   response,
 			"usage":      usage,
 			"created_at": timeNowUnix(),
 		}},
-		{Done: true},
-	}
+		sseEvent{Done: true},
+	)
 }
 
 type messagesStreamTranslator struct {
@@ -370,16 +710,62 @@ type messagesStreamTranslator struct {
 	model      string
 	usage      provider.Usage
 	started    bool
-	blockOpen  bool
 	completed  bool
 	stopReason string
+	// finishReason is the raw chat-completions finish reason.
+	finishReason string
+	// blocks is the number of content blocks started so far; textBlock is
+	// the index of the open text block (-1 when none is open).
+	blocks    int
+	textBlock int
+	open      []int
+	toolCalls streamToolCalls
 }
 
-func newMessagesStreamTranslator() *messagesStreamTranslator { return &messagesStreamTranslator{} }
+func newMessagesStreamTranslator() *messagesStreamTranslator {
+	return &messagesStreamTranslator{textBlock: -1}
+}
+
+func (t *messagesStreamTranslator) messageStart() sseEvent {
+	return sseEvent{Event: "message_start", Data: map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id": t.id, "type": "message", "role": "assistant", "model": t.model,
+			"content": []any{}, "stop_reason": nil, "usage": map[string]int{"input_tokens": t.usage.PromptTokens, "output_tokens": 0},
+		},
+	}}
+}
+
+// closeTextBlock stops the open text block so a following tool_use block
+// starts at the next index, as Anthropic streams do.
+func (t *messagesStreamTranslator) closeTextBlock() []sseEvent {
+	if t.textBlock < 0 {
+		return nil
+	}
+	index := t.textBlock
+	t.textBlock = -1
+	for i, open := range t.open {
+		if open == index {
+			t.open = append(t.open[:i], t.open[i+1:]...)
+			break
+		}
+	}
+	return []sseEvent{{Event: "content_block_stop", Data: map[string]any{"type": "content_block_stop", "index": index}}}
+}
 
 func (t *messagesStreamTranslator) Translate(payload string) []sseEvent {
+	if t.completed {
+		return nil
+	}
 	if payload == "[DONE]" {
 		return t.completedEvents()
+	}
+	if message, ok := streamErrorMessage(payload); ok {
+		t.completed = true
+		return []sseEvent{{Event: "error", Data: map[string]any{
+			"type":  "error",
+			"error": map[string]string{"type": "api_error", "message": message},
+		}}}
 	}
 	var chunk provider.ChatResponseChunk
 	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
@@ -397,66 +783,99 @@ func (t *messagesStreamTranslator) Translate(payload string) []sseEvent {
 	var events []sseEvent
 	if !t.started {
 		t.started = true
-		events = append(events, sseEvent{Event: "message_start", Data: map[string]any{
-			"type": "message_start",
-			"message": map[string]any{
-				"id": t.id, "type": "message", "role": "assistant", "model": t.model,
-				"content": []any{}, "stop_reason": nil, "usage": map[string]int{"input_tokens": t.usage.PromptTokens, "output_tokens": 0},
-			},
-		}})
+		events = append(events, t.messageStart())
 	}
 	for _, choice := range chunk.Choices {
 		if choice.Delta.Content != "" {
-			if !t.blockOpen {
-				t.blockOpen = true
+			if t.textBlock < 0 {
+				t.textBlock = t.blocks
+				t.blocks++
+				t.open = append(t.open, t.textBlock)
 				events = append(events, sseEvent{Event: "content_block_start", Data: map[string]any{
-					"type": "content_block_start", "index": 0, "content_block": map[string]string{"type": "text", "text": ""},
+					"type": "content_block_start", "index": t.textBlock, "content_block": map[string]string{"type": "text", "text": ""},
 				}})
 			}
 			events = append(events, sseEvent{Event: "content_block_delta", Data: map[string]any{
-				"type": "content_block_delta", "index": 0, "delta": map[string]string{"type": "text_delta", "text": choice.Delta.Content},
+				"type": "content_block_delta", "index": t.textBlock, "delta": map[string]string{"type": "text_delta", "text": choice.Delta.Content},
 			}})
 		}
+		for _, delta := range choice.Delta.ToolCalls {
+			events = append(events, t.closeTextBlock()...)
+			call, opened := t.toolCalls.add(delta, t.blocks)
+			if opened {
+				t.blocks++
+				t.open = append(t.open, call.position)
+				id := call.id
+				if id == "" {
+					id = fmt.Sprintf("toolu_%s_%d", firstNonEmpty(t.id, "stream"), call.position)
+				}
+				events = append(events, sseEvent{Event: "content_block_start", Data: map[string]any{
+					"type": "content_block_start", "index": call.position,
+					"content_block": map[string]any{"type": "tool_use", "id": id, "name": call.name, "input": map[string]any{}},
+				}})
+			}
+			if delta.Function.Arguments != "" {
+				events = append(events, sseEvent{Event: "content_block_delta", Data: map[string]any{
+					"type": "content_block_delta", "index": call.position,
+					"delta": map[string]string{"type": "input_json_delta", "partial_json": delta.Function.Arguments},
+				}})
+			}
+		}
 		if choice.FinishReason != "" {
+			// Completion waits for [DONE] so the trailing usage chunk is
+			// included in message_delta.
+			t.finishReason = choice.FinishReason
 			t.stopReason = mapOpenAIStopReason(choice.FinishReason)
-			events = append(events, t.completedEvents()...)
 		}
 	}
 	return events
 }
 
 func (t *messagesStreamTranslator) completedEvents() []sseEvent {
-	if t.completed {
-		return nil
-	}
 	t.completed = true
 	var events []sseEvent
-	if t.blockOpen {
-		events = append(events, sseEvent{Event: "content_block_stop", Data: map[string]any{"type": "content_block_stop", "index": 0}})
+	if !t.started {
+		t.started = true
+		events = append(events, t.messageStart())
 	}
+	for _, index := range t.open {
+		events = append(events, sseEvent{Event: "content_block_stop", Data: map[string]any{"type": "content_block_stop", "index": index}})
+	}
+	t.open = nil
+	t.textBlock = -1
 	if t.stopReason == "" {
 		t.stopReason = "end_turn"
 	}
+	if len(t.toolCalls.calls) > 0 && (t.finishReason == "" || t.finishReason == "stop") {
+		// Some upstreams finish a tool-calling turn with "stop".
+		t.stopReason = "tool_use"
+	}
 	events = append(events,
-		sseEvent{Event: "message_delta", Data: map[string]any{"type": "message_delta", "delta": map[string]string{"stop_reason": t.stopReason}, "usage": map[string]int{"output_tokens": t.usage.CompletionTokens}}},
+		sseEvent{Event: "message_delta", Data: map[string]any{
+			"type":  "message_delta",
+			"delta": map[string]string{"stop_reason": t.stopReason},
+			"usage": map[string]int{"input_tokens": t.usage.PromptTokens, "output_tokens": t.usage.CompletionTokens},
+		}},
 		sseEvent{Event: "message_stop", Data: map[string]string{"type": "message_stop"}},
 	)
 	return events
 }
 
-func writeNamedSSE(w http.ResponseWriter, eventName string, payload any, done bool) {
+func writeNamedSSE(w http.ResponseWriter, eventName string, payload any, done bool) error {
 	if done {
-		fmt.Fprint(w, "data: [DONE]\n\n")
-		return
-	}
-	if eventName != "" {
-		fmt.Fprintf(w, "event: %s\n", eventName)
+		_, err := fmt.Fprint(w, "data: [DONE]\n\n")
+		return err
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return
+		return nil
 	}
-	fmt.Fprintf(w, "data: %s\n\n", data)
+	if eventName != "" {
+		_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventName, data)
+	} else {
+		_, err = fmt.Fprintf(w, "data: %s\n\n", data)
+	}
+	return err
 }
 
 func mapOpenAIStopReason(reason string) string {
@@ -495,10 +914,14 @@ func (w *bufferedResponseWriter) Write(data []byte) (int, error) {
 	return w.body.Write(data)
 }
 
+// copyHeaders copies the source headers that destination does not set yet.
+// Headers already present on destination win, and copying twice never
+// duplicates a value.
 func copyHeaders(destination, source http.Header) {
 	for key, values := range source {
-		for _, value := range values {
-			destination.Add(key, value)
+		if _, exists := destination[key]; exists {
+			continue
 		}
+		destination[key] = append([]string(nil), values...)
 	}
 }

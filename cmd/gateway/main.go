@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -78,11 +80,11 @@ func runServe() {
 	// gateway.storage_url from the config file so an operator can always
 	// override storage without editing config-as-code.
 	var st *store.Store
-	dsn := strings.TrimSpace(os.Getenv("OMNISWITCH_DATABASE_URL"))
-	if dsn == "" {
-		dsn = strings.TrimSpace(settings.storageURL)
+	dsn, err := resolveStorageDSN(os.Getenv("OMNISWITCH_DATABASE_URL"), settings)
+	if err != nil {
+		log.Fatalf("invalid storage settings: %v", err)
 	}
-	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+	if dsn != "" {
 		st, err = store.OpenPostgres(dsn)
 		if err != nil {
 			log.Fatalf("failed to connect to postgres: %v", err)
@@ -94,10 +96,14 @@ func runServe() {
 			log.Fatalf("failed to initialize store: %v", err)
 		}
 	}
-	if err != nil {
-		log.Fatalf("failed to initialize store: %v", err)
-	}
 	defer st.Close()
+	// Runs until main returns; the deferred stop runs before st.Close.
+	maintenanceCtx, stopMaintenance := context.WithCancel(context.Background())
+	maintenanceDone := startMaintenance(maintenanceCtx, st, settings.logRetentionDays, maintenanceInterval)
+	defer func() {
+		stopMaintenance()
+		<-maintenanceDone
+	}()
 	if err := ensureBootstrapKey(context.Background(), st, settings); err != nil {
 		log.Fatalf("failed to initialize authentication: %v", err)
 	}
@@ -119,12 +125,11 @@ func runServe() {
 		rtr.SetRoute(model, route)
 		log.Printf("configured route for %s: %+v", model, route)
 	}
-	rtr.SetCircuitBreaker(router.NewCircuitBreaker(settings.circuitBreakerFailures, settings.circuitBreakerCooldown))
-	gr := guardrail.NewEngine()
-	if len(settings.guardrailConfig.Actions) > 0 || len(settings.guardrailConfig.Rules) > 0 {
-		gr = guardrail.NewEngineWithConfig(settings.guardrailConfig)
-	}
+	// Tool rules, webhooks and LLM judges count too: a webhook-only
+	// configuration must be enforced from the first request.
+	gr := guardrail.NewEngineWithConfig(settings.guardrailConfig)
 	gw := gateway.New(registry, rtr, st, gr)
+	setupCircuitBreakers(rtr, gw, settings)
 	gw.SetSemanticCache(settings.cacheThreshold)
 	gw.SetCacheTTL(settings.cacheTTL)
 	gw.SetCacheScope(settings.cacheScope)
@@ -133,6 +138,8 @@ func runServe() {
 	gw.SetMaxRequestBytes(settings.maxRequestBytes)
 	gw.SetShadowProvider(settings.shadowProvider)
 	gw.SetAlerts(settings.alerts)
+	gw.SetBudgetFailOpen(settings.budgetFailOpen)
+	gw.SetBudgetRefreshInterval(settings.budgetRefreshInterval)
 	if settings.configPath != "" {
 		startConfigReloader(settings.configPath, rtr, gw, settings)
 		log.Printf("config hot-reload enabled for %s", settings.configPath)
@@ -142,6 +149,7 @@ func runServe() {
 	promptHandler := prompt.New(st)
 	orgHandler := org.New(st)
 	evalHandler := eval.NewHandler(st)
+	evalHandler.SetPolicyRoot(settings.policyDir)
 	vaultHandler := vault.NewHandler(vaultManager)
 	dash := dashboard.New(st)
 	dash.SetConfigPath(settings.configPath)
@@ -175,14 +183,19 @@ func runServe() {
 	}
 	defer closeRateLimiter()
 	topMux := newTopMux(newHealthState(st, registry, settings.allowNoProviders), handler)
+	registerPublicMetrics(topMux, settings, dash)
 
 	// Print startup banner.
 	fmt.Println(banner())
 	log.Printf("OmniSwitch AI Gateway listening on %s", settings.listenAddr)
-	log.Printf("Dashboard: http://localhost%s", settings.listenAddr)
-	log.Printf("Gateway:   http://localhost%s/v1/chat/completions", settings.listenAddr)
+	baseURL := displayBaseURL(settings.listenAddr)
+	if warning := insecureListenWarning(settings); warning != "" {
+		log.Print(warning)
+	}
+	log.Printf("Dashboard: %s", baseURL)
+	log.Printf("Gateway:   %s/v1/chat/completions", baseURL)
 	if settings.mcpEnabled {
-		log.Printf("MCP:       http://localhost%s/mcp", settings.listenAddr)
+		log.Printf("MCP:       %s/mcp", baseURL)
 	}
 	log.Printf("Providers: %v", registry.Names())
 
@@ -235,6 +248,27 @@ func runWithGracefulShutdown(server *http.Server, shutdownTimeout time.Duration)
 // ensureBootstrapKey prevents an auth-enabled, empty deployment from becoming
 // unmanageable. The bootstrap secret is never logged or exposed through the
 // control-plane API; only its SHA-256 hash is persisted.
+const bootstrapKeyID = "bootstrap-admin"
+
+// hasEnabledAdminKey reports whether keys include an enabled, unexpired owner
+// or admin key.
+func hasEnabledAdminKey(keys []store.APIKey, now time.Time) bool {
+	for _, key := range keys {
+		if !key.Enabled || (key.ExpiresAt != nil && !key.ExpiresAt.After(now)) {
+			continue
+		}
+		if role := gateway.NormalizeRole(key.Role); role == "owner" || role == "admin" {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureBootstrapKey creates the bootstrap owner key from
+// OMNISWITCH_BOOTSTRAP_API_KEY on first start. Later starts leave an existing
+// row alone except to rotate its hash when the secret changes; a disabled row
+// stays disabled. If the row is absent but another enabled owner or admin key
+// exists, nothing is created.
 func ensureBootstrapKey(ctx context.Context, st *store.Store, settings runtimeSettings) error {
 	if !settings.authEnabled {
 		return nil
@@ -252,10 +286,43 @@ func ensureBootstrapKey(ctx context.Context, st *store.Store, settings runtimeSe
 		if len(prefix) > 12 {
 			prefix = prefix[:12]
 		}
+		keyHash := hex.EncodeToString(hash[:])
+		existing, err := st.GetAPIKeyByID(ctx, bootstrapKeyID)
+		switch {
+		case err == nil:
+			// The row already exists. Never re-enable it or reset its spend:
+			// an operator who disabled it through the API meant it.
+			if !existing.Enabled {
+				log.Printf("WARNING: bootstrap key %q is disabled and will not be re-enabled; remove OMNISWITCH_BOOTSTRAP_API_KEY", bootstrapKeyID)
+				return nil
+			}
+			if existing.KeyHash == keyHash {
+				log.Printf("bootstrap key %q already exists; OMNISWITCH_BOOTSTRAP_API_KEY can be removed", bootstrapKeyID)
+				return nil
+			}
+			// The secret changed: rotate the hash and keep everything else.
+			existing.KeyHash = keyHash
+			existing.KeyPrefix = prefix + "..."
+			if err := st.InsertAPIKey(ctx, existing); err != nil {
+				return fmt.Errorf("rotate bootstrap key: %w", err)
+			}
+			log.Printf("rotated bootstrap key %q from OMNISWITCH_BOOTSTRAP_API_KEY", bootstrapKeyID)
+			return nil
+		case !errors.Is(err, sql.ErrNoRows):
+			return fmt.Errorf("look up bootstrap key: %w", err)
+		}
+		keys, err := st.ListAPIKeys(ctx)
+		if err != nil {
+			return fmt.Errorf("list existing API keys: %w", err)
+		}
+		if hasEnabledAdminKey(keys, time.Now()) {
+			log.Printf("an enabled owner or admin key already exists; not creating bootstrap key %q. Remove OMNISWITCH_BOOTSTRAP_API_KEY", bootstrapKeyID)
+			return nil
+		}
 		return st.InsertAPIKey(ctx, store.APIKey{
-			ID:          "bootstrap-admin",
+			ID:          bootstrapKeyID,
 			Name:        "Bootstrap administrator",
-			KeyHash:     hex.EncodeToString(hash[:]),
+			KeyHash:     keyHash,
 			KeyPrefix:   prefix + "...",
 			WorkspaceID: strings.TrimSpace(settings.bootstrapWorkspaceID),
 			Role:        role,
