@@ -10,20 +10,34 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/omniswitch-dev/omniswitch/internal/cache"
 	"github.com/omniswitch-dev/omniswitch/internal/model"
 	"github.com/omniswitch-dev/omniswitch/internal/provider"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
 // Store provides persistent storage for the gateway.
 type Store struct {
+	// db serves reads. On PostgreSQL it also serves writes.
 	db *sql.DB
-	pg bool // PostgreSQL dialect when true; SQLite otherwise
+	// wdb serves writes. On SQLite it is a separate pool limited to one
+	// connection so writers queue in Go instead of failing with SQLITE_BUSY.
+	// On PostgreSQL it is the same pool as db.
+	wdb *sql.DB
+	pg  bool // PostgreSQL dialect when true; SQLite otherwise
+
+	// Background work started by migrate, such as deferred index builds.
+	// Close cancels it and waits for it.
+	bgMu     sync.Mutex
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
+	bgWG     sync.WaitGroup
 }
 
 // RequestLog represents a logged gateway request.
@@ -48,6 +62,11 @@ type RequestLog struct {
 	ErrorMessage   string    `json:"error,omitempty"`
 	Cached         bool      `json:"cached"`
 	Metadata       string    `json:"metadata,omitempty"`
+	// WorkspaceID and OrganizationID are the tenant of the caller that sent
+	// the request. Both are empty for unauthenticated or global callers and
+	// for rows written before the columns existed.
+	WorkspaceID    string `json:"workspace_id,omitempty"`
+	OrganizationID string `json:"organization_id,omitempty"`
 }
 
 // TraceSpan captures a single stage of request processing for waterfall views.
@@ -90,6 +109,9 @@ type Prompt struct {
 	CreatedAt time.Time         `json:"created_at"`
 	UpdatedAt time.Time         `json:"updated_at"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
+
+	// WorkspaceID is the prompt's namespace; empty is the global namespace.
+	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
 // GuardrailEvent logs a guardrail trigger.
@@ -166,6 +188,10 @@ type Feedback struct {
 	Comment   string            `json:"comment,omitempty"`
 	UserID    string            `json:"user_id,omitempty"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
+	// WorkspaceID and OrganizationID are the tenant of the caller that
+	// submitted the feedback.
+	WorkspaceID    string `json:"workspace_id,omitempty"`
+	OrganizationID string `json:"organization_id,omitempty"`
 }
 
 type Organization struct {
@@ -239,27 +265,57 @@ type VirtualKeyRecord struct {
 	MetadataJSON string    `json:"-"`
 }
 
+// sqliteBusyTimeoutMs is how long a SQLite connection waits for a lock held
+// by another connection before it gives up with SQLITE_BUSY.
+const sqliteBusyTimeoutMs = 10000
+
+// sqliteDSN builds a modernc.org/sqlite DSN for path. The _pragma parameters
+// run on every new pooled connection (a plain "PRAGMA ..." statement would
+// only configure whichever connection happened to execute it), and
+// _txlock=immediate makes write transactions take the write lock at BEGIN
+// so they never fail half-way when upgrading from a read lock.
+func sqliteDSN(path string) string {
+	params := []string{
+		"_pragma=busy_timeout(" + strconv.Itoa(sqliteBusyTimeoutMs) + ")",
+		"_pragma=journal_mode(WAL)",
+		"_pragma=synchronous(NORMAL)",
+		"_txlock=immediate",
+	}
+	return path + "?" + strings.Join(params, "&")
+}
+
 // New creates a new Store backed by a SQLite database at the given directory.
 func New(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
 
-	dbPath := filepath.Join(dir, "sentinel.db")
-	db, err := sql.Open("sqlite", dbPath)
+	dsn := sqliteDSN(filepath.Join(dir, "sentinel.db"))
+	wdb, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-
-	// Enable WAL mode for concurrent reads.
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("set WAL mode: %w", err)
+	// SQLite allows one writer at a time. A single-connection write pool
+	// queues writers in database/sql instead of letting them collide.
+	wdb.SetMaxOpenConns(1)
+	wdb.SetMaxIdleConns(1)
+	wdb.SetConnMaxLifetime(0)
+	if err := wdb.Ping(); err != nil {
+		wdb.Close()
+		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	store := &Store{db: db}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		wdb.Close()
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	db.SetMaxOpenConns(16)
+	db.SetMaxIdleConns(4)
+
+	store := &Store{db: db, wdb: wdb}
 	if err := store.migrate(); err != nil {
-		db.Close()
+		store.Close()
 		return nil, err
 	}
 	return store, nil
@@ -277,8 +333,8 @@ func OpenPostgres(dsn string) (*Store, error) {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}
 	db.SetMaxOpenConns(25)
-	store := &Store{db: db, pg: true}
-	if err := store.migrate(); err != nil {
+	store := &Store{db: db, wdb: db, pg: true}
+	if err := store.migrateWithRetry(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
@@ -320,30 +376,42 @@ func rewriteSQL(query string) string {
 	return b.String()
 }
 
-func (s *Store) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+// txSQL rewrites ? placeholders to $n for PostgreSQL. The helpers below use
+// it, and so does code that runs a statement on a transaction directly.
+func (s *Store) txSQL(query string) string {
 	if s.pg {
-		query = rewriteSQL(query)
+		return rewriteSQL(query)
 	}
-	return s.db.ExecContext(ctx, query, args...)
+	return query
+}
+
+func (s *Store) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return s.wdb.ExecContext(ctx, s.txSQL(query), args...)
 }
 
 func (s *Store) query(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	if s.pg {
-		query = rewriteSQL(query)
-	}
-	return s.db.QueryContext(ctx, query, args...)
+	return s.db.QueryContext(ctx, s.txSQL(query), args...)
 }
 
 func (s *Store) queryRow(ctx context.Context, query string, args ...any) *sql.Row {
-	if s.pg {
-		query = rewriteSQL(query)
-	}
-	return s.db.QueryRowContext(ctx, query, args...)
+	return s.db.QueryRowContext(ctx, s.txSQL(query), args...)
 }
 
-func (s *Store) migrate() error {
-	migrations := []string{
-		`CREATE TABLE IF NOT EXISTS request_logs (
+// writeQueryRow runs a statement that writes and returns a row (for example
+// INSERT ... RETURNING) on the write pool.
+func (s *Store) writeQueryRow(ctx context.Context, query string, args ...any) *sql.Row {
+	return s.wdb.QueryRowContext(ctx, s.txSQL(query), args...)
+}
+
+// migrationLockID is the PostgreSQL advisory lock key that serializes schema
+// migrations across gateway replicas sharing one database.
+const migrationLockID int64 = 0x6f6d6e6973770001
+
+// schemaTables creates every table. {{FLOAT}} is replaced with the dialect's
+// 8-byte floating point type: REAL is a double in SQLite but a 4-byte float4
+// in PostgreSQL, which loses precision on money and latency columns.
+var schemaTables = []string{
+	`CREATE TABLE IF NOT EXISTS request_logs (
 			id TEXT PRIMARY KEY,
 			timestamp TEXT NOT NULL,
 			trace_id TEXT,
@@ -355,8 +423,8 @@ func (s *Store) migrate() error {
 			input_tokens INTEGER DEFAULT 0,
 			output_tokens INTEGER DEFAULT 0,
 			total_tokens INTEGER DEFAULT 0,
-			latency_ms REAL DEFAULT 0,
-			cost REAL DEFAULT 0,
+			latency_ms {{FLOAT}} DEFAULT 0,
+			cost {{FLOAT}} DEFAULT 0,
 			request_body TEXT,
 			response_body TEXT,
 			decision TEXT,
@@ -364,7 +432,7 @@ func (s *Store) migrate() error {
 			error_message TEXT,
 			cached INTEGER DEFAULT 0
 		)`,
-		`CREATE TABLE IF NOT EXISTS api_keys (
+	`CREATE TABLE IF NOT EXISTS api_keys (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
 			key_hash TEXT UNIQUE NOT NULL,
@@ -372,9 +440,9 @@ func (s *Store) migrate() error {
 			created_at TEXT NOT NULL,
 			expires_at TEXT,
 			rate_limit INTEGER DEFAULT 60,
-			budget_usd REAL DEFAULT 0,
-			spend_usd REAL DEFAULT 0,
-			monthly_cost_budget REAL DEFAULT 0,
+			budget_usd {{FLOAT}} DEFAULT 0,
+			spend_usd {{FLOAT}} DEFAULT 0,
+			monthly_cost_budget {{FLOAT}} DEFAULT 0,
 			monthly_token_budget INTEGER DEFAULT 0,
 			allowed_models TEXT NOT NULL DEFAULT '[]',
 			enabled INTEGER DEFAULT 1,
@@ -382,7 +450,7 @@ func (s *Store) migrate() error {
 			role TEXT,
 			metadata TEXT
 		)`,
-		`CREATE TABLE IF NOT EXISTS prompts (
+	`CREATE TABLE IF NOT EXISTS prompts (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
 			version INTEGER DEFAULT 1,
@@ -392,14 +460,15 @@ func (s *Store) migrate() error {
 			updated_at TEXT NOT NULL,
 			metadata TEXT
 		)`,
-		`CREATE TABLE IF NOT EXISTS prompt_labels (
+	`CREATE TABLE IF NOT EXISTS prompt_labels (
+			workspace_id TEXT NOT NULL DEFAULT '',
 			name TEXT NOT NULL,
 			label TEXT NOT NULL,
 			prompt_id TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
-			PRIMARY KEY (name, label)
+			PRIMARY KEY (workspace_id, name, label)
 		)`,
-		`CREATE TABLE IF NOT EXISTS guardrail_events (
+	`CREATE TABLE IF NOT EXISTS guardrail_events (
 			id TEXT PRIMARY KEY,
 			request_id TEXT,
 			timestamp TEXT NOT NULL,
@@ -408,7 +477,7 @@ func (s *Store) migrate() error {
 			matched INTEGER DEFAULT 0,
 			details TEXT
 		)`,
-		`CREATE TABLE IF NOT EXISTS semantic_cache (
+	`CREATE TABLE IF NOT EXISTS semantic_cache (
 			id TEXT PRIMARY KEY,
 			cache_key TEXT,
 			created_at TEXT NOT NULL,
@@ -418,7 +487,7 @@ func (s *Store) migrate() error {
 			vector_json TEXT NOT NULL,
 			response_json TEXT NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS shadow_requests (
+	`CREATE TABLE IF NOT EXISTS shadow_requests (
 			id TEXT PRIMARY KEY,
 			request_id TEXT NOT NULL,
 			trace_id TEXT,
@@ -426,12 +495,12 @@ func (s *Store) migrate() error {
 			primary_provider TEXT,
 			shadow_provider TEXT,
 			model TEXT,
-			latency_ms REAL DEFAULT 0,
-			cost REAL DEFAULT 0,
+			latency_ms {{FLOAT}} DEFAULT 0,
+			cost {{FLOAT}} DEFAULT 0,
 			status TEXT,
 			error_message TEXT
 		)`,
-		`CREATE TABLE IF NOT EXISTS feedback (
+	`CREATE TABLE IF NOT EXISTS feedback (
 			id TEXT PRIMARY KEY,
 			request_id TEXT,
 			trace_id TEXT,
@@ -442,34 +511,34 @@ func (s *Store) migrate() error {
 			user_id TEXT,
 			metadata TEXT
 		)`,
-		`CREATE TABLE IF NOT EXISTS organizations (
+	`CREATE TABLE IF NOT EXISTS organizations (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			metadata TEXT
 		)`,
-		`CREATE TABLE IF NOT EXISTS workspaces (
+	`CREATE TABLE IF NOT EXISTS workspaces (
 			id TEXT PRIMARY KEY,
 			organization_id TEXT NOT NULL,
 			name TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			metadata TEXT
 		)`,
-		`CREATE TABLE IF NOT EXISTS users (
+	`CREATE TABLE IF NOT EXISTS users (
 			id TEXT PRIMARY KEY,
 			email TEXT UNIQUE NOT NULL,
 			name TEXT,
 			created_at TEXT NOT NULL,
 			metadata TEXT
 		)`,
-		`CREATE TABLE IF NOT EXISTS workspace_members (
+	`CREATE TABLE IF NOT EXISTS workspace_members (
 			workspace_id TEXT NOT NULL,
 			user_id TEXT NOT NULL,
 			role TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			PRIMARY KEY (workspace_id, user_id)
 		)`,
-		`CREATE TABLE IF NOT EXISTS virtual_keys (
+	`CREATE TABLE IF NOT EXISTS virtual_keys (
 			id TEXT PRIMARY KEY,
 			name TEXT UNIQUE NOT NULL,
 			provider_type TEXT NOT NULL,
@@ -481,7 +550,7 @@ func (s *Store) migrate() error {
 			enabled INTEGER DEFAULT 1,
 			metadata TEXT
 		)`,
-		`CREATE TABLE IF NOT EXISTS gateway_configs (
+	`CREATE TABLE IF NOT EXISTS gateway_configs (
 			id TEXT PRIMARY KEY,
 			name TEXT UNIQUE NOT NULL,
 			description TEXT,
@@ -491,102 +560,124 @@ func (s *Store) migrate() error {
 			updated_at TEXT NOT NULL,
 			enabled INTEGER DEFAULT 1
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp)`,
-		`CREATE INDEX IF NOT EXISTS idx_logs_trace ON request_logs(trace_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_logs_session ON request_logs(session_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_logs_api_key ON request_logs(api_key_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_logs_provider ON request_logs(provider)`,
-		`CREATE INDEX IF NOT EXISTS idx_logs_status ON request_logs(status)`,
-		`CREATE INDEX IF NOT EXISTS idx_guardrail_request ON guardrail_events(request_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_cache_model ON semantic_cache(model)`,
-		`CREATE INDEX IF NOT EXISTS idx_shadow_request ON shadow_requests(request_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_feedback_request ON feedback(request_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_feedback_trace ON feedback(trace_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_workspaces_org ON workspaces(organization_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_virtual_keys_name ON virtual_keys(name)`,
-		`CREATE INDEX IF NOT EXISTS idx_gateway_configs_name ON gateway_configs(name)`,
-	}
-
-	for _, m := range migrations {
-		if _, err := s.db.Exec(m); err != nil {
-			return fmt.Errorf("migration failed: %w", err)
-		}
-	}
-	if err := s.ensureColumn("request_logs", "trace_id", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("request_logs", "session_id", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("request_logs", "metadata", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("api_keys", "monthly_cost_budget", "REAL DEFAULT 0"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("api_keys", "monthly_token_budget", "INTEGER DEFAULT 0"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("api_keys", "budget_usd", "REAL DEFAULT 0"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("api_keys", "spend_usd", "REAL DEFAULT 0"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("api_keys", "workspace_id", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("api_keys", "role", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("api_keys", "allowed_models", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("semantic_cache", "cache_key", "TEXT"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn("semantic_cache", "expires_at", "TEXT"); err != nil {
-		return err
-	}
-	if _, err := s.db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_key ON semantic_cache(cache_key) WHERE cache_key IS NOT NULL AND cache_key != ''"); err != nil {
-		return fmt.Errorf("create cache key index: %w", err)
-	}
-	return nil
+	`CREATE TABLE IF NOT EXISTS datasets (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			description TEXT,
+			version INTEGER DEFAULT 1,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			metadata TEXT,
+			examples TEXT
+		)`,
+	`CREATE TABLE IF NOT EXISTS experiments (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			description TEXT,
+			dataset_id TEXT,
+			config TEXT,
+			status TEXT,
+			results TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			created_by TEXT
+		)`,
 }
+
+// legacyColumns are columns added after the first release. They are added to
+// older databases before any index that references them is created.
+var legacyColumns = []struct{ table, column, definition string }{
+	{"request_logs", "trace_id", "TEXT"},
+	{"request_logs", "session_id", "TEXT"},
+	{"request_logs", "metadata", "TEXT"},
+	{"api_keys", "monthly_cost_budget", "{{FLOAT}} DEFAULT 0"},
+	{"api_keys", "monthly_token_budget", "INTEGER DEFAULT 0"},
+	{"api_keys", "budget_usd", "{{FLOAT}} DEFAULT 0"},
+	{"api_keys", "spend_usd", "{{FLOAT}} DEFAULT 0"},
+	{"api_keys", "workspace_id", "TEXT"},
+	{"api_keys", "role", "TEXT"},
+	{"api_keys", "allowed_models", "TEXT NOT NULL DEFAULT '[]'"},
+	{"prompts", "workspace_id", "TEXT NOT NULL DEFAULT ''"},
+	{"semantic_cache", "cache_key", "TEXT"},
+	{"semantic_cache", "expires_at", "TEXT"},
+	// Tenant of the caller. A constant default keeps ADD COLUMN a
+	// metadata-only change on large tables; old rows read as '' (global).
+	{"request_logs", "workspace_id", "TEXT DEFAULT ''"},
+	{"request_logs", "organization_id", "TEXT DEFAULT ''"},
+	{"feedback", "workspace_id", "TEXT DEFAULT ''"},
+	{"feedback", "organization_id", "TEXT DEFAULT ''"},
+}
+
+func (s *Store) dialectSQL(stmt string) string {
+	if s.pg {
+		return strings.ReplaceAll(stmt, "{{FLOAT}}", "DOUBLE PRECISION")
+	}
+	return strings.ReplaceAll(stmt, "{{FLOAT}}", "REAL")
+}
+
+// requestLogColumns selects a request_logs row in RequestLog scan order.
+// Nullable columns are COALESCEd: rows written before a column existed, or
+// by older releases, hold NULL and would otherwise fail to scan into string.
+const requestLogColumns = `id, timestamp, COALESCE(trace_id, ''), COALESCE(session_id, ''), COALESCE(provider, ''),
+	COALESCE(model, ''), COALESCE(api_key_id, ''), COALESCE(status, ''), COALESCE(input_tokens, 0),
+	COALESCE(output_tokens, 0), COALESCE(total_tokens, 0), COALESCE(latency_ms, 0), COALESCE(cost, 0),
+	COALESCE(request_body, ''), COALESCE(response_body, ''), COALESCE(decision, ''), COALESCE(decision_reason, ''),
+	COALESCE(error_message, ''), COALESCE(cached, 0), COALESCE(metadata, ''), COALESCE(workspace_id, ''),
+	COALESCE(organization_id, '')`
 
 // InsertLog stores a request log entry.
 func (s *Store) InsertLog(ctx context.Context, log RequestLog) error {
 	_, err := s.exec(ctx,
 		`INSERT INTO request_logs (id, timestamp, trace_id, session_id, provider, model, api_key_id, status,
 			input_tokens, output_tokens, total_tokens, latency_ms, cost,
-			request_body, response_body, decision, decision_reason, error_message, cached, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		log.ID, log.Timestamp.Format(time.RFC3339Nano), log.TraceID, log.SessionID, log.Provider, log.Model,
+			request_body, response_body, decision, decision_reason, error_message, cached, metadata,
+			workspace_id, organization_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		log.ID, formatTime(log.Timestamp), log.TraceID, log.SessionID, log.Provider, log.Model,
 		log.APIKeyID, log.Status, log.InputTokens, log.OutputTokens, log.TotalTokens,
 		log.LatencyMs, log.Cost, log.RequestBody, log.ResponseBody,
 		log.Decision, log.DecisionReason, log.ErrorMessage, boolToInt(log.Cached), log.Metadata,
+		log.WorkspaceID, log.OrganizationID,
 	)
 	return err
 }
 
 // ListLogs returns paginated request logs ordered by timestamp descending.
 func (s *Store) ListLogs(ctx context.Context, limit, offset int, provider, status string) ([]RequestLog, int, error) {
-	return s.listLogs(ctx, limit, offset, provider, status, "")
+	return s.listLogs(ctx, limit, offset, provider, status, LogScope{})
 }
 
 // ListLogsForAPIKey scopes dashboard access to the authenticated workload key.
 func (s *Store) ListLogsForAPIKey(ctx context.Context, apiKeyID string, limit, offset int, provider, status string) ([]RequestLog, int, error) {
-	return s.listLogs(ctx, limit, offset, provider, status, apiKeyID)
+	return s.listLogs(ctx, limit, offset, provider, status, LogScope{APIKeyID: apiKeyID})
 }
 
-func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, status, apiKeyID string) ([]RequestLog, int, error) {
-	where := "1=1"
-	args := []any{}
-	if apiKeyID != "" {
-		where += " AND api_key_id = ?"
-		args = append(args, apiKeyID)
+// Page size bounds applied by every paginated store method.
+const (
+	DefaultPageSize = 50
+	MaxPageSize     = 1000
+)
+
+// ClampPage normalises pagination input so every backend sees valid values:
+// a non-positive limit becomes DefaultPageSize, a limit above MaxPageSize is
+// capped, and a negative offset becomes 0 (PostgreSQL rejects a negative
+// OFFSET, SQLite silently treats it as 0).
+func ClampPage(limit, offset int) (int, int) {
+	if limit <= 0 {
+		limit = DefaultPageSize
 	}
+	if limit > MaxPageSize {
+		limit = MaxPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
+func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, status string, scope LogScope) ([]RequestLog, int, error) {
+	limit, offset = ClampPage(limit, offset)
+	where, args := scope.where("1=1", nil)
 	if provider != "" {
 		where += " AND provider = ?"
 		args = append(args, provider)
@@ -603,7 +694,7 @@ func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, statu
 	}
 
 	query := fmt.Sprintf(
-		"SELECT id, timestamp, trace_id, session_id, provider, model, api_key_id, status, input_tokens, output_tokens, total_tokens, latency_ms, cost, COALESCE(request_body, ''), COALESCE(response_body, ''), decision, decision_reason, error_message, cached, COALESCE(metadata, '') FROM request_logs WHERE %s ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+		"SELECT "+requestLogColumns+" FROM request_logs WHERE %s ORDER BY timestamp DESC LIMIT ? OFFSET ?",
 		where,
 	)
 	args = append(args, limit, offset)
@@ -620,10 +711,11 @@ func (s *Store) listLogs(ctx context.Context, limit, offset int, provider, statu
 		var cached int
 		if err := rows.Scan(&l.ID, &ts, &l.TraceID, &l.SessionID, &l.Provider, &l.Model, &l.APIKeyID,
 			&l.Status, &l.InputTokens, &l.OutputTokens, &l.TotalTokens,
-			&l.LatencyMs, &l.Cost, &l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached, &l.Metadata); err != nil {
+			&l.LatencyMs, &l.Cost, &l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached, &l.Metadata,
+			&l.WorkspaceID, &l.OrganizationID); err != nil {
 			return nil, 0, err
 		}
-		l.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
+		l.Timestamp = parseTime(ts)
 		l.Cached = cached == 1
 		logs = append(logs, l)
 	}
@@ -650,7 +742,7 @@ func (s *Store) UpsertGatewayConfig(ctx context.Context, record GatewayConfigRec
 			record.Description,
 			record.Format,
 			record.Body,
-			record.UpdatedAt.Format(time.RFC3339Nano),
+			formatTime(record.UpdatedAt),
 			boolToInt(record.Enabled),
 			record.ID,
 		)
@@ -675,8 +767,8 @@ func (s *Store) UpsertGatewayConfig(ctx context.Context, record GatewayConfigRec
 		record.Description,
 		record.Format,
 		record.Body,
-		record.CreatedAt.Format(time.RFC3339Nano),
-		record.UpdatedAt.Format(time.RFC3339Nano),
+		formatTime(record.CreatedAt),
+		formatTime(record.UpdatedAt),
 		boolToInt(record.Enabled),
 	)
 	return err
@@ -686,7 +778,7 @@ func (s *Store) SetGatewayConfigEnabled(ctx context.Context, ref string, enabled
 	result, err := s.exec(ctx,
 		`UPDATE gateway_configs SET enabled = ?, updated_at = ? WHERE id = ? OR name = ?`,
 		boolToInt(enabled),
-		time.Now().UTC().Format(time.RFC3339Nano),
+		formatTime(time.Now().UTC()),
 		ref,
 		ref,
 	)
@@ -713,8 +805,8 @@ func (s *Store) GetGatewayConfig(ctx context.Context, ref string) (GatewayConfig
 	if err != nil {
 		return record, err
 	}
-	record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	record.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	record.CreatedAt = parseTime(createdAt)
+	record.UpdatedAt = parseTime(updatedAt)
 	record.Enabled = enabled == 1
 	return record, nil
 }
@@ -740,8 +832,8 @@ func (s *Store) ListGatewayConfigs(ctx context.Context, includeDisabled bool) ([
 		if err := rows.Scan(&record.ID, &record.Name, &record.Description, &record.Format, &record.Body, &createdAt, &updatedAt, &enabled); err != nil {
 			return nil, err
 		}
-		record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		record.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+		record.CreatedAt = parseTime(createdAt)
+		record.UpdatedAt = parseTime(updatedAt)
 		record.Enabled = enabled == 1
 		records = append(records, record)
 	}
@@ -750,7 +842,7 @@ func (s *Store) ListGatewayConfigs(ctx context.Context, includeDisabled bool) ([
 
 func (s *Store) DeleteGatewayConfig(ctx context.Context, ref string) error {
 	result, err := s.exec(ctx, `UPDATE gateway_configs SET enabled = 0, updated_at = ? WHERE id = ? OR name = ?`,
-		time.Now().UTC().Format(time.RFC3339Nano),
+		formatTime(time.Now().UTC()),
 		ref,
 		ref,
 	)
@@ -764,16 +856,15 @@ func (s *Store) DeleteGatewayConfig(ctx context.Context, ref string) error {
 }
 
 func (s *Store) GetCostAnalytics(ctx context.Context, since time.Time, groupBy, apiKeyID string) ([]CostAnalyticsRow, error) {
+	return s.getCostAnalytics(ctx, since, groupBy, LogScope{APIKeyID: apiKeyID})
+}
+
+func (s *Store) getCostAnalytics(ctx context.Context, since time.Time, groupBy string, scope LogScope) ([]CostAnalyticsRow, error) {
 	expr, err := analyticsGroupExpression(groupBy)
 	if err != nil {
 		return nil, err
 	}
-	where := "timestamp >= ?"
-	args := []any{since.Format(time.RFC3339Nano)}
-	if apiKeyID != "" {
-		where += " AND api_key_id = ?"
-		args = append(args, apiKeyID)
-	}
+	where, args := scope.where("timestamp >= ?", []any{formatTime(since)})
 	rows, err := s.query(ctx, fmt.Sprintf(`
 		SELECT %s AS bucket,
 			COUNT(*) AS request_count,
@@ -800,18 +891,18 @@ func (s *Store) GetCostAnalytics(ctx context.Context, since time.Time, groupBy, 
 }
 
 func (s *Store) GetTrace(ctx context.Context, traceID, apiKeyID string) (TraceDetail, error) {
+	return s.getTrace(ctx, traceID, LogScope{APIKeyID: apiKeyID})
+}
+
+// getTrace returns the logs of a trace that scope may see, with the
+// guardrail events and shadow requests of those logs and the trace's
+// feedback in the scope's tenant. Trace ids come from clients, so two
+// tenants can share one: everything is joined through the visible logs.
+func (s *Store) getTrace(ctx context.Context, traceID string, scope LogScope) (TraceDetail, error) {
 	detail := TraceDetail{TraceID: traceID}
-	where := "trace_id = ?"
-	args := []any{traceID}
-	if apiKeyID != "" {
-		where += " AND api_key_id = ?"
-		args = append(args, apiKeyID)
-	}
+	where, args := scope.where("trace_id = ?", []any{traceID})
 	rows, err := s.query(ctx,
-		fmt.Sprintf(`SELECT id, timestamp, trace_id, session_id, provider, model, api_key_id, status,
-			input_tokens, output_tokens, total_tokens, latency_ms, cost, COALESCE(request_body, ''),
-			COALESCE(response_body, ''), decision, decision_reason, error_message, cached, COALESCE(metadata, '')
-		FROM request_logs WHERE %s ORDER BY timestamp ASC`, where),
+		fmt.Sprintf("SELECT "+requestLogColumns+" FROM request_logs WHERE %s ORDER BY timestamp ASC", where),
 		args...,
 	)
 	if err != nil {
@@ -825,10 +916,11 @@ func (s *Store) GetTrace(ctx context.Context, traceID, apiKeyID string) (TraceDe
 		var cached int
 		if err := rows.Scan(&l.ID, &ts, &l.TraceID, &l.SessionID, &l.Provider, &l.Model, &l.APIKeyID,
 			&l.Status, &l.InputTokens, &l.OutputTokens, &l.TotalTokens, &l.LatencyMs, &l.Cost,
-			&l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached, &l.Metadata); err != nil {
+			&l.RequestBody, &l.ResponseBody, &l.Decision, &l.DecisionReason, &l.ErrorMessage, &cached, &l.Metadata,
+			&l.WorkspaceID, &l.OrganizationID); err != nil {
 			return detail, err
 		}
-		l.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
+		l.Timestamp = parseTime(ts)
 		l.Cached = cached == 1
 		detail.Logs = append(detail.Logs, l)
 		requestIDs = append(requestIDs, l.ID)
@@ -844,12 +936,12 @@ func (s *Store) GetTrace(ctx context.Context, traceID, apiKeyID string) (TraceDe
 		return detail, err
 	}
 	detail.GuardrailEvents = guardrailEvents
-	shadowLogs, err := s.listShadowLogsForTrace(ctx, traceID)
+	shadowLogs, err := s.listShadowLogsForRequests(ctx, traceID, requestIDs)
 	if err != nil {
 		return detail, err
 	}
 	detail.ShadowLogs = shadowLogs
-	feedback, err := s.ListFeedback(ctx, 100, "", traceID)
+	feedback, err := s.listFeedback(ctx, 100, "", traceID, scope.tenantOnly())
 	if err != nil {
 		return detail, err
 	}
@@ -878,23 +970,17 @@ func analyticsGroupExpression(groupBy string) (string, error) {
 
 // GetMetrics returns aggregated metrics for the given time window.
 func (s *Store) GetMetrics(ctx context.Context, since time.Time) (Metrics, error) {
-	return s.getMetrics(ctx, since, "")
+	return s.getMetrics(ctx, since, LogScope{})
 }
 
 // GetMetricsForAPIKey returns metrics only for one workload key.
 func (s *Store) GetMetricsForAPIKey(ctx context.Context, since time.Time, apiKeyID string) (Metrics, error) {
-	return s.getMetrics(ctx, since, apiKeyID)
+	return s.getMetrics(ctx, since, LogScope{APIKeyID: apiKeyID})
 }
 
-func (s *Store) getMetrics(ctx context.Context, since time.Time, apiKeyID string) (Metrics, error) {
+func (s *Store) getMetrics(ctx context.Context, since time.Time, scope LogScope) (Metrics, error) {
 	var m Metrics
-	sinceStr := since.Format(time.RFC3339Nano)
-	where := "timestamp >= ?"
-	args := []any{sinceStr}
-	if apiKeyID != "" {
-		where += " AND api_key_id = ?"
-		args = append(args, apiKeyID)
-	}
+	where, args := scope.where("timestamp >= ?", []any{formatTime(since)})
 	err := s.queryRow(ctx, fmt.Sprintf(`
 		SELECT
 			COUNT(*),
@@ -921,30 +1007,24 @@ func (s *Store) getMetrics(ctx context.Context, since time.Time, apiKeyID string
 
 // GetProviderMetrics returns per-provider metrics.
 func (s *Store) GetProviderMetrics(ctx context.Context, since time.Time) ([]ProviderMetrics, error) {
-	return s.getProviderMetrics(ctx, since, "")
+	return s.getProviderMetrics(ctx, since, LogScope{})
 }
 
 // GetProviderMetricsForAPIKey returns per-provider metrics only for one key.
 func (s *Store) GetProviderMetricsForAPIKey(ctx context.Context, since time.Time, apiKeyID string) ([]ProviderMetrics, error) {
-	return s.getProviderMetrics(ctx, since, apiKeyID)
+	return s.getProviderMetrics(ctx, since, LogScope{APIKeyID: apiKeyID})
 }
 
-func (s *Store) getProviderMetrics(ctx context.Context, since time.Time, apiKeyID string) ([]ProviderMetrics, error) {
-	sinceStr := since.Format(time.RFC3339Nano)
-	where := "timestamp >= ?"
-	args := []any{sinceStr}
-	if apiKeyID != "" {
-		where += " AND api_key_id = ?"
-		args = append(args, apiKeyID)
-	}
+func (s *Store) getProviderMetrics(ctx context.Context, since time.Time, scope LogScope) ([]ProviderMetrics, error) {
+	where, args := scope.where("timestamp >= ?", []any{formatTime(since)})
 	rows, err := s.query(ctx, fmt.Sprintf(`
-		SELECT provider,
+		SELECT COALESCE(provider, ''),
 			COUNT(*),
 			COALESCE(AVG(latency_ms), 0),
 			COALESCE(SUM(cost), 0),
 			COALESCE(CAST(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS REAL) / NULLIF(COUNT(*), 0), 0)
 		FROM request_logs WHERE %s
-		GROUP BY provider`, where), args...)
+		GROUP BY COALESCE(provider, '')`, where), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -961,6 +1041,11 @@ func (s *Store) getProviderMetrics(ctx context.Context, since time.Time, apiKeyI
 	return metrics, rows.Err()
 }
 
+// apiKeyColumns selects a full api_keys row for scanAPIKey-style reads.
+const apiKeyColumns = `id, name, key_hash, key_prefix, created_at, expires_at, COALESCE(rate_limit, 0), COALESCE(budget_usd, 0),
+	COALESCE(spend_usd, 0), COALESCE(monthly_cost_budget, 0), COALESCE(monthly_token_budget, 0), COALESCE(enabled, 0),
+	workspace_id, role, COALESCE(metadata, ''), COALESCE(allowed_models, '[]')`
+
 // InsertAPIKey stores an API key.
 func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
 	allowedModels, err := json.Marshal(key.AllowedModels)
@@ -970,33 +1055,35 @@ func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
 	meta, _ := json.Marshal(key.Metadata)
 	var expiresAt *string
 	if key.ExpiresAt != nil {
-		s := key.ExpiresAt.Format(time.RFC3339)
+		s := formatTime(*key.ExpiresAt)
 		expiresAt = &s
 	}
+	// One statement, so a concurrent IncrementAPIKeySpend can never land
+	// between an insert and a follow-up update. spend_usd is only written
+	// for a new key: re-running the upsert (the bootstrap key on every
+	// restart) must not reset accumulated spend.
 	_, err = s.exec(ctx,
-		`INSERT INTO api_keys (id, name, key_hash, key_prefix, created_at, expires_at, rate_limit, enabled, workspace_id, role, metadata, allowed_models)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO api_keys (id, name, key_hash, key_prefix, created_at, expires_at, rate_limit,
+			budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, workspace_id, role, metadata, allowed_models)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			key_hash = excluded.key_hash,
 			key_prefix = excluded.key_prefix,
 			expires_at = excluded.expires_at,
 			rate_limit = excluded.rate_limit,
+			budget_usd = excluded.budget_usd,
+			monthly_cost_budget = excluded.monthly_cost_budget,
+			monthly_token_budget = excluded.monthly_token_budget,
 			enabled = excluded.enabled,
 			workspace_id = excluded.workspace_id,
 			role = excluded.role,
 			metadata = excluded.metadata,
 			allowed_models = excluded.allowed_models`,
 		key.ID, key.Name, key.KeyHash, key.KeyPrefix,
-		key.CreatedAt.Format(time.RFC3339), expiresAt,
-		key.RateLimit, boolToInt(key.Enabled), key.WorkspaceID, key.Role, string(meta), string(allowedModels),
-	)
-	if err != nil {
-		return err
-	}
-	_, err = s.exec(ctx,
-		"UPDATE api_keys SET budget_usd = ?, spend_usd = ?, monthly_cost_budget = ?, monthly_token_budget = ? WHERE id = ?",
-		firstPositive(key.BudgetUSD, key.MonthlyCostBudget), key.SpendUSD, key.MonthlyCostBudget, key.MonthlyTokenBudget, key.ID,
+		formatTime(key.CreatedAt), expiresAt, key.RateLimit,
+		key.BudgetUSD, key.SpendUSD, key.MonthlyCostBudget, key.MonthlyTokenBudget,
+		boolToInt(key.Enabled), key.WorkspaceID, key.Role, string(meta), string(allowedModels),
 	)
 	return err
 }
@@ -1009,16 +1096,16 @@ func (s *Store) GetAPIKeyByHash(ctx context.Context, hash string) (APIKey, error
 	var enabled int
 
 	err := s.queryRow(ctx,
-		"SELECT id, name, key_hash, key_prefix, created_at, expires_at, rate_limit, budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, workspace_id, role, metadata, allowed_models FROM api_keys WHERE key_hash = ?",
+		"SELECT "+apiKeyColumns+" FROM api_keys WHERE key_hash = ?",
 		hash,
 	).Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &createdAt, &expiresAt, &key.RateLimit, &key.BudgetUSD, &key.SpendUSD, &key.MonthlyCostBudget, &key.MonthlyTokenBudget, &enabled, &workspaceID, &role, &metaStr, &allowedModels)
 	if err != nil {
 		return key, err
 	}
 
-	key.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	key.CreatedAt = parseTime(createdAt)
 	if expiresAt.Valid {
-		t, _ := time.Parse(time.RFC3339, expiresAt.String)
+		t := parseTime(expiresAt.String)
 		key.ExpiresAt = &t
 	}
 	key.WorkspaceID = nullableString(workspaceID)
@@ -1033,8 +1120,18 @@ func (s *Store) GetAPIKeyByHash(ctx context.Context, hash string) (APIKey, error
 
 // ListAPIKeys returns all API keys.
 func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
+	return s.listAPIKeys(ctx, "")
+}
+
+// listAPIKeys returns the API keys that match the optional SQL condition.
+func (s *Store) listAPIKeys(ctx context.Context, where string, args ...any) ([]APIKey, error) {
+	if where != "" {
+		where = " WHERE " + where
+	}
 	rows, err := s.query(ctx,
-		"SELECT id, name, key_prefix, created_at, expires_at, rate_limit, budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, workspace_id, role, allowed_models FROM api_keys ORDER BY created_at DESC")
+		`SELECT id, name, key_prefix, created_at, expires_at, COALESCE(rate_limit, 0), COALESCE(budget_usd, 0), COALESCE(spend_usd, 0),
+			COALESCE(monthly_cost_budget, 0), COALESCE(monthly_token_budget, 0), COALESCE(enabled, 0), workspace_id, role, COALESCE(allowed_models, '[]')
+		FROM api_keys`+where+` ORDER BY created_at DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1049,9 +1146,9 @@ func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 		if err := rows.Scan(&k.ID, &k.Name, &k.KeyPrefix, &createdAt, &expiresAt, &k.RateLimit, &k.BudgetUSD, &k.SpendUSD, &k.MonthlyCostBudget, &k.MonthlyTokenBudget, &enabled, &workspaceID, &role, &allowedModels); err != nil {
 			return nil, err
 		}
-		k.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		k.CreatedAt = parseTime(createdAt)
 		if expiresAt.Valid {
-			t, _ := time.Parse(time.RFC3339, expiresAt.String)
+			t := parseTime(expiresAt.String)
 			k.ExpiresAt = &t
 		}
 		k.WorkspaceID = nullableString(workspaceID)
@@ -1076,86 +1173,95 @@ func (s *Store) InsertPrompt(ctx context.Context, p Prompt) error {
 	vars, _ := json.Marshal(p.Variables)
 	meta, _ := json.Marshal(p.Metadata)
 	_, err := s.exec(ctx,
-		`INSERT INTO prompts (id, name, version, template, variables, created_at, updated_at, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, p.Name, p.Version, p.Template, string(vars),
-		p.CreatedAt.Format(time.RFC3339), p.UpdatedAt.Format(time.RFC3339), string(meta),
+		`INSERT INTO prompts (id, workspace_id, name, version, template, variables, created_at, updated_at, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, p.WorkspaceID, p.Name, p.Version, p.Template, string(vars),
+		formatTime(p.CreatedAt), formatTime(p.UpdatedAt), string(meta),
 	)
 	return err
 }
 
-// ListPrompts returns all prompts.
+// ListPrompts returns all prompts in every workspace namespace.
 func (s *Store) ListPrompts(ctx context.Context) ([]Prompt, error) {
-	rows, err := s.query(ctx,
-		"SELECT id, name, version, template, variables, created_at, updated_at FROM prompts ORDER BY updated_at DESC")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var prompts []Prompt
-	for rows.Next() {
-		var p Prompt
-		var createdAt, updatedAt, varsStr string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Version, &p.Template, &varsStr, &createdAt, &updatedAt); err != nil {
-			return nil, err
-		}
-		p.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-		p.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
-		_ = json.Unmarshal([]byte(varsStr), &p.Variables)
-		prompts = append(prompts, p)
-	}
-	return prompts, rows.Err()
+	return s.listPrompts(ctx, "SELECT "+promptColumns+" FROM prompts ORDER BY updated_at DESC")
 }
 
+// ListPromptVersions returns every version of name in the global namespace
+// (the empty workspace ID). Use ListWorkspacePromptVersions for a workspace.
 func (s *Store) ListPromptVersions(ctx context.Context, name string) ([]Prompt, error) {
-	rows, err := s.query(ctx,
-		"SELECT id, name, version, template, variables, created_at, updated_at FROM prompts WHERE name = ? ORDER BY version DESC",
-		name,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var prompts []Prompt
-	for rows.Next() {
-		var p Prompt
-		var createdAt, updatedAt, varsStr string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Version, &p.Template, &varsStr, &createdAt, &updatedAt); err != nil {
-			return nil, err
-		}
-		p.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-		p.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
-		_ = json.Unmarshal([]byte(varsStr), &p.Variables)
-		prompts = append(prompts, p)
-	}
-	return prompts, rows.Err()
+	return s.ListWorkspacePromptVersions(ctx, "", name)
 }
 
-func (s *Store) NextPromptVersion(ctx context.Context, name string) (int, error) {
-	var latest int
-	err := s.queryRow(ctx, "SELECT COALESCE(MAX(version), 0) FROM prompts WHERE name = ?", name).Scan(&latest)
+// maxPromptVersionAttempts bounds CreatePromptVersion retries when a
+// concurrent create for the same name wins the race for a version number.
+const maxPromptVersionAttempts = 5
+
+// CreatePromptVersion stores p as the next version of p.Name and returns it
+// with Version set. The version is computed inside the INSERT, so two
+// concurrent creates cannot both read the same MAX(version) and store a
+// duplicate. Versions are numbered per (workspace, name). On PostgreSQL a
+// per-name advisory lock serializes creates for one name; on SQLite the
+// single writer connection does. If the unique (workspace_id, name,
+// version) index rejects the row anyway, the insert is retried.
+func (s *Store) CreatePromptVersion(ctx context.Context, p Prompt) (Prompt, error) {
+	vars, _ := json.Marshal(p.Variables)
+	meta, _ := json.Marshal(p.Metadata)
+	query := s.txSQL(`INSERT INTO prompts (id, workspace_id, name, version, template, variables, created_at, updated_at, metadata)
+		SELECT CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), COALESCE(MAX(version), 0) + 1, CAST(? AS TEXT), CAST(? AS TEXT),
+			CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT)
+		FROM prompts WHERE workspace_id = ? AND name = ?
+		RETURNING version`)
+	args := []any{p.ID, p.WorkspaceID, p.Name, p.Template, string(vars), formatTime(p.CreatedAt), formatTime(p.UpdatedAt), string(meta), p.WorkspaceID, p.Name}
+	var lastErr error
+	for attempt := 0; attempt < maxPromptVersionAttempts; attempt++ {
+		version, err := s.insertPromptVersion(ctx, query, p.WorkspaceID+"/"+p.Name, args)
+		if err == nil {
+			p.Version = version
+			return p, nil
+		}
+		if !isUniqueViolation(err) {
+			return p, err
+		}
+		lastErr = err
+	}
+	return p, fmt.Errorf("create prompt version: %w", lastErr)
+}
+
+func (s *Store) insertPromptVersion(ctx context.Context, query, lockKey string, args []any) (int, error) {
+	tx, err := s.wdb.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	return latest + 1, nil
+	defer func() { _ = tx.Rollback() }()
+	if s.pg {
+		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", "omniswitch.prompt:"+lockKey); err != nil {
+			return 0, err
+		}
+	}
+	var version int
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&version); err != nil {
+		return 0, err
+	}
+	return version, tx.Commit()
 }
 
-// GetPrompt returns a specific prompt by ID.
-func (s *Store) GetPrompt(ctx context.Context, id string) (Prompt, error) {
-	var p Prompt
-	var createdAt, updatedAt, varsStr string
-	err := s.queryRow(ctx,
-		"SELECT id, name, version, template, variables, created_at, updated_at FROM prompts WHERE id = ?", id,
-	).Scan(&p.ID, &p.Name, &p.Version, &p.Template, &varsStr, &createdAt, &updatedAt)
-	if err != nil {
-		return p, err
+// isUniqueViolation reports whether err is a unique-constraint failure on
+// either backend.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
 	}
-	p.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-	p.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
-	_ = json.Unmarshal([]byte(varsStr), &p.Variables)
-	return p, nil
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
+
+// GetPrompt returns a specific prompt by ID, in any workspace namespace.
+// Use GetWorkspacePrompt to stay inside one namespace.
+func (s *Store) GetPrompt(ctx context.Context, id string) (Prompt, error) {
+	return scanPrompt(s.queryRow(ctx, "SELECT "+promptColumns+" FROM prompts WHERE id = ?", id))
 }
 
 // InsertGuardrailEvent stores a guardrail event.
@@ -1163,7 +1269,7 @@ func (s *Store) InsertGuardrailEvent(ctx context.Context, e GuardrailEvent) erro
 	_, err := s.exec(ctx,
 		`INSERT INTO guardrail_events (id, request_id, timestamp, guardrail_type, action, matched, details)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, e.RequestID, e.Timestamp.Format(time.RFC3339Nano),
+		e.ID, e.RequestID, formatTime(e.Timestamp),
 		e.Type, e.Action, boolToInt(e.Matched), e.Details,
 	)
 	return err
@@ -1180,7 +1286,8 @@ func (s *Store) listGuardrailEventsForRequests(ctx context.Context, requestIDs [
 		args[i] = id
 	}
 	rows, err := s.query(ctx,
-		fmt.Sprintf(`SELECT id, request_id, timestamp, guardrail_type, action, matched, details
+		fmt.Sprintf(`SELECT id, COALESCE(request_id, ''), timestamp, COALESCE(guardrail_type, ''), COALESCE(action, ''),
+			COALESCE(matched, 0), COALESCE(details, '')
 		FROM guardrail_events WHERE request_id IN (%s) ORDER BY timestamp ASC`, strings.Join(placeholders, ",")),
 		args...,
 	)
@@ -1196,7 +1303,7 @@ func (s *Store) listGuardrailEventsForRequests(ctx context.Context, requestIDs [
 		if err := rows.Scan(&event.ID, &event.RequestID, &timestamp, &event.Type, &event.Action, &matched, &event.Details); err != nil {
 			return nil, err
 		}
-		event.Timestamp, _ = time.Parse(time.RFC3339Nano, timestamp)
+		event.Timestamp = parseTime(timestamp)
 		event.Matched = matched == 1
 		events = append(events, event)
 	}
@@ -1210,16 +1317,16 @@ func (s *Store) GetAPIKeyByID(ctx context.Context, id string) (APIKey, error) {
 	var enabled int
 
 	err := s.queryRow(ctx,
-		"SELECT id, name, key_hash, key_prefix, created_at, expires_at, rate_limit, budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, workspace_id, role, metadata, allowed_models FROM api_keys WHERE id = ?",
+		"SELECT "+apiKeyColumns+" FROM api_keys WHERE id = ?",
 		id,
 	).Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &createdAt, &expiresAt, &key.RateLimit, &key.BudgetUSD, &key.SpendUSD, &key.MonthlyCostBudget, &key.MonthlyTokenBudget, &enabled, &workspaceID, &role, &metaStr, &allowedModels)
 	if err != nil {
 		return key, err
 	}
 
-	key.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	key.CreatedAt = parseTime(createdAt)
 	if expiresAt.Valid {
-		t, _ := time.Parse(time.RFC3339, expiresAt.String)
+		t := parseTime(expiresAt.String)
 		key.ExpiresAt = &t
 	}
 	key.WorkspaceID = nullableString(workspaceID)
@@ -1240,14 +1347,18 @@ func (s *Store) IncrementAPIKeySpend(ctx context.Context, id string, amount floa
 	return err
 }
 
+// GetBudgetUsage sums the cost and tokens a key used since the given time.
+// Every upstream call that incurred cost counts, including a response that
+// an output guardrail later blocked, the same as spend_usd. Cache hits are
+// free and do not count.
 func (s *Store) GetBudgetUsage(ctx context.Context, apiKeyID string, since time.Time) (BudgetUsage, error) {
 	var usage BudgetUsage
 	err := s.queryRow(ctx, `
 		SELECT COALESCE(SUM(cost), 0), COALESCE(SUM(total_tokens), 0)
 		FROM request_logs
-		WHERE api_key_id = ? AND timestamp >= ? AND decision = 'ALLOW'`,
+		WHERE api_key_id = ? AND timestamp >= ? AND COALESCE(cached, 0) = 0`,
 		apiKeyID,
-		since.Format(time.RFC3339Nano),
+		formatTime(since),
 	).Scan(&usage.Cost, &usage.Tokens)
 	return usage, err
 }
@@ -1264,20 +1375,32 @@ func (s *Store) InsertSemanticCache(ctx context.Context, entry CacheEntry) error
 
 	var expiresAt *string
 	if entry.ExpiresAt != nil {
-		value := entry.ExpiresAt.Format(time.RFC3339Nano)
+		value := formatTime(*entry.ExpiresAt)
 		expiresAt = &value
 	}
 
+	// Entries with an exact-match key are upserted on that key. Inserting a
+	// fresh row for a key whose previous entry had expired used to violate
+	// the unique idx_cache_key index, so that prompt could never be cached
+	// again. The conflict target repeats the partial-index predicate, which
+	// both SQLite and PostgreSQL need to match a partial unique index.
+	conflict := `ON CONFLICT(cache_key) WHERE cache_key IS NOT NULL AND cache_key != '' DO UPDATE SET
+			created_at = excluded.created_at, expires_at = excluded.expires_at,
+			model = excluded.model, prompt_text = excluded.prompt_text,
+			vector_json = excluded.vector_json, response_json = excluded.response_json`
+	if entry.Key == "" {
+		conflict = `ON CONFLICT(id) DO UPDATE SET
+			cache_key = excluded.cache_key, created_at = excluded.created_at, expires_at = excluded.expires_at,
+			model = excluded.model, prompt_text = excluded.prompt_text,
+			vector_json = excluded.vector_json, response_json = excluded.response_json`
+	}
 	_, err = s.exec(ctx,
 		`INSERT INTO semantic_cache (id, cache_key, created_at, expires_at, model, prompt_text, vector_json, response_json)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-			cache_key = excluded.cache_key, created_at = excluded.created_at, expires_at = excluded.expires_at,
-			model = excluded.model, prompt_text = excluded.prompt_text,
-			vector_json = excluded.vector_json, response_json = excluded.response_json`,
+		`+conflict,
 		entry.ID,
 		entry.Key,
-		entry.CreatedAt.Format(time.RFC3339Nano),
+		formatTime(entry.CreatedAt),
 		expiresAt,
 		entry.Model,
 		entry.Prompt,
@@ -1287,16 +1410,81 @@ func (s *Store) InsertSemanticCache(ctx context.Context, entry CacheEntry) error
 	return err
 }
 
+// purgeBatchSize bounds how many rows one DELETE removes, so a large purge
+// does not hold the SQLite write lock (or one long PostgreSQL statement)
+// for the whole run.
+const purgeBatchSize = 1000
+
+// PurgeExpiredCache deletes cache entries that expired before now and
+// returns how many rows it removed. Entries without an expiry are kept.
+func (s *Store) PurgeExpiredCache(ctx context.Context, now time.Time) (int64, error) {
+	return s.deleteInBatches(ctx, "semantic_cache",
+		"expires_at IS NOT NULL AND expires_at != '' AND expires_at < ?", formatTime(now))
+}
+
+// RetentionResult reports how many rows PurgeRecordsBefore removed.
+type RetentionResult struct {
+	RequestLogs     int64 `json:"request_logs"`
+	GuardrailEvents int64 `json:"guardrail_events"`
+	ShadowRequests  int64 `json:"shadow_requests"`
+}
+
+// PurgeRecordsBefore deletes request logs, guardrail events and shadow
+// requests with a timestamp before cutoff, in batches. Monthly budgets are
+// computed from request_logs, so callers should never pass a cutoff inside
+// the current month.
+func (s *Store) PurgeRecordsBefore(ctx context.Context, cutoff time.Time) (RetentionResult, error) {
+	var result RetentionResult
+	bound := formatTime(cutoff)
+	var err error
+	if result.RequestLogs, err = s.deleteInBatches(ctx, "request_logs", "timestamp < ?", bound); err != nil {
+		return result, err
+	}
+	if result.GuardrailEvents, err = s.deleteInBatches(ctx, "guardrail_events", "timestamp < ?", bound); err != nil {
+		return result, err
+	}
+	if result.ShadowRequests, err = s.deleteInBatches(ctx, "shadow_requests", "timestamp < ?", bound); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// deleteInBatches deletes the rows of table that match where, at most
+// purgeBatchSize per statement. table and where are package constants,
+// never caller input.
+func (s *Store) deleteInBatches(ctx context.Context, table, where string, args ...any) (int64, error) {
+	query := fmt.Sprintf("DELETE FROM %s WHERE id IN (SELECT id FROM %s WHERE %s LIMIT ?)", table, table, where)
+	args = append(args, purgeBatchSize)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		res, err := s.exec(ctx, query, args...)
+		if err != nil {
+			return total, fmt.Errorf("purge %s: %w", table, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, fmt.Errorf("purge %s: %w", table, err)
+		}
+		total += n
+		if n < purgeBatchSize {
+			return total, nil
+		}
+	}
+}
+
 func (s *Store) GetExactCache(ctx context.Context, key string) (CacheEntry, bool, error) {
 	var entry CacheEntry
 	var createdAt, expiresAt, vectorJSON, responseJSON string
 	err := s.queryRow(ctx,
-		`SELECT id, cache_key, created_at, COALESCE(expires_at, ''), model, prompt_text, vector_json, response_json
+		`SELECT id, COALESCE(cache_key, ''), created_at, COALESCE(expires_at, ''), model, prompt_text, vector_json, response_json
 		FROM semantic_cache
 		WHERE cache_key = ? AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?)
 		LIMIT 1`,
 		key,
-		time.Now().UTC().Format(time.RFC3339Nano),
+		formatTime(time.Now().UTC()),
 	).Scan(&entry.ID, &entry.Key, &createdAt, &expiresAt, &entry.Model, &entry.Prompt, &vectorJSON, &responseJSON)
 	if err == sql.ErrNoRows {
 		return CacheEntry{}, false, nil
@@ -1304,9 +1492,9 @@ func (s *Store) GetExactCache(ctx context.Context, key string) (CacheEntry, bool
 	if err != nil {
 		return CacheEntry{}, false, err
 	}
-	entry.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	entry.CreatedAt = parseTime(createdAt)
 	if expiresAt != "" {
-		parsed, _ := time.Parse(time.RFC3339Nano, expiresAt)
+		parsed := parseTime(expiresAt)
 		entry.ExpiresAt = &parsed
 	}
 	if err := json.Unmarshal([]byte(vectorJSON), &entry.Vector); err != nil {
@@ -1320,12 +1508,12 @@ func (s *Store) GetExactCache(ctx context.Context, key string) (CacheEntry, bool
 
 func (s *Store) FindSemanticCache(ctx context.Context, model string, vector map[string]float64, threshold float64) (CacheEntry, bool, error) {
 	rows, err := s.query(ctx,
-		`SELECT id, cache_key, created_at, COALESCE(expires_at, ''), model, prompt_text, vector_json, response_json
+		`SELECT id, COALESCE(cache_key, ''), created_at, COALESCE(expires_at, ''), model, prompt_text, vector_json, response_json
 		FROM semantic_cache
 		WHERE model = ? AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?)
 		ORDER BY created_at DESC LIMIT 250`,
 		model,
-		time.Now().UTC().Format(time.RFC3339Nano),
+		formatTime(time.Now().UTC()),
 	)
 	if err != nil {
 		return CacheEntry{}, false, err
@@ -1340,9 +1528,9 @@ func (s *Store) FindSemanticCache(ctx context.Context, model string, vector map[
 		if err := rows.Scan(&entry.ID, &entry.Key, &createdAt, &expiresAt, &entry.Model, &entry.Prompt, &vectorJSON, &responseJSON); err != nil {
 			return CacheEntry{}, false, err
 		}
-		entry.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		entry.CreatedAt = parseTime(createdAt)
 		if expiresAt != "" {
-			parsed, _ := time.Parse(time.RFC3339Nano, expiresAt)
+			parsed := parseTime(expiresAt)
 			entry.ExpiresAt = &parsed
 		}
 		if err := json.Unmarshal([]byte(vectorJSON), &entry.Vector); err != nil {
@@ -1368,6 +1556,10 @@ func (s *Store) FindSemanticCache(ctx context.Context, model string, vector map[
 	return best, true, nil
 }
 
+const shadowColumns = `id, request_id, COALESCE(trace_id, ''), timestamp, COALESCE(primary_provider, ''),
+	COALESCE(shadow_provider, ''), COALESCE(model, ''), COALESCE(latency_ms, 0), COALESCE(cost, 0),
+	COALESCE(status, ''), COALESCE(error_message, '')`
+
 func (s *Store) InsertShadowLog(ctx context.Context, entry ShadowLog) error {
 	_, err := s.exec(ctx,
 		`INSERT INTO shadow_requests (id, request_id, trace_id, timestamp, primary_provider, shadow_provider, model, latency_ms, cost, status, error_message)
@@ -1375,7 +1567,7 @@ func (s *Store) InsertShadowLog(ctx context.Context, entry ShadowLog) error {
 		entry.ID,
 		entry.RequestID,
 		entry.TraceID,
-		entry.Timestamp.Format(time.RFC3339Nano),
+		formatTime(entry.Timestamp),
 		entry.PrimaryProvider,
 		entry.ShadowProvider,
 		entry.Model,
@@ -1389,7 +1581,7 @@ func (s *Store) InsertShadowLog(ctx context.Context, entry ShadowLog) error {
 
 func (s *Store) ListShadowLogs(ctx context.Context, requestID string) ([]ShadowLog, error) {
 	rows, err := s.query(ctx,
-		`SELECT id, request_id, trace_id, timestamp, primary_provider, shadow_provider, model, latency_ms, cost, status, error_message
+		`SELECT `+shadowColumns+`
 		FROM shadow_requests WHERE request_id = ? ORDER BY timestamp DESC`,
 		requestID,
 	)
@@ -1405,17 +1597,29 @@ func (s *Store) ListShadowLogs(ctx context.Context, requestID string) ([]ShadowL
 		if err := rows.Scan(&entry.ID, &entry.RequestID, &entry.TraceID, &timestamp, &entry.PrimaryProvider, &entry.ShadowProvider, &entry.Model, &entry.LatencyMs, &entry.Cost, &entry.Status, &entry.ErrorMessage); err != nil {
 			return nil, err
 		}
-		entry.Timestamp, _ = time.Parse(time.RFC3339Nano, timestamp)
+		entry.Timestamp = parseTime(timestamp)
 		logs = append(logs, entry)
 	}
 	return logs, rows.Err()
 }
 
-func (s *Store) listShadowLogsForTrace(ctx context.Context, traceID string) ([]ShadowLog, error) {
+// listShadowLogsForRequests returns the shadow requests of a trace that
+// belong to the given primary requests.
+func (s *Store) listShadowLogsForRequests(ctx context.Context, traceID string, requestIDs []string) ([]ShadowLog, error) {
+	if len(requestIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(requestIDs))
+	args := make([]any, 0, len(requestIDs)+1)
+	args = append(args, traceID)
+	for i, id := range requestIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
 	rows, err := s.query(ctx,
-		`SELECT id, request_id, trace_id, timestamp, primary_provider, shadow_provider, model, latency_ms, cost, status, error_message
-		FROM shadow_requests WHERE trace_id = ? ORDER BY timestamp ASC`,
-		traceID,
+		`SELECT `+shadowColumns+`
+		FROM shadow_requests WHERE trace_id = ? AND request_id IN (`+strings.Join(placeholders, ",")+`) ORDER BY timestamp ASC`,
+		args...,
 	)
 	if err != nil {
 		return nil, err
@@ -1428,7 +1632,7 @@ func (s *Store) listShadowLogsForTrace(ctx context.Context, traceID string) ([]S
 		if err := rows.Scan(&entry.ID, &entry.RequestID, &entry.TraceID, &timestamp, &entry.PrimaryProvider, &entry.ShadowProvider, &entry.Model, &entry.LatencyMs, &entry.Cost, &entry.Status, &entry.ErrorMessage); err != nil {
 			return nil, err
 		}
-		entry.Timestamp, _ = time.Parse(time.RFC3339Nano, timestamp)
+		entry.Timestamp = parseTime(timestamp)
 		logs = append(logs, entry)
 	}
 	return logs, rows.Err()
@@ -1437,27 +1641,33 @@ func (s *Store) listShadowLogsForTrace(ctx context.Context, traceID string) ([]S
 func (s *Store) InsertFeedback(ctx context.Context, entry Feedback) error {
 	metadata, _ := json.Marshal(entry.Metadata)
 	_, err := s.exec(ctx,
-		`INSERT INTO feedback (id, request_id, trace_id, timestamp, score, rating, comment, user_id, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO feedback (id, request_id, trace_id, timestamp, score, rating, comment, user_id, metadata,
+			workspace_id, organization_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID,
 		entry.RequestID,
 		entry.TraceID,
-		entry.Timestamp.Format(time.RFC3339Nano),
+		formatTime(entry.Timestamp),
 		entry.Score,
 		entry.Rating,
 		entry.Comment,
 		entry.UserID,
 		string(metadata),
+		entry.WorkspaceID,
+		entry.OrganizationID,
 	)
 	return err
 }
 
 func (s *Store) ListFeedback(ctx context.Context, limit int, requestID, traceID string) ([]Feedback, error) {
+	return s.listFeedback(ctx, limit, requestID, traceID, LogScope{})
+}
+
+func (s *Store) listFeedback(ctx context.Context, limit int, requestID, traceID string, scope LogScope) ([]Feedback, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	where := "1=1"
-	args := []any{}
+	where, args := scope.tenantOnly().where("1=1", nil)
 	if requestID != "" {
 		where += " AND request_id = ?"
 		args = append(args, requestID)
@@ -1469,7 +1679,9 @@ func (s *Store) ListFeedback(ctx context.Context, limit int, requestID, traceID 
 	args = append(args, limit)
 
 	rows, err := s.query(ctx,
-		fmt.Sprintf(`SELECT id, request_id, trace_id, timestamp, score, rating, comment, user_id, metadata
+		fmt.Sprintf(`SELECT id, COALESCE(request_id, ''), COALESCE(trace_id, ''), timestamp, COALESCE(score, 0), COALESCE(rating, ''),
+			COALESCE(comment, ''), COALESCE(user_id, ''), COALESCE(metadata, ''), COALESCE(workspace_id, ''),
+			COALESCE(organization_id, '')
 		FROM feedback WHERE %s ORDER BY timestamp DESC LIMIT ?`, where),
 		args...,
 	)
@@ -1483,10 +1695,11 @@ func (s *Store) ListFeedback(ctx context.Context, limit int, requestID, traceID 
 		var entry Feedback
 		var timestamp string
 		var metadata string
-		if err := rows.Scan(&entry.ID, &entry.RequestID, &entry.TraceID, &timestamp, &entry.Score, &entry.Rating, &entry.Comment, &entry.UserID, &metadata); err != nil {
+		if err := rows.Scan(&entry.ID, &entry.RequestID, &entry.TraceID, &timestamp, &entry.Score, &entry.Rating, &entry.Comment, &entry.UserID, &metadata,
+			&entry.WorkspaceID, &entry.OrganizationID); err != nil {
 			return nil, err
 		}
-		entry.Timestamp, _ = time.Parse(time.RFC3339Nano, timestamp)
+		entry.Timestamp = parseTime(timestamp)
 		_ = json.Unmarshal([]byte(metadata), &entry.Metadata)
 		entries = append(entries, entry)
 	}
@@ -1504,7 +1717,7 @@ func (s *Store) InsertOrganization(ctx context.Context, org Organization) error 
 		ON CONFLICT(id) DO UPDATE SET name = excluded.name, metadata = excluded.metadata`,
 		org.ID,
 		org.Name,
-		org.CreatedAt.Format(time.RFC3339Nano),
+		formatTime(org.CreatedAt),
 		string(metadata),
 	)
 	return err
@@ -1512,7 +1725,7 @@ func (s *Store) InsertOrganization(ctx context.Context, org Organization) error 
 
 func (s *Store) ListOrganizations(ctx context.Context) ([]Organization, error) {
 	rows, err := s.query(ctx,
-		"SELECT id, name, created_at, metadata FROM organizations ORDER BY created_at DESC")
+		"SELECT id, name, created_at, COALESCE(metadata, '') FROM organizations ORDER BY created_at DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -1525,7 +1738,7 @@ func (s *Store) ListOrganizations(ctx context.Context) ([]Organization, error) {
 		if err := rows.Scan(&org.ID, &org.Name, &createdAt, &metadata); err != nil {
 			return nil, err
 		}
-		org.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		org.CreatedAt = parseTime(createdAt)
 		_ = json.Unmarshal([]byte(metadata), &org.Metadata)
 		organizations = append(organizations, org)
 	}
@@ -1547,7 +1760,7 @@ func (s *Store) InsertWorkspace(ctx context.Context, workspace Workspace) error 
 		workspace.ID,
 		workspace.OrganizationID,
 		workspace.Name,
-		workspace.CreatedAt.Format(time.RFC3339Nano),
+		formatTime(workspace.CreatedAt),
 		string(metadata),
 	)
 	return err
@@ -1561,7 +1774,7 @@ func (s *Store) ListWorkspaces(ctx context.Context, organizationID string) ([]Wo
 		args = append(args, organizationID)
 	}
 	rows, err := s.query(ctx,
-		fmt.Sprintf("SELECT id, organization_id, name, created_at, metadata FROM workspaces WHERE %s ORDER BY created_at DESC", where),
+		fmt.Sprintf("SELECT id, organization_id, name, created_at, COALESCE(metadata, '') FROM workspaces WHERE %s ORDER BY created_at DESC", where),
 		args...,
 	)
 	if err != nil {
@@ -1576,7 +1789,7 @@ func (s *Store) ListWorkspaces(ctx context.Context, organizationID string) ([]Wo
 		if err := rows.Scan(&workspace.ID, &workspace.OrganizationID, &workspace.Name, &createdAt, &metadata); err != nil {
 			return nil, err
 		}
-		workspace.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		workspace.CreatedAt = parseTime(createdAt)
 		_ = json.Unmarshal([]byte(metadata), &workspace.Metadata)
 		workspaces = append(workspaces, workspace)
 	}
@@ -1590,37 +1803,54 @@ func (s *Store) GetWorkspaceByID(ctx context.Context, id string) (Workspace, err
 	var workspace Workspace
 	var createdAt, metadata string
 	err := s.queryRow(ctx,
-		"SELECT id, organization_id, name, created_at, metadata FROM workspaces WHERE id = ?", id,
+		"SELECT id, organization_id, name, created_at, COALESCE(metadata, '') FROM workspaces WHERE id = ?", id,
 	).Scan(&workspace.ID, &workspace.OrganizationID, &workspace.Name, &createdAt, &metadata)
 	if err != nil {
 		return workspace, err
 	}
-	workspace.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	workspace.CreatedAt = parseTime(createdAt)
 	_ = json.Unmarshal([]byte(metadata), &workspace.Metadata)
 	return workspace, nil
 }
 
+// InsertUser upserts user by email. Use UpsertUser to learn the stored ID.
 func (s *Store) InsertUser(ctx context.Context, user User) error {
+	_, err := s.UpsertUser(ctx, user)
+	return err
+}
+
+// UpsertUser inserts user, or updates the name and metadata of the existing
+// user with the same email, and returns the stored row. On an existing email
+// the stored ID and created_at win over the ones in user, so callers must
+// use the returned ID (for example for workspace memberships).
+func (s *Store) UpsertUser(ctx context.Context, user User) (User, error) {
 	if user.CreatedAt.IsZero() {
 		user.CreatedAt = time.Now().UTC()
 	}
 	metadata, _ := json.Marshal(user.Metadata)
-	_, err := s.exec(ctx,
+	var id, createdAt string
+	err := s.writeQueryRow(ctx,
 		`INSERT INTO users (id, email, name, created_at, metadata)
 		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(email) DO UPDATE SET name = excluded.name, metadata = excluded.metadata`,
+		ON CONFLICT(email) DO UPDATE SET name = excluded.name, metadata = excluded.metadata
+		RETURNING id, created_at`,
 		user.ID,
 		user.Email,
 		user.Name,
-		user.CreatedAt.Format(time.RFC3339Nano),
+		formatTime(user.CreatedAt),
 		string(metadata),
-	)
-	return err
+	).Scan(&id, &createdAt)
+	if err != nil {
+		return user, err
+	}
+	user.ID = id
+	user.CreatedAt = parseTime(createdAt)
+	return user, nil
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.query(ctx,
-		"SELECT id, email, COALESCE(name, ''), created_at, metadata FROM users ORDER BY created_at DESC")
+		"SELECT id, email, COALESCE(name, ''), created_at, COALESCE(metadata, '') FROM users ORDER BY created_at DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -1633,7 +1863,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 		if err := rows.Scan(&user.ID, &user.Email, &user.Name, &createdAt, &metadata); err != nil {
 			return nil, err
 		}
-		user.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		user.CreatedAt = parseTime(createdAt)
 		_ = json.Unmarshal([]byte(metadata), &user.Metadata)
 		users = append(users, user)
 	}
@@ -1651,7 +1881,7 @@ func (s *Store) UpsertWorkspaceMember(ctx context.Context, member WorkspaceMembe
 		member.WorkspaceID,
 		member.UserID,
 		member.Role,
-		member.CreatedAt.Format(time.RFC3339Nano),
+		formatTime(member.CreatedAt),
 	)
 	return err
 }
@@ -1679,7 +1909,7 @@ func (s *Store) ListWorkspaceMembers(ctx context.Context, workspaceID string) ([
 		if err := rows.Scan(&member.WorkspaceID, &member.UserID, &member.Role, &createdAt); err != nil {
 			return nil, err
 		}
-		member.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+		member.CreatedAt = parseTime(createdAt)
 		members = append(members, member)
 	}
 	return members, rows.Err()
@@ -1709,8 +1939,8 @@ func (s *Store) InsertVirtualKey(ctx context.Context, key VirtualKeyRecord) erro
 		key.ProviderName,
 		key.BaseURL,
 		key.EncryptedKey,
-		key.CreatedAt.Format(time.RFC3339Nano),
-		key.UpdatedAt.Format(time.RFC3339Nano),
+		formatTime(key.CreatedAt),
+		formatTime(key.UpdatedAt),
 		boolToInt(key.Enabled),
 		key.MetadataJSON,
 	)
@@ -1731,8 +1961,8 @@ func (s *Store) GetVirtualKey(ctx context.Context, name string) (VirtualKeyRecor
 	if err != nil {
 		return record, err
 	}
-	record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-	record.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+	record.CreatedAt = parseTime(createdAt)
+	record.UpdatedAt = parseTime(updatedAt)
 	record.Enabled = enabled == 1
 	return record, nil
 }
@@ -1756,8 +1986,8 @@ func (s *Store) ListVirtualKeys(ctx context.Context) ([]VirtualKeyRecord, error)
 			&record.EncryptedKey, &createdAt, &updatedAt, &enabled, &record.MetadataJSON); err != nil {
 			return nil, err
 		}
-		record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		record.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
+		record.CreatedAt = parseTime(createdAt)
+		record.UpdatedAt = parseTime(updatedAt)
 		record.Enabled = enabled == 1
 		records = append(records, record)
 	}
@@ -1768,7 +1998,7 @@ func (s *Store) RotateVirtualKey(ctx context.Context, name, encryptedKey string)
 	result, err := s.exec(ctx,
 		"UPDATE virtual_keys SET encrypted_key = ?, updated_at = ? WHERE name = ?",
 		encryptedKey,
-		time.Now().UTC().Format(time.RFC3339Nano),
+		formatTime(time.Now().UTC()),
 		name,
 	)
 	if err != nil {
@@ -1784,7 +2014,7 @@ func (s *Store) RotateVirtualKey(ctx context.Context, name, encryptedKey string)
 func (s *Store) DisableVirtualKey(ctx context.Context, name string) error {
 	result, err := s.exec(ctx,
 		"UPDATE virtual_keys SET enabled = 0, updated_at = ? WHERE name = ?",
-		time.Now().UTC().Format(time.RFC3339Nano),
+		formatTime(time.Now().UTC()),
 		name,
 	)
 	if err != nil {
@@ -1799,75 +2029,41 @@ func (s *Store) DisableVirtualKey(ctx context.Context, name string) error {
 
 // Close closes the database connection.
 func (s *Store) Close() error {
-	return s.db.Close()
-}
-
-func (s *Store) ensureColumn(table, column, definition string) error {
-	var exists bool
-	var err error
-	if s.pg {
-		exists, err = s.pgColumnExists(table, column)
-	} else {
-		exists, err = s.sqliteColumnExists(table, column)
-	}
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-
-	if _, err := s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)); err != nil {
-		return fmt.Errorf("add column %s.%s: %w", table, column, err)
-	}
-	return nil
-}
-
-func (s *Store) sqliteColumnExists(table, column string) (bool, error) {
-	rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var cid int
-		var name, columnType string
-		var notNull, pk int
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			return false, err
-		}
-		if name == column {
-			return true, nil
+	s.stopBackground()
+	err := s.db.Close()
+	if s.wdb != nil && s.wdb != s.db {
+		if werr := s.wdb.Close(); err == nil {
+			err = werr
 		}
 	}
-	return false, rows.Err()
+	return err
 }
 
-func (s *Store) pgColumnExists(table, column string) (bool, error) {
-	row := s.db.QueryRow(`
-		SELECT COUNT(*) FROM information_schema.columns
-		WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2`, table, column)
-	var count int
-	if err := row.Scan(&count); err != nil {
-		return false, err
+// timeLayout is the one layout every timestamp column is written in. It is
+// fixed width (nanoseconds are never trimmed) and always UTC, so the TEXT
+// values sort and compare in time order. time.RFC3339Nano trims trailing
+// zeros, and because '.' sorts before 'Z', "00:00:00.5Z" compared lower
+// than "00:00:00Z".
+const timeLayout = "2006-01-02T15:04:05.000000000Z"
+
+// formatTime renders t for storage or for a bound in a timestamp comparison.
+func formatTime(t time.Time) string {
+	return t.UTC().Format(timeLayout)
+}
+
+// parseTime reads a stored timestamp. time.RFC3339Nano also accepts the
+// RFC3339 and RFC3339Nano values written by older releases.
+func parseTime(value string) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}
 	}
-	return count > 0, nil
+	return t
 }
 
 func boolToInt(b bool) int {
 	if b {
 		return 1
-	}
-	return 0
-}
-
-func firstPositive(values ...float64) float64 {
-	for _, value := range values {
-		if value > 0 {
-			return value
-		}
 	}
 	return 0
 }
@@ -1999,53 +2195,67 @@ func (s *Store) CreateDataset(ctx context.Context, dataset *Dataset) error {
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	_, err = s.exec(ctx,
 		`INSERT INTO datasets (id, name, description, version, created_at, updated_at, metadata, examples)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		dataset.ID, dataset.Name, dataset.Description, dataset.Version,
-		dataset.CreatedAt.Format(time.RFC3339Nano), dataset.UpdatedAt.Format(time.RFC3339Nano),
+		formatTime(dataset.CreatedAt), formatTime(dataset.UpdatedAt),
 		string(metadataJSON), string(examplesJSON))
 	return err
 }
 
+const datasetColumns = `id, name, COALESCE(description, ''), COALESCE(version, 1), created_at, updated_at,
+		COALESCE(metadata, ''), COALESCE(examples, '')`
+
+// scanDataset scans one datasetColumns row. Timestamps are stored as TEXT,
+// so they are scanned into strings and parsed rather than into time.Time.
+func scanDataset(row interface{ Scan(...any) error }) (*Dataset, error) {
+	var dataset Dataset
+	var createdAt, updatedAt, metadataJSON, examplesJSON string
+	if err := row.Scan(&dataset.ID, &dataset.Name, &dataset.Description, &dataset.Version,
+		&createdAt, &updatedAt, &metadataJSON, &examplesJSON); err != nil {
+		return nil, err
+	}
+	dataset.CreatedAt = parseTime(createdAt)
+	dataset.UpdatedAt = parseTime(updatedAt)
+	if err := unmarshalOptionalJSON(metadataJSON, &dataset.Metadata); err != nil {
+		return nil, fmt.Errorf("dataset %s metadata: %w", dataset.ID, err)
+	}
+	if err := unmarshalOptionalJSON(examplesJSON, &dataset.Examples); err != nil {
+		return nil, fmt.Errorf("dataset %s examples: %w", dataset.ID, err)
+	}
+	return &dataset, nil
+}
+
+// unmarshalOptionalJSON decodes raw into v, treating an empty column or a
+// JSON null as "no value".
+func unmarshalOptionalJSON(raw string, v any) error {
+	if raw == "" || raw == "null" {
+		return nil
+	}
+	return json.Unmarshal([]byte(raw), v)
+}
+
 // GetDataset retrieves a dataset by ID.
 func (s *Store) GetDataset(ctx context.Context, id string) (*Dataset, error) {
-	var dataset Dataset
-	var metadataJSON, examplesJSON string
-
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, name, description, version, created_at, updated_at, metadata, examples
-		FROM datasets WHERE id = ?`, id).Scan(
-		&dataset.ID, &dataset.Name, &dataset.Description, &dataset.Version,
-		&dataset.CreatedAt, &dataset.UpdatedAt, &metadataJSON, &examplesJSON)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, ErrNotFound
-		}
-		return nil, err
+	dataset, err := scanDataset(s.queryRow(ctx,
+		`SELECT `+datasetColumns+` FROM datasets WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
 	}
-
-	if err := json.Unmarshal([]byte(metadataJSON), &dataset.Metadata); err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal([]byte(examplesJSON), &dataset.Examples); err != nil {
-		return nil, err
-	}
-
-	return &dataset, nil
+	return dataset, err
 }
 
 // ListDatasets lists datasets with pagination.
 func (s *Store) ListDatasets(ctx context.Context, limit, offset int) ([]*Dataset, int, error) {
+	limit, offset = ClampPage(limit, offset)
 	var total int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM datasets`).Scan(&total)
-	if err != nil {
+	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM datasets`).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, description, version, created_at, updated_at, metadata, examples
-		FROM datasets ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+	rows, err := s.query(ctx,
+		`SELECT `+datasetColumns+` FROM datasets ORDER BY created_at DESC, id LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -2053,17 +2263,12 @@ func (s *Store) ListDatasets(ctx context.Context, limit, offset int) ([]*Dataset
 
 	var datasets []*Dataset
 	for rows.Next() {
-		var dataset Dataset
-		var metadataJSON, examplesJSON string
-		if err := rows.Scan(&dataset.ID, &dataset.Name, &dataset.Description, &dataset.Version,
-			&dataset.CreatedAt, &dataset.UpdatedAt, &metadataJSON, &examplesJSON); err != nil {
+		dataset, err := scanDataset(rows)
+		if err != nil {
 			return nil, 0, err
 		}
-		_ = json.Unmarshal([]byte(metadataJSON), &dataset.Metadata)
-		_ = json.Unmarshal([]byte(examplesJSON), &dataset.Examples)
-		datasets = append(datasets, &dataset)
+		datasets = append(datasets, dataset)
 	}
-
 	return datasets, total, rows.Err()
 }
 
@@ -2078,30 +2283,56 @@ func (s *Store) UpdateDataset(ctx context.Context, dataset *Dataset) error {
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	result, err := s.exec(ctx,
 		`UPDATE datasets SET name = ?, description = ?, version = ?, updated_at = ?, metadata = ?, examples = ?
 		WHERE id = ?`,
-		dataset.Name, dataset.Description, dataset.Version, dataset.UpdatedAt.Format(time.RFC3339Nano),
+		dataset.Name, dataset.Description, dataset.Version, formatTime(dataset.UpdatedAt),
 		string(metadataJSON), string(examplesJSON), dataset.ID)
-	return err
+	return notFoundIfNoRows(result, err)
 }
 
 // DeleteDataset deletes a dataset.
 func (s *Store) DeleteDataset(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM datasets WHERE id = ?`, id)
+	result, err := s.exec(ctx, `DELETE FROM datasets WHERE id = ?`, id)
+	return notFoundIfNoRows(result, err)
+}
+
+func notFoundIfNoRows(result sql.Result, err error) error {
 	if err != nil {
 		return err
 	}
-	affected, _ := result.RowsAffected()
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
 	if affected == 0 {
 		return ErrNotFound
 	}
 	return nil
 }
 
-// AddExamples adds examples to a dataset.
+// AddExamples appends examples to a dataset and bumps its version. The
+// read-modify-write of the examples blob runs in one write transaction so
+// concurrent calls cannot drop each other's examples: on SQLite the single
+// immediate-mode writer connection serializes it, and on PostgreSQL the
+// row is locked with SELECT ... FOR UPDATE.
 func (s *Store) AddExamples(ctx context.Context, datasetID string, examples []DatasetExample) error {
-	dataset, err := s.GetDataset(ctx, datasetID)
+	tx, err := s.wdb.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	selectQuery := `SELECT ` + datasetColumns + ` FROM datasets WHERE id = ?`
+	updateQuery := `UPDATE datasets SET examples = ?, version = ?, updated_at = ? WHERE id = ?`
+	if s.pg {
+		selectQuery = rewriteSQL(selectQuery + ` FOR UPDATE`)
+		updateQuery = rewriteSQL(updateQuery)
+	}
+	dataset, err := scanDataset(tx.QueryRowContext(ctx, selectQuery, datasetID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
 	if err != nil {
 		return err
 	}
@@ -2109,19 +2340,29 @@ func (s *Store) AddExamples(ctx context.Context, datasetID string, examples []Da
 	dataset.Examples = append(dataset.Examples, examples...)
 	dataset.Version++
 	dataset.UpdatedAt = time.Now().UTC()
-
 	examplesJSON, err := json.Marshal(dataset.Examples)
 	if err != nil {
 		return err
 	}
-
-	_, err = s.db.ExecContext(ctx,
-		`UPDATE datasets SET examples = ?, version = ?, updated_at = ? WHERE id = ?`,
-		string(examplesJSON), dataset.Version, dataset.UpdatedAt.Format(time.RFC3339Nano), datasetID)
-	return err
+	if _, err := tx.ExecContext(ctx, updateQuery,
+		string(examplesJSON), dataset.Version, formatTime(dataset.UpdatedAt), datasetID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Experiment methods
+
+func marshalExperimentResults(results *ExperimentResult) (string, error) {
+	if results == nil {
+		return "{}", nil
+	}
+	b, err := json.Marshal(results)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
 
 // CreateExperiment creates a new experiment.
 func (s *Store) CreateExperiment(ctx context.Context, exp *Experiment) error {
@@ -2129,68 +2370,74 @@ func (s *Store) CreateExperiment(ctx context.Context, exp *Experiment) error {
 	if err != nil {
 		return err
 	}
-	resultsJSON := "{}"
-	if exp.Results != nil {
-		bytes, _ := json.Marshal(exp.Results)
-		resultsJSON = string(bytes)
+	resultsJSON, err := marshalExperimentResults(exp.Results)
+	if err != nil {
+		return err
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	_, err = s.exec(ctx,
 		`INSERT INTO experiments (id, name, description, dataset_id, config, status, results, created_at, updated_at, created_by)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		exp.ID, exp.Name, exp.Description, exp.DatasetID, string(configJSON),
-		exp.Status, resultsJSON, exp.CreatedAt.Format(time.RFC3339Nano),
-		exp.UpdatedAt.Format(time.RFC3339Nano), exp.CreatedBy)
+		exp.Status, resultsJSON, formatTime(exp.CreatedAt),
+		formatTime(exp.UpdatedAt), exp.CreatedBy)
 	return err
+}
+
+const experimentColumns = `id, name, COALESCE(description, ''), COALESCE(dataset_id, ''), COALESCE(config, ''),
+		COALESCE(status, ''), COALESCE(results, ''), created_at, updated_at, COALESCE(created_by, '')`
+
+// scanExperiment scans one experimentColumns row. results is a JSON TEXT
+// column; "{}" (what CreateExperiment stores for "no results yet") leaves
+// Results nil.
+func scanExperiment(row interface{ Scan(...any) error }) (*Experiment, error) {
+	var exp Experiment
+	var configJSON, resultsJSON, createdAt, updatedAt string
+	if err := row.Scan(&exp.ID, &exp.Name, &exp.Description, &exp.DatasetID, &configJSON,
+		&exp.Status, &resultsJSON, &createdAt, &updatedAt, &exp.CreatedBy); err != nil {
+		return nil, err
+	}
+	exp.CreatedAt = parseTime(createdAt)
+	exp.UpdatedAt = parseTime(updatedAt)
+	if err := unmarshalOptionalJSON(configJSON, &exp.Config); err != nil {
+		return nil, fmt.Errorf("experiment %s config: %w", exp.ID, err)
+	}
+	if resultsJSON != "{}" {
+		if err := unmarshalOptionalJSON(resultsJSON, &exp.Results); err != nil {
+			return nil, fmt.Errorf("experiment %s results: %w", exp.ID, err)
+		}
+	}
+	return &exp, nil
 }
 
 // GetExperiment retrieves an experiment by ID.
 func (s *Store) GetExperiment(ctx context.Context, id string) (*Experiment, error) {
-	var exp Experiment
-	var configJSON, resultsJSON string
-
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, name, description, dataset_id, config, status, results, created_at, updated_at, created_by
-		FROM experiments WHERE id = ?`, id).Scan(
-		&exp.ID, &exp.Name, &exp.Description, &exp.DatasetID, &configJSON,
-		&exp.Status, &exp.Results, &exp.CreatedAt, &exp.UpdatedAt, &exp.CreatedBy)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, ErrNotFound
-		}
-		return nil, err
+	exp, err := scanExperiment(s.queryRow(ctx,
+		`SELECT `+experimentColumns+` FROM experiments WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
 	}
-
-	_ = json.Unmarshal([]byte(configJSON), &exp.Config)
-	_ = json.Unmarshal([]byte(resultsJSON), &exp.Results)
-
-	return &exp, nil
+	return exp, err
 }
 
 // ListExperiments lists experiments with pagination.
 func (s *Store) ListExperiments(ctx context.Context, limit, offset int, status string) ([]*Experiment, int, error) {
-	query := `SELECT COUNT(*) FROM experiments`
+	limit, offset = ClampPage(limit, offset)
+	where := ""
 	args := []any{}
 	if status != "" {
-		query += ` WHERE status = ?`
+		where = ` WHERE status = ?`
 		args = append(args, status)
 	}
 
 	var total int
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(&total)
-	if err != nil {
+	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM experiments`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
-	query = `SELECT id, name, description, dataset_id, config, status, results, created_at, updated_at, created_by
-		FROM experiments`
-	if status != "" {
-		query += ` WHERE status = ?`
-	}
-	query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
-	args = append(args, limit, offset)
-
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.query(ctx,
+		`SELECT `+experimentColumns+` FROM experiments`+where+` ORDER BY created_at DESC, id LIMIT ? OFFSET ?`,
+		append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -2198,20 +2445,12 @@ func (s *Store) ListExperiments(ctx context.Context, limit, offset int, status s
 
 	var experiments []*Experiment
 	for rows.Next() {
-		var exp Experiment
-		var configJSON, resultsJSON string
-		var createdAt, updatedAt string
-		if err := rows.Scan(&exp.ID, &exp.Name, &exp.Description, &exp.DatasetID, &configJSON,
-			&exp.Status, &exp.Results, &createdAt, &updatedAt, &exp.CreatedBy); err != nil {
+		exp, err := scanExperiment(rows)
+		if err != nil {
 			return nil, 0, err
 		}
-		_ = json.Unmarshal([]byte(configJSON), &exp.Config)
-		_ = json.Unmarshal([]byte(resultsJSON), &exp.Results)
-		exp.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		exp.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
-		experiments = append(experiments, &exp)
+		experiments = append(experiments, exp)
 	}
-
 	return experiments, total, rows.Err()
 }
 
@@ -2221,16 +2460,15 @@ func (s *Store) UpdateExperiment(ctx context.Context, exp *Experiment) error {
 	if err != nil {
 		return err
 	}
-	resultsJSON := "{}"
-	if exp.Results != nil {
-		bytes, _ := json.Marshal(exp.Results)
-		resultsJSON = string(bytes)
+	resultsJSON, err := marshalExperimentResults(exp.Results)
+	if err != nil {
+		return err
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	result, err := s.exec(ctx,
 		`UPDATE experiments SET name = ?, description = ?, dataset_id = ?, config = ?, status = ?, results = ?, updated_at = ?
 		WHERE id = ?`,
 		exp.Name, exp.Description, exp.DatasetID, string(configJSON), exp.Status, resultsJSON,
-		exp.UpdatedAt.Format(time.RFC3339Nano), exp.ID)
-	return err
+		formatTime(exp.UpdatedAt), exp.ID)
+	return notFoundIfNoRows(result, err)
 }

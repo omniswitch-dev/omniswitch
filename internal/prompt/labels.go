@@ -24,7 +24,11 @@ func (h *Handler) Labels(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "name is required")
 			return
 		}
-		labels, err := h.store.ListPromptLabels(r.Context(), name)
+		workspaceID, ok := h.resolveWorkspace(w, r, r.URL.Query().Get("workspace_id"))
+		if !ok {
+			return
+		}
+		labels, err := h.store.ListWorkspacePromptLabels(r.Context(), workspaceID, name)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to list prompt labels")
 			return
@@ -32,9 +36,10 @@ func (h *Handler) Labels(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"labels": labels})
 	case http.MethodPost:
 		var req struct {
-			Name     string `json:"name"`
-			Label    string `json:"label"`
-			PromptID string `json:"prompt_id"`
+			Name        string `json:"name"`
+			Label       string `json:"label"`
+			PromptID    string `json:"prompt_id"`
+			WorkspaceID string `json:"workspace_id,omitempty"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid request body")
@@ -44,9 +49,13 @@ func (h *Handler) Labels(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "name, prompt_id, and a 1-64 character alphanumeric/._- label are required")
 			return
 		}
-		label := store.PromptLabel{Name: req.Name, Label: req.Label, PromptID: req.PromptID, UpdatedAt: time.Now().UTC()}
+		workspaceID, ok := h.resolveWorkspace(w, r, req.WorkspaceID)
+		if !ok {
+			return
+		}
+		label := store.PromptLabel{WorkspaceID: workspaceID, Name: req.Name, Label: req.Label, PromptID: req.PromptID, UpdatedAt: time.Now().UTC()}
 		if err := h.store.SetPromptLabel(r.Context(), label); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, sql.ErrNoRows) || errors.Is(err, store.ErrNotFound) {
 				writeError(w, http.StatusNotFound, "prompt version not found for this name")
 			} else {
 				writeError(w, http.StatusInternalServerError, "failed to set prompt label")

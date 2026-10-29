@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -28,6 +27,8 @@ type Bedrock struct {
 	guardrailVersion string
 	models           []string
 	client           *http.Client
+	// endpoint overrides the regional bedrock-runtime base URL (tests only).
+	endpoint string
 }
 
 func NewBedrock(name, region, accessKeyID, secretAccessKey, sessionToken string, models []string) *Bedrock {
@@ -44,7 +45,7 @@ func NewBedrock(name, region, accessKeyID, secretAccessKey, sessionToken string,
 		secretAccessKey: secretAccessKey,
 		sessionToken:    sessionToken,
 		models:          append([]string(nil), models...),
-		client:          &http.Client{Timeout: 120 * time.Second},
+		client:          newProviderClient(defaultRequestTimeout),
 	}
 }
 
@@ -182,8 +183,7 @@ func (b *Bedrock) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResp
 		meta.Error = err.Error()
 		return ChatResponse{}, meta, err
 	}
-	endpoint := fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/converse", b.region, url.PathEscape(req.Model))
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.converseURL(req.Model), bytes.NewReader(body))
 	if err != nil {
 		meta.Error = err.Error()
 		return ChatResponse{}, meta, err
@@ -200,17 +200,19 @@ func (b *Bedrock) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResp
 		return ChatResponse{}, meta, fmt.Errorf("bedrock converse request: %w", err)
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "bedrock converse error", resp)
+		meta.Error = upstreamErr.Body
+		return ChatResponse{}, meta, upstreamErr
+	}
+	payload, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
 		return ChatResponse{}, meta, err
 	}
 	meta.Latency = time.Since(start)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		meta.Error = string(payload)
-		return ChatResponse{}, meta, fmt.Errorf("bedrock converse error (status %d): %s", resp.StatusCode, string(payload))
-	}
 	var bedrockResp bedrockConverseResponse
 	if err := json.Unmarshal(payload, &bedrockResp); err != nil {
 		meta.Error = err.Error()
@@ -239,6 +241,22 @@ func (b *Bedrock) ChatCompletion(ctx context.Context, req ChatRequest) (ChatResp
 		}},
 		Usage: usage,
 	}, meta, nil
+}
+
+// isBedrockClaudeModel reports whether a Bedrock model id (or inference
+// profile / ARN) refers to an Anthropic Claude model, for example
+// "anthropic.claude-sonnet-4-5-20250929-v1:0" or
+// "us.anthropic.claude-haiku-4-5-20251001-v1:0".
+func isBedrockClaudeModel(model string) bool {
+	m := strings.ToLower(model)
+	return strings.Contains(m, "anthropic.") || strings.Contains(m, "claude")
+}
+
+func (b *Bedrock) converseURL(model string) string {
+	if b.endpoint != "" {
+		return b.endpoint + "/model/" + url.PathEscape(model) + "/converse"
+	}
+	return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/converse", b.region, url.PathEscape(model))
 }
 
 // toConverseRequest maps a ChatRequest onto AWS Bedrock's Converse API
@@ -283,11 +301,18 @@ func (b *Bedrock) toConverseRequest(req ChatRequest) (bedrockConverseRequest, er
 		maxTokens = req.MaxCompletionTokens
 	}
 
+	topP := req.TopP
+	if topP != nil && req.Temperature != nil && isBedrockClaudeModel(req.Model) {
+		// Current Claude models reject temperature and top_p together.
+		// Match the Anthropic adapter: keep temperature, drop top_p.
+		topP = nil
+	}
+
 	out := bedrockConverseRequest{
 		InferenceConfig: &bedrockInferenceConfig{
 			MaxTokens:     maxTokens,
 			Temperature:   req.Temperature,
-			TopP:          req.TopP,
+			TopP:          topP,
 			StopSequences: append([]string(nil), req.Stop...),
 		},
 	}
@@ -320,7 +345,7 @@ func (b *Bedrock) toConverseRequest(req ChatRequest) (bedrockConverseRequest, er
 		out.ToolConfig.ToolChoice = mapBedrockToolChoice(req.ToolChoice)
 	}
 	for _, msg := range req.Messages {
-		if msg.Role == "system" {
+		if msg.Role == "system" || msg.Role == "developer" {
 			if text := msg.Text(); text != "" {
 				out.System = append(out.System, bedrockContentBlock{Text: text})
 			}
@@ -336,6 +361,13 @@ func (b *Bedrock) toConverseRequest(req ChatRequest) (bedrockConverseRequest, er
 		content := toBedrockContent(msg)
 		if len(content) == 0 {
 			content = []bedrockContentBlock{{Text: msg.Text()}}
+		}
+		// Converse requires strictly alternating user/assistant turns.
+		// Parallel tool results (one OpenAI "tool" message each) and any
+		// other run of same-role messages are merged into one turn.
+		if n := len(out.Messages); n > 0 && out.Messages[n-1].Role == role {
+			out.Messages[n-1].Content = append(out.Messages[n-1].Content, content...)
+			continue
 		}
 		out.Messages = append(out.Messages, bedrockMessage{Role: role, Content: content})
 	}
@@ -437,36 +469,6 @@ func mapBedrockToolChoice(choice any) *bedrockToolChoice {
 	return &bedrockToolChoice{Auto: &struct{}{}}
 }
 
-func mapBedrockStopReason(reason string) string {
-	switch reason {
-	case "end_turn", "stop_sequence":
-		return "stop"
-	case "max_tokens":
-		return "length"
-	case "tool_use":
-		return "tool_calls"
-	default:
-		return strings.ToLower(reason)
-	}
-}
-
-// bedrockPricing resolves catalog pricing by substring match against known
-// Claude model families, since Bedrock model IDs vary by cross-region
-// inference-profile prefix (e.g. "us.anthropic.claude-3-5-sonnet...") and
-// don't always exactly match the catalog's canonical "anthropic...." IDs.
-func bedrockPricing(model string) ModelPricing {
-	switch {
-	case strings.Contains(model, "claude-3-5-haiku"):
-		return catalogPricingOrZero("bedrock", "anthropic.claude-3-5-haiku-20241022-v1:0")
-	case strings.Contains(model, "claude-3-5-sonnet"):
-		return catalogPricingOrZero("bedrock", "anthropic.claude-3-5-sonnet-20241022-v2:0")
-	case strings.Contains(model, "claude-3-opus"):
-		return catalogPricingOrZero("bedrock", "anthropic.claude-3-opus-20240229-v1:0")
-	default:
-		return ModelPricing{}
-	}
-}
-
 func (b *Bedrock) sign(req *http.Request, payload []byte, now time.Time) error {
 	if b.accessKeyID == "" || b.secretAccessKey == "" {
 		return fmt.Errorf("bedrock AWS credentials are required")
@@ -481,7 +483,7 @@ func (b *Bedrock) sign(req *http.Request, payload []byte, now time.Time) error {
 	canonicalHeaders, signedHeaders := canonicalAWSHeaders(req)
 	canonicalRequest := strings.Join([]string{
 		req.Method,
-		req.URL.EscapedPath(),
+		canonicalAWSURI(req.URL),
 		req.URL.RawQuery,
 		canonicalHeaders,
 		signedHeaders,
@@ -504,6 +506,33 @@ func (b *Bedrock) sign(req *http.Request, payload []byte, now time.Time) error {
 		signature,
 	))
 	return nil
+}
+
+// canonicalAWSURI returns the SigV4 canonical URI. For every service except
+// S3, AWS URI-encodes the already-escaped request path once more (each
+// segment, keeping '/' separators), so a ':' that goes on the wire as ':'
+// is signed as %3A and an escaped %2F is signed as %252F. This matches
+// aws-sdk-go-v2's httpbinding.EscapePath(req.URL.EscapedPath(), false).
+func canonicalAWSURI(u *url.URL) string {
+	path := u.EscapedPath()
+	if path == "" {
+		return "/"
+	}
+	var b strings.Builder
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		if c == '/' || isAWSUnreserved(c) {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
+	}
+	return b.String()
+}
+
+func isAWSUnreserved(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+		c == '-' || c == '_' || c == '.' || c == '~'
 }
 
 func canonicalAWSHeaders(req *http.Request) (string, string) {

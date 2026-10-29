@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/omniswitch-dev/omniswitch/internal/gateway"
 	"github.com/omniswitch-dev/omniswitch/internal/model"
 	"github.com/omniswitch-dev/omniswitch/internal/policy"
 	"github.com/omniswitch-dev/omniswitch/internal/store"
@@ -17,10 +18,26 @@ import (
 // Handler manages evaluation operations
 type Handler struct {
 	store *store.Store
+	// policyRoot is the operator-trusted directory that policy replay
+	// resolves policy_paths against (see SetPolicyRoot).
+	policyRoot string
 }
 
 func NewHandler(st *store.Store) *Handler {
 	return &Handler{store: st}
+}
+
+// requireGlobal rejects tenant-scoped callers. Datasets and experiments
+// have no workspace yet, so only global callers (no workspace and no
+// organization) may read or change them (finding SEC-3). These handlers
+// are not routed today; the check keeps them safe if they are wired up
+// before the records gain a workspace.
+func requireGlobal(w http.ResponseWriter, r *http.Request) bool {
+	if gateway.ScopeFromContext(r.Context()).Global() {
+		return true
+	}
+	writeError(w, http.StatusForbidden, "datasets and experiments are not workspace-scoped; only global callers without a workspace or organization can use them")
+	return false
 }
 
 // Dataset management
@@ -45,6 +62,9 @@ type AddExamplesRequest struct {
 }
 
 func (h *Handler) CreateDataset(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	var req CreateDatasetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -71,6 +91,9 @@ func (h *Handler) CreateDataset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetDataset(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
@@ -91,8 +114,10 @@ func (h *Handler) GetDataset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListDatasets(w http.ResponseWriter, r *http.Request) {
-	limit := parseInt(r.URL.Query().Get("limit"), 50)
-	offset := parseInt(r.URL.Query().Get("offset"), 0)
+	if !requireGlobal(w, r) {
+		return
+	}
+	limit, offset := store.ClampPage(parseInt(r.URL.Query().Get("limit"), store.DefaultPageSize), parseInt(r.URL.Query().Get("offset"), 0))
 
 	datasets, total, err := h.store.ListDatasets(r.Context(), limit, offset)
 	if err != nil {
@@ -109,6 +134,9 @@ func (h *Handler) ListDatasets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) UpdateDataset(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	var req UpdateDatasetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -132,6 +160,10 @@ func (h *Handler) UpdateDataset(w http.ResponseWriter, r *http.Request) {
 	dataset.UpdatedAt = time.Now().UTC()
 
 	if err := h.store.UpdateDataset(r.Context(), dataset); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "dataset not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -140,6 +172,9 @@ func (h *Handler) UpdateDataset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) DeleteDataset(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
@@ -159,6 +194,9 @@ func (h *Handler) DeleteDataset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) AddExamples(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	var req AddExamplesRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -166,6 +204,10 @@ func (h *Handler) AddExamples(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.AddExamples(r.Context(), req.DatasetID, req.Examples); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "dataset not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -183,6 +225,9 @@ type CreateExperimentRequest struct {
 }
 
 func (h *Handler) CreateExperiment(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	var req CreateExperimentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -206,13 +251,27 @@ func (h *Handler) CreateExperiment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Start experiment asynchronously
-	go h.runExperiment(r.Context(), exp)
+	// Respond with a snapshot taken before the run starts: runExperiment
+	// mutates its own copy, so encoding exp here cannot race with it.
+	response := *exp
 
-	writeJSON(w, http.StatusCreated, exp)
+	// The run outlives the request, so it must not use r.Context(), which
+	// is canceled as soon as this handler returns. Keep the request's
+	// values but detach its cancellation, and bound the run instead.
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), experimentRunTimeout)
+	run := *exp
+	go func() {
+		defer cancel()
+		h.runExperiment(runCtx, &run)
+	}()
+
+	writeJSON(w, http.StatusCreated, &response)
 }
 
 func (h *Handler) GetExperiment(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
@@ -233,8 +292,10 @@ func (h *Handler) GetExperiment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListExperiments(w http.ResponseWriter, r *http.Request) {
-	limit := parseInt(r.URL.Query().Get("limit"), 50)
-	offset := parseInt(r.URL.Query().Get("offset"), 0)
+	if !requireGlobal(w, r) {
+		return
+	}
+	limit, offset := store.ClampPage(parseInt(r.URL.Query().Get("limit"), store.DefaultPageSize), parseInt(r.URL.Query().Get("offset"), 0))
 	status := r.URL.Query().Get("status")
 
 	experiments, total, err := h.store.ListExperiments(r.Context(), limit, offset, status)
@@ -252,6 +313,9 @@ func (h *Handler) ListExperiments(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetExperimentResults(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
@@ -270,6 +334,9 @@ func (h *Handler) GetExperimentResults(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, exp.Results)
 }
+
+// experimentRunTimeout bounds a background experiment run.
+const experimentRunTimeout = 30 * time.Minute
 
 func (h *Handler) runExperiment(ctx context.Context, exp *store.Experiment) {
 	// Update status to running
@@ -383,7 +450,16 @@ func (h *Handler) ReplayPolicies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	engine, err := policy.NewEngineFromFiles(req.PolicyPaths...)
+	// Never hand caller-supplied paths to the filesystem: resolve each name
+	// against the trusted policy directory first (SEC-1).
+	paths, err := resolveReplayPolicyPaths(h.policyRoot, req.PolicyPaths)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Compile errors may quote policy source, which is acceptable only
+	// because every path is now inside the operator's policy directory.
+	engine, err := policy.NewEngineFromFiles(paths...)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

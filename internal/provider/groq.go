@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 )
@@ -21,7 +20,7 @@ type Groq struct {
 func NewGroq(apiKey string) *Groq {
 	return &Groq{
 		apiKey: apiKey,
-		client: &http.Client{Timeout: 60 * time.Second},
+		client: newProviderClient(defaultRequestTimeout),
 	}
 }
 
@@ -57,7 +56,13 @@ func (g *Groq) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespons
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "groq error", resp)
+		meta.Error = upstreamErr.Body
+		return ChatResponse{}, meta, upstreamErr
+	}
+	respBody, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
@@ -65,11 +70,6 @@ func (g *Groq) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespons
 	}
 
 	meta.Latency = time.Since(start)
-
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(respBody)
-		return ChatResponse{}, meta, fmt.Errorf("groq error (status %d): %s", resp.StatusCode, string(respBody))
-	}
 
 	var chatResp ChatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
@@ -82,7 +82,7 @@ func (g *Groq) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRespons
 }
 
 func (g *Groq) ChatCompletionStream(ctx context.Context, req ChatRequest) (<-chan ChatResponseChunk, ProviderMeta, error) {
-	return streamOpenAICompatible(ctx, g.client, "https://api.groq.com/openai/v1/chat/completions", g.apiKey, req, "groq", nil)
+	return streamOpenAICompatible(ctx, streamingClient(g.client), "https://api.groq.com/openai/v1/chat/completions", g.apiKey, withStreamUsage(req), "groq", nil)
 }
 
 // Pricing for Groq models is resolved from the consolidated catalog

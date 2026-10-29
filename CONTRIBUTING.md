@@ -8,7 +8,7 @@ Not sure where to start? Look for issues labeled [`good first issue`](https://gi
 
 Requirements:
 
-- Go 1.24 or newer
+- Go 1.26 or newer (`go.mod` pins the `toolchain`, so `GOTOOLCHAIN=auto` downloads the exact version CI uses)
 - Git
 
 Run the test suite:

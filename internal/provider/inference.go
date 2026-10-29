@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -41,7 +40,7 @@ func NewInferenceBackend(name string, replicas []InferenceReplica, healthInterva
 	backend := &InferenceBackend{
 		name:     strings.TrimSpace(name),
 		replicas: append([]InferenceReplica(nil), replicas...),
-		client:   &http.Client{Timeout: 120 * time.Second},
+		client:   newProviderClient(defaultRequestTimeout),
 		health: &healthTracker{
 			latency:   map[string]time.Duration{},
 			queueLen:  map[string]int{},
@@ -119,7 +118,7 @@ func (b *InferenceBackend) ChatCompletionStream(ctx context.Context, req ChatReq
 		meta.Latency = time.Since(start)
 		return StreamFromResponse(ctx, resp), meta, nil
 	}
-	chunks, meta, err := streamOpenAICompatible(ctx, b.client, strings.TrimRight(replica.URL, "/")+"/chat/completions", "", req, b.name, nil)
+	chunks, meta, err := streamOpenAICompatible(ctx, streamingClient(b.client), strings.TrimRight(replica.URL, "/")+"/chat/completions", "", withStreamUsage(req), b.name, nil)
 	meta.ProviderType = "inference"
 	if err == nil {
 		b.health.record(replica.URL, meta.Latency, 0)
@@ -159,12 +158,13 @@ func (b *InferenceBackend) chatOpenAICompatible(ctx context.Context, replica Inf
 		return ChatResponse{}, err
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		upstreamErr := newUpstreamError("inference", "inference replica "+replica.URL+" error", resp)
+		return ChatResponse{}, upstreamErr
+	}
+	payload, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		return ChatResponse{}, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ChatResponse{}, fmt.Errorf("inference replica %s error (status %d): %s", replica.URL, resp.StatusCode, string(payload))
 	}
 	var out ChatResponse
 	if err := json.Unmarshal(payload, &out); err != nil {
@@ -196,12 +196,13 @@ func (b *InferenceBackend) chatTGI(ctx context.Context, replica InferenceReplica
 		return ChatResponse{}, err
 	}
 	defer resp.Body.Close()
-	payload, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		upstreamErr := newUpstreamError("inference", "inference TGI replica "+replica.URL+" error", resp)
+		return ChatResponse{}, upstreamErr
+	}
+	payload, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		return ChatResponse{}, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ChatResponse{}, fmt.Errorf("inference TGI replica %s error (status %d): %s", replica.URL, resp.StatusCode, string(payload))
 	}
 	var tgi struct {
 		GeneratedText string `json:"generated_text"`

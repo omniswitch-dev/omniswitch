@@ -3,13 +3,16 @@ package admin
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/omniswitch-dev/omniswitch/internal/gateway"
 	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
@@ -42,7 +45,9 @@ type CreateKeyResponse struct {
 	APIKey store.APIKey `json:"api_key"`
 }
 
-// CreateAPIKey handles POST /api/keys.
+// CreateAPIKey handles POST /api/keys. When the request carries an
+// authenticated identity, the new key's role may not exceed the caller's,
+// and a workspace-scoped caller can only create keys in its own workspace.
 func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	var req CreateKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -66,6 +71,58 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var expiresAt *time.Time
+	if req.ExpiresIn != "" {
+		dur, err := time.ParseDuration(req.ExpiresIn)
+		if err != nil || dur <= 0 {
+			writeError(w, http.StatusBadRequest, "expires_in must be a positive Go duration such as 720h")
+			return
+		}
+		t := time.Now().Add(dur)
+		expiresAt = &t
+	}
+	if caller, ok := gateway.IdentityFromContext(r.Context()); ok {
+		if len(caller.AllowedModels) > 0 {
+			if len(req.AllowedModels) == 0 {
+				req.AllowedModels = append([]string(nil), caller.AllowedModels...)
+			}
+			for _, model := range req.AllowedModels {
+				if !caller.AllowsModel(model) {
+					writeError(w, http.StatusForbidden, "cannot create a key with broader model access than your own")
+					return
+				}
+			}
+		}
+		if gateway.RoleRank(req.Role) > gateway.RoleRank(caller.Role) {
+			writeError(w, http.StatusForbidden, "cannot create a key with a role above your own")
+			return
+		}
+		switch scope := gateway.ScopeFromContext(r.Context()); {
+		case scope.WorkspaceID != "":
+			if req.WorkspaceID != "" && req.WorkspaceID != scope.WorkspaceID {
+				writeError(w, http.StatusForbidden, "cannot create a key in another workspace")
+				return
+			}
+			req.WorkspaceID = scope.WorkspaceID
+		case !scope.Global():
+			// An organization-scoped caller creates keys only in the
+			// workspaces of its organization; a key without a workspace
+			// would be global.
+			if req.WorkspaceID == "" {
+				writeError(w, http.StatusBadRequest, "workspace_id is required: keys belong to a workspace of your organization")
+				return
+			}
+			visible, err := h.keyInScope(r.Context(), scope, req.WorkspaceID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "look up workspace")
+				return
+			}
+			if !visible {
+				writeError(w, http.StatusNotFound, "workspace not found")
+				return
+			}
+		}
+	}
 
 	rawKey, err := generateKey()
 	if err != nil {
@@ -83,19 +140,12 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		Role:               req.Role,
 		CreatedAt:          time.Now().UTC(),
 		RateLimit:          req.RateLimit,
-		BudgetUSD:          firstPositive(req.BudgetUSD, req.MonthlyCostBudget),
+		BudgetUSD:          req.BudgetUSD,
 		MonthlyCostBudget:  req.MonthlyCostBudget,
 		MonthlyTokenBudget: req.MonthlyTokenBudget,
 		Enabled:            true,
 		AllowedModels:      req.AllowedModels,
-	}
-
-	if req.ExpiresIn != "" {
-		dur, err := time.ParseDuration(req.ExpiresIn)
-		if err == nil {
-			t := time.Now().Add(dur)
-			key.ExpiresAt = &t
-		}
+		ExpiresAt:          expiresAt,
 	}
 
 	if err := h.store.InsertAPIKey(r.Context(), key); err != nil {
@@ -108,7 +158,8 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 // ListAPIKeys handles GET /api/keys.
 func (h *Handler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
-	keys, err := h.store.ListAPIKeys(r.Context())
+	scope := gateway.ScopeFromContext(r.Context())
+	keys, err := h.store.ListAPIKeysForTenant(r.Context(), store.TenantFilter{WorkspaceID: scope.WorkspaceID, OrganizationID: scope.OrganizationID})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -125,6 +176,32 @@ func (h *Handler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "id is required")
 		return
+	}
+	if caller, ok := gateway.IdentityFromContext(r.Context()); ok {
+		target, err := h.store.GetAPIKeyByID(r.Context(), id)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			writeError(w, http.StatusNotFound, "api key not found")
+			return
+		case err != nil:
+			writeError(w, http.StatusInternalServerError, "look up api key")
+			return
+		}
+		visible, err := h.keyInScope(r.Context(), gateway.ScopeFromContext(r.Context()), target.WorkspaceID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "look up api key")
+			return
+		}
+		if !visible {
+			// Same answer as a missing key, so ids in other tenants are
+			// not confirmed.
+			writeError(w, http.StatusNotFound, "api key not found")
+			return
+		}
+		if gateway.RoleRank(target.Role) > gateway.RoleRank(caller.Role) {
+			writeError(w, http.StatusForbidden, "cannot delete a key with a role above your own")
+			return
+		}
 	}
 	if err := h.store.DeleteAPIKey(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -157,13 +234,4 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"message": msg}})
-}
-
-func firstPositive(values ...float64) float64 {
-	for _, value := range values {
-		if value > 0 {
-			return value
-		}
-	}
-	return 0
 }

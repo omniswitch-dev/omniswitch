@@ -10,20 +10,20 @@ states exactly what OmniSwitch implements today.
 
 | Area | Portkey options | AgentGateway options | OmniSwitch status and option |
 | --- | --- | --- | --- |
-| Unified inference API | Universal REST/SDK API across models and multimodal endpoints | OpenAI-compatible routing to cloud and local providers | **Partial:** `/v1/chat/completions`, `/v1/models`, `/v1/responses` text subset, `/v1/messages` core subset, `/v1/embeddings`, `/v1/rerank`, and local `/v1/moderations` |
-| Provider coverage | Large managed provider/model catalog, virtual keys, custom hosts | OpenAI, Anthropic, Gemini, Bedrock and provider backends | **Partial:** native OpenAI, Anthropic, Google, Groq; any OpenAI-compatible `custom` endpoint and aliases. No native Bedrock/Vertex/Cohere adapter yet |
+| Unified inference API | Universal REST/SDK API across models and multimodal endpoints | OpenAI-compatible routing to cloud and local providers | **Partial:** `/v1/chat/completions`, `/v1/models`, `/v1/responses` subset (text and image input, function tools, streamed tool calls), `/v1/messages` core subset, `/v1/embeddings`, `/v1/rerank`, and local `/v1/moderations` |
+| Provider coverage | Large managed provider/model catalog, virtual keys, custom hosts | OpenAI, Anthropic, Gemini, Bedrock and provider backends | **Partial:** native OpenAI, Anthropic, Google, Groq, Cohere, Azure OpenAI and AWS Bedrock; any OpenAI-compatible `custom` endpoint, 8 env-var presets, and aliases. No native Vertex AI adapter yet |
 | Routing | Fallback, load balancing, canary, conditional routing, retries, timeouts, circuit breaker | Load balancing, failover, prompt enrichment, inference-aware Kubernetes routing | **Implemented (core):** `fallbacks`, weighted `variants`, CEL `condition`, retry/backoff/status codes, per-attempt `timeout`, circuit breaker, `shadow_provider` |
 | Request shaping | Defaults, overrides, drop/forward parameters, config via header/API key | Route policies and prompt enrichment | **Implemented (subset):** `default_params`, `override_params`, `drop_params` for model, temperature, max tokens, top-p, stream, and stop |
-| Cache | Simple and semantic cache; config-managed policies | Not a primary advertised cache surface | **Implemented:** exact + semantic cache with `api_key`/`workspace`/`organization`/`global` isolation and TTL |
+| Cache | Simple and semantic cache; config-managed policies | Not a primary advertised cache surface | **Implemented:** exact + semantic cache with `api_key`/`workspace`/`organization`/`global` isolation and TTL; entries are stored in the configured store (SQLite or PostgreSQL) |
 | Budgets and quotas | Cost/token budgets and time-window rate limits | Budget/spend controls and token-aware rate limiting | **Partial:** per-key cost/token budgets, local sliding-window request limits, and optional Redis-coordinated fixed windows; no token-based limiter |
 | Guardrails | Deterministic, AI/partner, custom webhook checks with deny/log/dataset/retry/fallback actions | Regex, OpenAI moderation, Bedrock Guardrails, Model Armor, custom webhooks | **Partial:** built-in PII/injection/SQL/toxic/secret checks, regex rules, local OpenAI-compatible moderation, and HTTP webhook connectors; `deny`, `redact`, `warn`, `log`; structured audit events and buffered SSE output checks. Custom rule scanning runs single-pass in an embedded Rust-WASM module with a pure-Go fallback and precompiled regexes. No native Bedrock/Model Armor connector or guardrail-driven retry/fallback |
-| Authentication and authorization | Managed project/workspace controls and key management | JWT, API keys, OAuth, CEL RBAC, TLS | **Implemented (core):** hashed API keys, bootstrap owner, OIDC JWT/JWKS identity, CEL allow/deny policies, fixed role gates, workspace scope, and vault encryption. OAuth is available for explicitly delegated MCP OIDC bearer tokens; no mTLS |
-| Observability | Detailed logs, traces, analytics, feedback, OTel ingestion | OTel metrics/logs/traces and agent/protocol telemetry | **Partial:** SQLite logs, per-request trace waterfalls (`_spans`), traces/sessions, feedback, provider metrics, OTLP export (Langfuse/Jaeger/Tempo), Prometheus `/metrics`; no external log store |
+| Authentication and authorization | Managed project/workspace controls and key management | JWT, API keys, OAuth, CEL RBAC, TLS | **Implemented (core):** hashed API keys, bootstrap owner, OIDC JWT/JWKS identity, CEL allow/deny policies, fixed role gates, workspace scope, and vault encryption. For MCP targets, OIDC bearer tokens can be forwarded or exchanged (RFC 8693); no mTLS |
+| Observability | Detailed logs, traces, analytics, feedback, OTel ingestion | OTel metrics/logs/traces and agent/protocol telemetry | **Partial:** request logs in the configured store (SQLite or PostgreSQL), per-request trace waterfalls (`_spans`), traces/sessions, feedback, provider metrics, OTLP export (Langfuse/Jaeger/Tempo), Prometheus `/metrics` (behind gateway authentication unless `OMNISWITCH_METRICS_PUBLIC=true`); no external log store |
 | Prompt management | Templates, partials, releases/publish workflow, experiments | Prompt enrichment at route level | **Partial:** templates, versions, rendering. No approval, rollback/promotion, experiments, or partials |
-| MCP | Remote MCP connectivity | Federation; stdio, HTTP, SSE/streamable HTTP, OpenAPI, OAuth | **Partial:** HTTP federation with streamed SSE/streamable-HTTP responses, persistent stdio targets, server-side headers, OIDC bearer delegation, `tools/list`, and policy-gated `tools/call`; no OpenAPI conversion |
-| Agent-to-agent | Agent-framework integrations | Native A2A discovery, negotiation, and task collaboration | **Partial:** public A2A v1 Agent Card discovery plus authenticated JSON-RPC `SendMessage` and `GetExtendedAgentCard`; no task lifecycle, streaming, push notifications, or outbound A2A client |
-| Kubernetes/control plane | Hosted and self-hosted gateway configuration | Standalone plus Kubernetes Gateway API/controller and inference extensions | **Partial:** redacted `/api/config` posture endpoint plus Kustomize manifests for Deployment, Service, ConfigMap, Secret example, PVCs, and Redis; no controller, CRDs, or inference-aware routing |
-| High availability/data plane | Managed platform plus self-hosted gateway | Rust proxy/control plane deployment model | **Partial:** gateway replicas can share Redis request limits; config hot-reload covers routes, guardrails, cache posture, circuit breaker, and shadow provider without restart. Logs/keys remain SQLite-local; no shared database or HA control plane yet |
+| MCP | Remote MCP connectivity | Federation; stdio, HTTP, SSE/streamable HTTP, OpenAPI, OAuth | **Partial:** HTTP federation with streamed SSE/streamable-HTTP responses, persistent stdio targets, server-side headers, OIDC bearer delegation, RFC 8693 token exchange per target (`token_exchange`), `tools/list`, policy-gated `tools/call`, and OpenAPI-to-MCP conversion (`openapi_spec`) |
+| Agent-to-agent | Agent-framework integrations | Native A2A discovery, negotiation, and task collaboration | **Partial:** public A2A v1 Agent Card discovery plus authenticated JSON-RPC `SendMessage`, single-shot `SendMessageStream`, `GetTask`, `CancelTask` and `GetExtendedAgentCard`; tasks are in process memory only; no token streaming, resubscribe, push notifications, or outbound A2A client |
+| Kubernetes/control plane | Hosted and self-hosted gateway configuration | Standalone plus Kubernetes Gateway API/controller and inference extensions | **Partial:** redacted `/api/config` posture endpoint, a Helm chart (`deploy/helm/omniswitch`: SQLite or PostgreSQL, optional Redis, PodDisruptionBudget, ServiceMonitor), plus Kustomize manifests for Deployment, Service, ConfigMap, Secret example, PVCs, and Redis; no controller, CRDs, or inference-aware routing |
+| High availability/data plane | Managed platform plus self-hosted gateway | Rust proxy/control plane deployment model | **Partial:** gateway replicas can share Redis request limits; config hot-reload covers routes, guardrails, cache posture, circuit breaker, and shadow provider without restart. Keys, logs, budgets, configs and cache entries can use a shared PostgreSQL store (`OMNISWITCH_DATABASE_URL`); A2A tasks stay in process memory; no multi-writer HA control plane yet |
 
 ## OmniSwitch Configuration Options Added for This Comparison
 
@@ -120,15 +120,15 @@ OmniSwitch now covers the highest-leverage gateway baseline: safe cache tenancy,
 auth bootstrap/RBAC, OIDC workload identity, CEL authorization, declarative
 routing and request shaping, redacted runtime config posture, core compatibility
 endpoints, deterministic and webhook guardrails, Redis-coordinated request
-limits, MCP federation, stdio MCP, and basic A2A discovery/direct messaging. It
-is still not a drop-in replacement for either larger platform. The largest gaps
-are native provider and endpoint breadth, shared database/config reload
-infrastructure, OpenAPI-to-MCP conversion, full A2A task lifecycle, and
-Kubernetes controller features.
+limits, MCP federation, stdio MCP, and A2A discovery with an in-memory task
+lifecycle. It is still not a drop-in replacement for either larger platform.
+The largest gaps are native provider and endpoint breadth, a multi-writer HA
+control plane, native MCP OAuth provider integrations, A2A push notifications
+and durable tasks, and Kubernetes controller features.
 
 Recommended next investments, in order:
 
-1. Shared database or external control plane for API keys, logs, budgets.
+1. Multi-writer, highly available control plane on top of the PostgreSQL store.
 2. Fuller A2A task lifecycle and MCP spec conformance (stateless servers, `_meta` trace context).
 3. One native MCP OAuth provider flow (Keycloak/Auth0) beyond delegated bearers.
 4. Image, audio, batch, and file APIs; native Vertex adapter.

@@ -33,8 +33,8 @@ API key:
 OPENAI_API_KEY=sk-... omniswitch serve
 ```
 
-The process starts listening on `OMNISWITCH_LISTEN` (default `:8080`) and
-runs until it receives `SIGINT` or `SIGTERM`, at which point it stops
+The process starts listening on `OMNISWITCH_LISTEN` (default `127.0.0.1:8080`
+while authentication is off, `:8080` once `OMNISWITCH_AUTH=true`) and runs until it receives `SIGINT` or `SIGTERM`, at which point it stops
 accepting new connections, drains in-flight requests (including open SSE
 streams) for up to `OMNISWITCH_SHUTDOWN_TIMEOUT` (default `30s`), and exits
 `0`.
@@ -63,8 +63,16 @@ confirming what an installer or Docker image shipped:
 
 ```bash
 omniswitch version
-# omniswitch version v0.2.0-beta (commit abcdef1, built 2026-09-11T00:00:00Z)
+# omniswitch version 0.2.0-beta (commit abcdef1, built 2026-09-11T00:00:00Z)
 ```
+
+Release builds report the version without the leading `v` of the git tag.
+Builds without release metadata (for example `go build` or `go run`) report
+`dev (commit none, built unknown)`. To stamp an image built from source, pass
+the `VERSION`, `COMMIT`, and `DATE` build arguments of the `Dockerfile`, for
+example `docker build --build-arg VERSION=0.2.0-beta --build-arg COMMIT=$(git rev-parse --short HEAD) .`.
+With Docker Compose, set `OMNISWITCH_BUILD_VERSION`, `OMNISWITCH_BUILD_COMMIT`,
+and `OMNISWITCH_BUILD_DATE` before `docker compose build`.
 
 ## `omniswitch help` / `omniswitch --help` / `omniswitch -h`
 

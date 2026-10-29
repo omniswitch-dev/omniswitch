@@ -54,11 +54,46 @@ func (a *AuthMiddleware) SetTokenAuthenticator(authenticator TokenAuthenticator)
 	a.authenticator = authenticator
 }
 
+// internalIdentityHeaders are request headers that downstream handlers
+// trust as identity, quota, or tenant attributes. Only the authentication
+// middleware may set them; any value a client sends is removed first.
+var internalIdentityHeaders = []string{
+	"x-omniswitch-key-id",
+	"x-omniswitch-rate-limit",
+	"x-omniswitch-workspace-id",
+	"x-omniswitch-organization-id",
+	"x-omniswitch-role",
+	"x-omniswitch-auth-method",
+	"x-omniswitch-user-id",
+}
+
+// stripInternalIdentityHeaders deletes every internal identity header from
+// the request.
+func stripInternalIdentityHeaders(header http.Header) {
+	for _, name := range internalIdentityHeaders {
+		header.Del(name)
+	}
+}
+
+// StripInternalIdentityHeaders removes client-supplied internal identity
+// headers (key id, rate limit, workspace, organization, role, auth method,
+// user id) regardless of the authentication mode. Use it as the outermost
+// gateway middleware so a caller can never choose its own quota, cache
+// scope, dashboard scope, or MCP policy role.
+func StripInternalIdentityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stripInternalIdentityHeaders(r.Header)
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (a *AuthMiddleware) Wrap(next http.Handler) http.Handler {
 	if !a.enabled {
-		return next
+		// Without authentication nothing may vouch for identity headers.
+		return StripInternalIdentityHeaders(next)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stripInternalIdentityHeaders(r.Header)
 		if isPublicDiscoveryRoute(r) {
 			next.ServeHTTP(w, r)
 			return
@@ -97,6 +132,9 @@ func (a *AuthMiddleware) Wrap(next http.Handler) http.Handler {
 					organizationID = workspace.OrganizationID
 				}
 			}
+			// Hand the key's budgets to the gateway so budget admission
+			// needs no second key lookup.
+			r = r.WithContext(withAPIKeyBudget(r.Context(), apiKey))
 			a.serveIdentity(w, r, next, Identity{
 				APIKeyID:       apiKey.ID,
 				RateLimit:      apiKey.RateLimit,
@@ -138,6 +176,11 @@ func (a *AuthMiddleware) serveIdentity(w http.ResponseWriter, r *http.Request, n
 	r.Header.Set("x-omniswitch-organization-id", identity.OrganizationID)
 	r.Header.Set("x-omniswitch-role", normalizeRole(identity.Role))
 	r.Header.Set("x-omniswitch-auth-method", identity.AuthMethod)
+	if identity.Subject != "" {
+		r.Header.Set("x-omniswitch-user-id", identity.Subject)
+	} else {
+		r.Header.Del("x-omniswitch-user-id")
+	}
 	next.ServeHTTP(w, r.WithContext(withIdentity(r.Context(), identity)))
 }
 
@@ -223,6 +266,19 @@ func isPublicDiscoveryRoute(r *http.Request) bool {
 	return r.Method == http.MethodGet && r.URL.Path == "/.well-known/agent-card.json"
 }
 
+// isReadMethod reports whether method is a safe, read-only HTTP method.
+// Only these count as reads for role checks; every other method (including
+// unusual ones such as PROPFIND or a GET-like custom verb) is treated as a
+// write so authorization fails closed.
+func isReadMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
+}
+
 func requiredRole(method, path string) string {
 	// Health is intentionally public once the outer authentication middleware
 	// permits it; all other dashboard and control-plane routes need a role.
@@ -232,24 +288,31 @@ func requiredRole(method, path string) string {
 	if !strings.HasPrefix(path, "/api/") {
 		return "viewer"
 	}
+	read := isReadMethod(method)
 	switch path {
-	case "/api/keys", "/api/virtual-keys", "/api/virtual-keys/rotate", "/api/orgs", "/api/workspaces", "/api/users", "/api/workspace-members":
-		if method != http.MethodGet {
-			return "admin"
+	case "/api/keys", "/api/virtual-keys", "/api/virtual-keys/rotate", "/api/users", "/api/workspace-members",
+		"/api/configs", "/api/config/raw":
+		// These expose credentials metadata, user emails, or raw config
+		// bodies that can contain secrets, so even reads need an admin.
+		return "admin"
+	case "/api/orgs", "/api/workspaces":
+		if read {
+			return "viewer"
 		}
-		return "viewer"
-	case "/api/prompts", "/api/prompts/render", "/api/prompts/labels", "/api/evals/policy":
-		if method != http.MethodGet {
-			return "member"
+		return "admin"
+	case "/api/prompts", "/api/prompts/versions", "/api/prompts/render", "/api/prompts/labels", "/api/evals/policy":
+		if read {
+			return "viewer"
 		}
-		return "viewer"
-	case "/api/configs", "/api/config/raw":
-		if method != http.MethodGet {
-			return "admin"
-		}
+		return "member"
+	case "/api/feedback":
+		// Workload keys report feedback on their own responses.
 		return "viewer"
 	default:
-		return "viewer"
+		if read {
+			return "viewer"
+		}
+		return "admin"
 	}
 }
 
@@ -347,20 +410,23 @@ func remoteHost(remoteAddr string) string {
 }
 
 type localRateLimitBackend struct {
-	mu      sync.Mutex
-	windows map[string][]time.Time
+	mu        sync.Mutex
+	windows   map[string][]time.Time
+	lastSweep time.Time
+	now       func() time.Time
 }
 
 func newLocalRateLimitBackend() *localRateLimitBackend {
-	return &localRateLimitBackend{windows: make(map[string][]time.Time)}
+	return &localRateLimitBackend{windows: make(map[string][]time.Time), now: time.Now}
 }
 
 func (backend *localRateLimitBackend) Allow(_ context.Context, key string, limit int, interval time.Duration) (bool, time.Duration, error) {
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
 
-	now := time.Now()
+	now := backend.now()
 	cutoff := now.Add(-interval)
+	backend.sweepLocked(now, cutoff, interval)
 
 	timestamps := backend.windows[key]
 	var valid []time.Time
@@ -371,16 +437,77 @@ func (backend *localRateLimitBackend) Allow(_ context.Context, key string, limit
 	}
 
 	if len(valid) >= limit {
-		backend.windows[key] = valid
+		if len(valid) == 0 {
+			delete(backend.windows, key)
+		} else {
+			backend.windows[key] = valid
+		}
 		retryAfter := interval
 		if len(valid) > 0 {
-			retryAfter = time.Until(valid[0].Add(interval))
+			retryAfter = valid[0].Add(interval).Sub(now)
 		}
 		return false, retryAfter, nil
 	}
 
 	backend.windows[key] = append(valid, now)
 	return true, 0, nil
+}
+
+// sweepLocked drops keys whose newest request is older than the window, at
+// most once per interval, so one-off keys (such as many client addresses)
+// do not accumulate forever. The caller holds backend.mu.
+func (backend *localRateLimitBackend) sweepLocked(now, cutoff time.Time, interval time.Duration) {
+	if now.Sub(backend.lastSweep) < interval {
+		return
+	}
+	backend.lastSweep = now
+	for key, timestamps := range backend.windows {
+		if len(timestamps) == 0 || !timestamps[len(timestamps)-1].After(cutoff) {
+			delete(backend.windows, key)
+		}
+	}
+}
+
+// Default control-plane request body limits.
+const (
+	// DefaultControlPlaneBodyLimit caps /api/* request bodies.
+	DefaultControlPlaneBodyLimit int64 = 1 << 20
+	// DefaultConfigBodyLimit caps gateway config bodies (/api/configs and
+	// /api/config/raw), which are legitimately larger.
+	DefaultConfigBodyLimit int64 = 8 << 20
+)
+
+// ControlPlaneBodyLimit caps request bodies on /api/* routes. Requests whose
+// declared Content-Length is over the limit get 413 immediately; streamed
+// bodies are wrapped in http.MaxBytesReader so decoding fails once the limit
+// is reached instead of buffering an unbounded body in memory, and the
+// handler's error response is then replaced with the same 413. The body is
+// read only by the handler, after authentication. Config endpoints use
+// configLimit; every other /api/ path uses limit.
+func ControlPlaneBodyLimit(limit, configLimit int64, next http.Handler) http.Handler {
+	if limit <= 0 {
+		limit = DefaultControlPlaneBodyLimit
+	}
+	if configLimit <= 0 {
+		configLimit = DefaultConfigBodyLimit
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") || r.Body == nil || r.Body == http.NoBody {
+			next.ServeHTTP(w, r)
+			return
+		}
+		max := limit
+		if r.URL.Path == "/api/configs" || r.URL.Path == "/api/config/raw" {
+			max = configLimit
+		}
+		if r.ContentLength > max {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
+		body := &limitedBody{ReadCloser: http.MaxBytesReader(w, r.Body, max)}
+		r.Body = body
+		next.ServeHTTP(&tooLargeWriter{ResponseWriter: w, body: body}, r)
+	})
 }
 
 // LoggingMiddleware logs every request.
@@ -446,6 +573,24 @@ const identityContextKey contextKey = "identity"
 
 func withIdentity(ctx context.Context, identity Identity) context.Context {
 	return context.WithValue(ctx, identityContextKey, identity)
+}
+
+// ContextWithIdentity returns ctx carrying identity, as AuthMiddleware does
+// for authenticated requests. It exists for handlers' tests and embedders.
+func ContextWithIdentity(ctx context.Context, identity Identity) context.Context {
+	return withIdentity(ctx, identity)
+}
+
+// RoleRank orders roles: owner 4, admin 3, member (or editor) 2, anything
+// else 1 (viewer). Handlers use it to stop callers granting roles above
+// their own.
+func RoleRank(role string) int {
+	return roleRank(role)
+}
+
+// NormalizeRole maps a role name onto owner, admin, member or viewer.
+func NormalizeRole(role string) string {
+	return normalizeRole(role)
 }
 
 func IdentityFromContext(ctx context.Context) (Identity, bool) {

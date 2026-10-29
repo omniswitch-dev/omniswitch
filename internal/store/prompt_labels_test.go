@@ -15,8 +15,8 @@ func TestPromptLabelsSurviveRestartAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	for _, id := range []string{"v1", "v2"} {
-		if err := st.InsertPrompt(ctx, Prompt{ID: id, Name: "support", Template: id, CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+	for index, id := range []string{"v1", "v2"} {
+		if err := st.InsertPrompt(ctx, Prompt{ID: id, Name: "support", Version: index + 1, Template: id, CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
 	}

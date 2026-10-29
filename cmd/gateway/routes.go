@@ -45,6 +45,11 @@ type routeHandlers struct {
 // authentication, authorization, and rate-limit middleware.
 func newGatewayMux(h routeHandlers) *http.ServeMux {
 	mux := http.NewServeMux()
+	if h.dash != nil && h.gateway != nil {
+		// Changes made through /api/configs drop the cached config
+		// routers of this replica at once.
+		h.dash.SetConfigChangeHook(h.gateway.InvalidateConfigRouters)
+	}
 	registerGatewayAPIRoutes(mux, h.gateway)
 	registerInfoRoutes(mux, h.settings, h.registry)
 	if h.mcp != nil {
@@ -60,6 +65,7 @@ func newGatewayMux(h routeHandlers) *http.ServeMux {
 	// Dashboard API + static files.
 	h.dash.RegisterRoutes(mux)
 	if h.settings.prometheusEnabled {
+		h.dash.SetMetricsPublic(h.settings.metricsPublic)
 		h.dash.RegisterPrometheus(mux)
 	}
 	return mux
@@ -219,7 +225,13 @@ func registerPromptRoutes(mux *http.ServeMux, promptHandler *prompt.Handler) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
-	mux.HandleFunc("/api/prompts/render", promptHandler.RenderPrompt)
+	mux.HandleFunc("/api/prompts/render", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		promptHandler.RenderPrompt(w, r)
+	})
 	mux.HandleFunc("/api/prompts/labels", promptHandler.Labels)
 }
 
@@ -240,7 +252,7 @@ func registerEvalRoutes(mux *http.ServeMux, evalHandler *eval.Handler) {
 func wrapGatewayMiddleware(settings runtimeSettings, st *store.Store, mux http.Handler) (http.Handler, func(), error) {
 	auth := gateway.NewAuthMiddleware(st, settings.authEnabled)
 	if settings.oidcJWKSURL != "" {
-		oidcAuthenticator, err := gateway.NewJWTAuthenticator(gateway.JWTAuthenticatorConfig{
+		oidcConfig := gateway.JWTAuthenticatorConfig{
 			JWKSURL:           settings.oidcJWKSURL,
 			Issuer:            settings.oidcIssuer,
 			Audience:          settings.oidcAudience,
@@ -248,7 +260,12 @@ func wrapGatewayMiddleware(settings runtimeSettings, st *store.Store, mux http.H
 			WorkspaceClaim:    settings.oidcWorkspaceClaim,
 			OrganizationClaim: settings.oidcOrganizationClaim,
 			CacheTTL:          settings.oidcCacheTTL,
-		})
+			StaleIfError:      settings.oidcStaleIfError,
+		}
+		for _, warning := range oidcConfig.MissingBindingWarnings() {
+			log.Printf("WARNING: %s", warning)
+		}
+		oidcAuthenticator, err := gateway.NewJWTAuthenticator(oidcConfig)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to initialize OIDC identity: %w", err)
 		}
@@ -272,6 +289,9 @@ func wrapGatewayMiddleware(settings runtimeSettings, st *store.Store, mux http.H
 		return nil, nil, fmt.Errorf("failed to initialize rate limiter: %w", err)
 	}
 	handler := gateway.CORSMiddlewareWithOrigins(settings.corsOrigins, gateway.LoggingMiddleware(auth.Wrap(authorize.Wrap(rateLimiter.Wrap(mux)))))
+	// Strip client-supplied identity headers before anything else runs, in
+	// every auth mode; only the auth middleware may set them.
+	handler = gateway.StripInternalIdentityHeaders(gateway.ControlPlaneBodyLimit(0, 0, handler))
 	return handler, closeRateLimiter, nil
 }
 
@@ -283,6 +303,16 @@ func newTopMux(health *healthState, handler http.Handler) *http.ServeMux {
 	health.registerHealthRoutes(topMux)
 	topMux.Handle("/", handler)
 	return topMux
+}
+
+// registerPublicMetrics serves /metrics on the top mux, ahead of the
+// authenticated chain, when OMNISWITCH_METRICS_PUBLIC is set. The metrics are
+// aggregate counters with no per-key data, and most Prometheus scrapers
+// cannot send an API key.
+func registerPublicMetrics(topMux *http.ServeMux, settings runtimeSettings, dash *dashboard.Handler) {
+	if settings.metricsPublic && settings.prometheusEnabled && dash != nil {
+		dash.RegisterPrometheus(topMux)
+	}
 }
 
 func buildRateLimiter(settings runtimeSettings) (*gateway.RateLimiter, func(), error) {
@@ -353,13 +383,23 @@ func buildMCPTargets(defaultEngine policy.Engine, settings runtimeSettings) ([]m
 			}
 			engine = loaded
 		}
-		targets = append(targets, mcpproxy.TargetConfig{
+		target := mcpproxy.TargetConfig{
 			Name: configured.Name, Transport: configured.Transport, Upstream: configured.Upstream,
 			Command: os.ExpandEnv(configured.Command), Args: expandStrings(configured.Args),
 			Environment: expandHeaderValues(configured.Environment), Headers: expandHeaderValues(configured.Headers), Engine: engine,
 			ForwardBearerToken: configured.ForwardBearerToken != nil && *configured.ForwardBearerToken,
 			OpenAPISpec:        os.ExpandEnv(configured.OpenAPISpec),
-		})
+			Metadata:           configured.Metadata,
+		}
+		exchange, err := mcpTokenExchange(configured.Name, configured.TokenExchange)
+		if err != nil {
+			return nil, err
+		}
+		target.TokenExchange = exchange
+		if configured.Timeout != nil {
+			target.Timeout = configured.Timeout.Duration
+		}
+		targets = append(targets, target)
 	}
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("no enabled MCP targets")

@@ -55,6 +55,9 @@ identity:
     workspace_claim: workspace_id
     organization_claim: organization_id
     cache_ttl: 5m
+    # Keep using cached signing keys for this long after cache_ttl while the
+    # JWKS endpoint fails (max 168h). 0 rejects OIDC tokens once the cache expires.
+    stale_if_error: 24h
 
 guardrails:
   # Supported actions: deny, redact, warn, and log. deny/redact change the
@@ -148,6 +151,19 @@ mcp:
         x-api-key: "${GITHUB_MCP_TOKEN}"
       # Delegate the caller's OIDC bearer token, never an OmniSwitch API key.
       forward_bearer_token: false
+
+    # Exchange the OIDC caller's token for a token issued for this target
+    # (RFC 8693). Metadata feeds the policy; timeout limits each call.
+    # - name: crm
+    #   upstream: https://crm.example.com/mcp
+    #   timeout: 30s
+    #   metadata:
+    #     environment: production
+    #   token_exchange:
+    #     token_url: https://idp.example.com/oauth2/token
+    #     client_id: omniswitch-gateway
+    #     client_secret: "${CRM_EXCHANGE_SECRET}"
+    #     audience: crm-api
 
     # A local stdio MCP server can run without an HTTP sidecar.
     # - name: filesystem

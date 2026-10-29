@@ -44,7 +44,7 @@ func TestModelAccessPolicyPersistsAndMigrates(t *testing.T) {
 		}
 	}
 	// Reproduce an existing database from before the model-access migration.
-	if _, err := st.db.Exec("ALTER TABLE api_keys DROP COLUMN allowed_models"); err != nil {
+	if _, err := st.wdb.Exec("ALTER TABLE api_keys DROP COLUMN allowed_models"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.migrate(); err != nil {
@@ -54,7 +54,7 @@ func TestModelAccessPolicyPersistsAndMigrates(t *testing.T) {
 	if err != nil || len(legacy.AllowedModels) != 0 {
 		t.Fatalf("legacy policy/error = %v/%v", legacy.AllowedModels, err)
 	}
-	if _, err := st.db.Exec("UPDATE api_keys SET allowed_models = 'broken'"); err != nil {
+	if _, err := st.wdb.Exec("UPDATE api_keys SET allowed_models = 'broken'"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.GetAPIKeyByHash(ctx, key.KeyHash); err == nil {

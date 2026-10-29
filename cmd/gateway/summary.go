@@ -54,6 +54,7 @@ func runtimeConfigSummary(settings runtimeSettings, registry *provider.Registry)
 				"workspace_claim":    settings.oidcWorkspaceClaim,
 				"organization_claim": settings.oidcOrganizationClaim,
 				"cache_ttl":          settings.oidcCacheTTL.String(),
+				"stale_if_error":     settings.oidcStaleIfError.String(),
 			},
 		},
 		"authorization": map[string]any{
@@ -230,6 +231,7 @@ func mcpTargetSummaries(settings runtimeSettings) []map[string]any {
 			"headers_configured":     len(target.Headers) > 0,
 			"environment_configured": len(target.Environment) > 0,
 			"forward_bearer_token":   forwardBearer,
+			"token_exchange":         target.TokenExchange != nil,
 		})
 	}
 	return summaries

@@ -85,3 +85,26 @@ func newAdminTestStore(t *testing.T) *store.Store {
 	t.Cleanup(func() { _ = st.Close() })
 	return st
 }
+
+// TestCreateAPIKeyKeepsBudgetsSeparate covers STORE-02: a monthly budget is
+// not copied into budget_usd, the lifetime budget.
+func TestCreateAPIKeyKeepsBudgetsSeparate(t *testing.T) {
+	st := newAdminTestStore(t)
+	handler := New(st)
+	rec := httptest.NewRecorder()
+	handler.CreateAPIKey(rec, httptest.NewRequest(http.MethodPost, "/api/keys", strings.NewReader(`{"name":"monthly","monthly_cost_budget":5}`)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("CreateAPIKey status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var created CreateKeyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	stored, err := st.GetAPIKeyByID(context.Background(), created.APIKey.ID)
+	if err != nil {
+		t.Fatalf("GetAPIKeyByID() error = %v", err)
+	}
+	if stored.BudgetUSD != 0 || stored.MonthlyCostBudget != 5 {
+		t.Fatalf("stored budgets = lifetime %v, monthly %v; want 0 and 5", stored.BudgetUSD, stored.MonthlyCostBudget)
+	}
+}

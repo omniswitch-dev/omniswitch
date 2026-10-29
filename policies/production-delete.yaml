@@ -2,11 +2,15 @@ apiVersion: omniswitch.dev/v1
 kind: Policy
 metadata:
   name: production-delete
-  version: v1
+  version: v2
 spec:
-  match:
-    tool: github
-    action: delete
-    environment: production
+  # Matches both dotted tool names (github.delete_repo) and federated names
+  # (github__delete_repo, where target.name is "github" and tool.name is the
+  # bare upstream name). action.name is "delete" for delete_/remove_/drop_/
+  # destroy_ style tool names and for HTTP DELETE OpenAPI operations.
+  cel: |
+    action.name == "delete" &&
+    resource.environment == "production" &&
+    (tool.name == "github" || target.name == "github" || resource.type == "repository")
   effect: deny
   reason: Repository {{resource.name}} is protected.

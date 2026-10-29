@@ -143,13 +143,6 @@ func TestStoreAPIKeysAndPrompts(t *testing.T) {
 	if err := st.InsertPrompt(ctx, prompt); err != nil {
 		t.Fatalf("InsertPrompt() error = %v", err)
 	}
-	nextVersion, err := st.NextPromptVersion(ctx, "support")
-	if err != nil {
-		t.Fatalf("NextPromptVersion() error = %v", err)
-	}
-	if nextVersion != 2 {
-		t.Fatalf("NextPromptVersion() = %d, want 2", nextVersion)
-	}
 	prompts, err := st.ListPrompts(ctx)
 	if err != nil {
 		t.Fatalf("ListPrompts() error = %v", err)

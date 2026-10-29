@@ -30,6 +30,9 @@ spec:
         {{- end }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.observability.otel.enabled .Values.observability.otel.headers (not .Values.observability.otel.headersSecret.name) }}
+        checksum/otel-headers: {{ .Values.observability.otel.headers | toJson | sha256sum }}
+        {{- end }}
         {{- if .Values.database.url }}
         checksum/database: {{ include (print $.Template.BasePath "/database-secret.yaml") . | sha256sum }}
         {{- end }}
@@ -83,9 +86,12 @@ spec:
               value: {{ .Values.observability.otel.serviceName | quote }}
             - name: OMNISWITCH_OTEL_INSECURE
               value: {{ .Values.observability.otel.insecure | quote }}
-            {{- range $key, $value := .Values.observability.otel.headers }}
-            - name: OMNISWITCH_OTEL_HEADER_{{ $key | upper | replace "-" "_" }}
-              value: {{ $value | quote }}
+            {{- with include "omniswitch.otelHeadersSecretName" . }}
+            - name: OMNISWITCH_OTEL_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: {{ if $.Values.observability.otel.headersSecret.name }}{{ $.Values.observability.otel.headersSecret.key | default "headers" }}{{ else }}headers{{ end }}
             {{- end }}
             {{- end }}
             {{- if or .Values.redis.enabled .Values.redis.url }}

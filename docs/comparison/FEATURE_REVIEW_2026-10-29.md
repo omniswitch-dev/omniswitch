@@ -48,7 +48,8 @@ features are identified separately from OSS gateway implementations.
    alternative to `prompt_id`. Tests cover promotion, rollback, restart
    persistence, validation, cross-prompt assignment rejection, and unchanged
    history. Template values are substituted once and remain literal. Labels
-   use the existing shared prompt registry; they are not tenant isolation.
+   follow the workspace prompt namespaces introduced on main in `b941700`;
+   cross-workspace assignment, listing, and rendering are rejected.
 
 4. **Prompt enrichment.** Routes prepend/append text messages in configured
    order after parameter shaping. The shared chat pipeline applies it before
@@ -64,7 +65,7 @@ features are identified separately from OSS gateway implementations.
 | Per-minute token quotas | Define streaming usage normalization, reservations/reconciliation, and shared backend semantics before exposing limits |
 | Provider-scoped key permissions | Enforce every actual dispatch, including variants, fallback, guardrail reroutes, and asynchronous shadow traffic |
 | Complete Responses/Messages tool parity | Requires protocol fixtures for tool events, multimodal payloads, and streaming translation; current compatibility remains a documented subset |
-| Prompt playground and tenant isolation | Labels do not change shared prompt ownership; add a deliberate workspace model and role-scoped UI |
+| Prompt playground | Labels follow workspace isolation; a deployment and comparison UI remains future work |
 | Adaptive experiments / quality evaluation | Existing weighted routing and policy replay do not replace statistical quality evaluation |
 | Multi-writer control plane | PostgreSQL remains experimental; distributed budget and config consistency need dedicated concurrency/migration work |
 

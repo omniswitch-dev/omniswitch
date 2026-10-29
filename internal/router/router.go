@@ -9,10 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
+	"log"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/cel-go/cel"
@@ -70,7 +71,19 @@ type Router struct {
 	mu         sync.Mutex
 	rrCounters map[string]int // round-robin counters per model
 	breakers   *CircuitBreaker
+	// breakerSource, when set, is the router whose current circuit breaker
+	// this router uses. Clones made by CloneWithRoutes set it to the base
+	// router, so they share open circuits with it and follow a breaker that
+	// is swapped later.
+	breakerSource *Router
+	// generation counts changes of the route table and the breaker. Callers
+	// that cache derived routers compare it to know when to rebuild them.
+	generation atomic.Uint64
 	latency    *latencyTracker
+	// conditions caches compiled CEL programs for conditional variants,
+	// keyed by trimmed expression. It is rebuilt whenever the route table
+	// is replaced so it only holds expressions of the current routes.
+	conditions map[string]compiledCondition
 }
 
 type latencyTracker struct {
@@ -121,6 +134,7 @@ func New(registry *provider.Registry) *Router {
 		rrCounters: make(map[string]int),
 		breakers:   NewCircuitBreaker(5, 60*time.Second),
 		latency:    newLatencyTracker(),
+		conditions: make(map[string]compiledCondition),
 	}
 }
 
@@ -128,6 +142,26 @@ func (r *Router) SetCircuitBreaker(breaker *CircuitBreaker) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.breakers = breaker
+	r.breakerSource = nil
+	r.generation.Add(1)
+}
+
+// CircuitBreaker returns the breaker that the router uses now. For a clone
+// made by CloneWithRoutes it is the current breaker of the base router.
+func (r *Router) CircuitBreaker() *CircuitBreaker {
+	r.mu.Lock()
+	breaker, source := r.breakers, r.breakerSource
+	r.mu.Unlock()
+	if source != nil {
+		return source.CircuitBreaker()
+	}
+	return breaker
+}
+
+// Generation returns a counter that changes whenever the route table or the
+// circuit breaker of r is replaced.
+func (r *Router) Generation() uint64 {
+	return r.generation.Load()
 }
 
 // SetRoute configures a custom route for a specific model.
@@ -135,6 +169,8 @@ func (r *Router) SetRoute(model string, route Route) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.routes[model] = route
+	compileRouteConditions(r.conditions, map[string]Route{model: route})
+	r.generation.Add(1)
 }
 
 // ReplaceRoutes atomically swaps the full route table, removing routes that
@@ -146,6 +182,9 @@ func (r *Router) ReplaceRoutes(routes map[string]Route) {
 	for model, route := range routes {
 		r.routes[model] = route
 	}
+	r.conditions = make(map[string]compiledCondition)
+	compileRouteConditions(r.conditions, r.routes)
+	r.generation.Add(1)
 }
 
 // RouteFor reports whether a logical model has a configured route.
@@ -169,12 +208,19 @@ func (r *Router) LogicalModels() []string {
 }
 
 // CloneWithRoutes returns a request-scoped router that inherits the registry,
-// base routes, and circuit breaker, then overlays the supplied routes.
+// base routes, and circuit breaker, then overlays the supplied routes. The
+// clone always uses the current breaker of r, so a breaker swapped on r
+// later applies to the clone too. Routes are copied: rebuild the clone when
+// r.Generation changes to pick up new base routes.
 func (r *Router) CloneWithRoutes(overrides map[string]Route) *Router {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cloned := New(r.registry)
 	cloned.breakers = r.breakers
+	cloned.breakerSource = r
+	if r.breakerSource != nil {
+		cloned.breakerSource = r.breakerSource
+	}
 	cloned.latency = r.latency
 	for model, route := range r.routes {
 		cloned.routes[model] = route
@@ -182,6 +228,24 @@ func (r *Router) CloneWithRoutes(overrides map[string]Route) *Router {
 	for model, route := range overrides {
 		cloned.routes[model] = route
 	}
+	for expression, compiled := range r.conditions {
+		cloned.conditions[expression] = compiled
+	}
+	compileRouteConditions(cloned.conditions, overrides)
+	return cloned
+}
+
+// CloneForShadow returns a copy of r for mirrored (shadow) traffic. The copy
+// keeps r's routes but uses breaker and its own latency tracker, so shadow
+// calls can neither open circuits nor skew least-latency routing for
+// production traffic.
+func (r *Router) CloneForShadow(breaker *CircuitBreaker) *Router {
+	// The clone is not shared with any other goroutine yet, so its fields
+	// can be set without taking its lock.
+	cloned := r.CloneWithRoutes(nil)
+	cloned.breakers = breaker
+	cloned.breakerSource = nil
+	cloned.latency = newLatencyTracker()
 	return cloned
 }
 
@@ -270,7 +334,8 @@ func (r *Router) Embeddings(ctx context.Context, req provider.EmbeddingRequest, 
 			lastErr = fmt.Errorf("provider %q does not support embeddings", current.Name())
 			continue
 		}
-		if !r.allowProvider(current.Name()) {
+		admission, allowed := r.allowProvider(current.Name())
+		if !allowed {
 			lastErr = fmt.Errorf("provider %q circuit is open", current.Name())
 			continue
 		}
@@ -278,7 +343,7 @@ func (r *Router) Embeddings(ctx context.Context, req provider.EmbeddingRequest, 
 		response, meta, err := embeddingProvider.Embeddings(callCtx, req)
 		cancel()
 		if err == nil {
-			r.recordSuccess(current.Name())
+			admission.Success()
 			r.recordLatency(current.Name(), meta.Latency)
 			meta.Fallback = index > 0
 			if meta.Model == "" {
@@ -286,8 +351,11 @@ func (r *Router) Embeddings(ctx context.Context, req provider.EmbeddingRequest, 
 			}
 			return response, meta, nil
 		}
-		r.recordFailure(current.Name())
+		r.recordAttemptFailure(ctx, admission, err)
 		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	return provider.EmbeddingResponse{}, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all embedding providers exhausted: %w", lastErr)
 }
@@ -306,7 +374,8 @@ func (r *Router) ImageGeneration(ctx context.Context, req provider.ImageRequest,
 			lastErr = fmt.Errorf("provider %q does not support image generation", current.Name())
 			continue
 		}
-		if !r.allowProvider(current.Name()) {
+		admission, allowed := r.allowProvider(current.Name())
+		if !allowed {
 			lastErr = fmt.Errorf("provider %q circuit is open", current.Name())
 			continue
 		}
@@ -314,7 +383,7 @@ func (r *Router) ImageGeneration(ctx context.Context, req provider.ImageRequest,
 		response, meta, err := imageProvider.ImageGeneration(callCtx, req)
 		cancel()
 		if err == nil {
-			r.recordSuccess(current.Name())
+			admission.Success()
 			r.recordLatency(current.Name(), meta.Latency)
 			meta.Fallback = index > 0
 			if meta.Model == "" {
@@ -322,8 +391,11 @@ func (r *Router) ImageGeneration(ctx context.Context, req provider.ImageRequest,
 			}
 			return response, meta, nil
 		}
-		r.recordFailure(current.Name())
+		r.recordAttemptFailure(ctx, admission, err)
 		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	return provider.ImageResponse{}, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all image providers exhausted: %w", lastErr)
 }
@@ -342,7 +414,8 @@ func (r *Router) Transcription(ctx context.Context, req provider.TranscriptionRe
 			lastErr = fmt.Errorf("provider %q does not support audio transcription", current.Name())
 			continue
 		}
-		if !r.allowProvider(current.Name()) {
+		admission, allowed := r.allowProvider(current.Name())
+		if !allowed {
 			lastErr = fmt.Errorf("provider %q circuit is open", current.Name())
 			continue
 		}
@@ -350,7 +423,7 @@ func (r *Router) Transcription(ctx context.Context, req provider.TranscriptionRe
 		response, meta, err := audioProvider.Transcription(callCtx, req)
 		cancel()
 		if err == nil {
-			r.recordSuccess(current.Name())
+			admission.Success()
 			r.recordLatency(current.Name(), meta.Latency)
 			meta.Fallback = index > 0
 			if meta.Model == "" {
@@ -358,8 +431,11 @@ func (r *Router) Transcription(ctx context.Context, req provider.TranscriptionRe
 			}
 			return response, meta, nil
 		}
-		r.recordFailure(current.Name())
+		r.recordAttemptFailure(ctx, admission, err)
 		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	return provider.TranscriptionResponse{}, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all transcription providers exhausted: %w", lastErr)
 }
@@ -378,14 +454,15 @@ func (r *Router) Speech(ctx context.Context, req provider.SpeechRequest, provide
 			lastErr = fmt.Errorf("provider %q does not support audio speech", current.Name())
 			continue
 		}
-		if !r.allowProvider(current.Name()) {
+		admission, allowed := r.allowProvider(current.Name())
+		if !allowed {
 			lastErr = fmt.Errorf("provider %q circuit is open", current.Name())
 			continue
 		}
 		callCtx, cancel := withRouteTimeout(ctx, route.Timeout)
 		body, contentType, meta, err := audioProvider.Speech(callCtx, req)
 		if err == nil {
-			r.recordSuccess(current.Name())
+			admission.Success()
 			r.recordLatency(current.Name(), meta.Latency)
 			meta.Fallback = index > 0
 			if meta.Model == "" {
@@ -394,8 +471,11 @@ func (r *Router) Speech(ctx context.Context, req provider.SpeechRequest, provide
 			return &cancelReadCloser{ReadCloser: body, cancel: cancel}, contentType, meta, nil
 		}
 		cancel()
-		r.recordFailure(current.Name())
+		r.recordAttemptFailure(ctx, admission, err)
 		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	return nil, "", provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all speech providers exhausted: %w", lastErr)
 }
@@ -438,7 +518,8 @@ func (r *Router) Rerank(ctx context.Context, req provider.RerankRequest, provide
 			lastErr = fmt.Errorf("provider %q does not support rerank", current.Name())
 			continue
 		}
-		if !r.allowProvider(current.Name()) {
+		admission, allowed := r.allowProvider(current.Name())
+		if !allowed {
 			lastErr = fmt.Errorf("provider %q circuit is open", current.Name())
 			continue
 		}
@@ -446,7 +527,7 @@ func (r *Router) Rerank(ctx context.Context, req provider.RerankRequest, provide
 		response, meta, err := rerankProvider.Rerank(callCtx, req)
 		cancel()
 		if err == nil {
-			r.recordSuccess(current.Name())
+			admission.Success()
 			r.recordLatency(current.Name(), meta.Latency)
 			meta.Fallback = index > 0
 			if meta.Model == "" {
@@ -454,8 +535,11 @@ func (r *Router) Rerank(ctx context.Context, req provider.RerankRequest, provide
 			}
 			return response, meta, nil
 		}
-		r.recordFailure(current.Name())
+		r.recordAttemptFailure(ctx, admission, err)
 		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	return provider.RerankResponse{}, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all rerank providers exhausted: %w", lastErr)
 }
@@ -482,7 +566,8 @@ func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, provider
 
 	var lastErr error
 	for i, prov := range providers {
-		if !r.allowProvider(prov.Name()) {
+		admission, allowed := r.allowProvider(prov.Name())
+		if !allowed {
 			lastErr = fmt.Errorf("provider %q circuit is open", prov.Name())
 			traceSkippedProvider(ctx, prov.Name(), req.Model, lastErr)
 			continue
@@ -493,12 +578,15 @@ func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, provider
 		}
 
 		for attempt := 0; attempt < maxRetries; attempt++ {
+			if attempt > 0 && !r.reacquire(prov.Name(), &admission, &lastErr) {
+				break
+			}
 			callCtx, cancel := withRouteTimeout(ctx, route.Timeout)
 			callCtx, span := startProviderSpan(callCtx, prov.Name(), req.Model, attempt, i > 0, false)
 			resp, meta, err := prov.ChatCompletion(callCtx, req)
 			cancel()
 			if err == nil {
-				r.recordSuccess(prov.Name())
+				admission.Success()
 				r.recordLatency(prov.Name(), meta.Latency)
 				meta.Retries = attempt
 				meta.Fallback = i > 0
@@ -509,21 +597,29 @@ func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, provider
 				return resp, meta, nil
 			}
 			finishProviderSpan(span, meta, err)
-			r.recordFailure(prov.Name())
+			r.recordAttemptFailure(ctx, admission, err)
 			lastErr = err
 			meta.Retries = attempt
 
-			// Don't retry on context cancellation.
-			if ctx.Err() != nil || !isRetryable(err, route.RetryCodes) {
-				if ctx.Err() != nil {
-					return provider.ChatResponse{}, meta, ctx.Err()
-				}
-				return provider.ChatResponse{}, meta, err
+			// The caller is gone: neither retries nor fallbacks can help.
+			if ctx.Err() != nil {
+				return provider.ChatResponse{}, meta, ctx.Err()
+			}
+			// A non-retryable error ends the retries against this provider,
+			// but the next provider in the fallback chain is still tried
+			// (the same behaviour as ExecuteStream).
+			if !isRetryable(err, route.RetryCodes) {
+				break
 			}
 
-			// Brief backoff before retry.
+			// Brief backoff before retry. A Retry-After hint that is too
+			// long moves on to the next provider instead of waiting.
 			if attempt < maxRetries-1 {
-				if err := waitForRetry(ctx, retryBackoff(route.RetryBackoff, attempt)); err != nil {
+				delay, ok := retryWait(route.RetryBackoff, attempt, err)
+				if !ok {
+					break
+				}
+				if err := waitForRetry(ctx, delay); err != nil {
 					return provider.ChatResponse{}, meta, err
 				}
 			}
@@ -554,9 +650,11 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 		return nil, provider.ProviderMeta{}, fmt.Errorf("no provider found for model %q", req.Model)
 	}
 
+	timeout := routeTimeout(route.Timeout)
 	var lastErr error
 	for i, prov := range providers {
-		if !r.allowProvider(prov.Name()) {
+		admission, allowed := r.allowProvider(prov.Name())
+		if !allowed {
 			lastErr = fmt.Errorf("provider %q circuit is open", prov.Name())
 			continue
 		}
@@ -567,29 +665,34 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 				attempts += route.MaxRetries
 			}
 			for attempt := 0; attempt < attempts; attempt++ {
-				callCtx, cancel := withRouteTimeout(ctx, route.Timeout)
-				callCtx, span := startProviderSpan(callCtx, prov.Name(), req.Model, attempt, i > 0, true)
-				chunks, meta, err := streamer.ChatCompletionStream(callCtx, req)
+				if attempt > 0 && !r.reacquire(prov.Name(), &admission, &lastErr) {
+					break
+				}
+				chunks, meta, err := r.startStream(ctx, prov.Name(), streamer, req, timeout, attempt, i > 0)
 				if err == nil {
-					r.recordSuccess(prov.Name())
+					admission.Success()
 					r.recordLatency(prov.Name(), meta.Latency)
 					meta.Retries = attempt
 					meta.Fallback = i > 0
 					if meta.Model == "" {
 						meta.Model = req.Model
 					}
-					finishProviderSpan(span, meta, nil)
 					return chunks, meta, nil
 				}
-				cancel()
-				finishProviderSpan(span, meta, err)
-				r.recordFailure(prov.Name())
+				r.recordAttemptFailure(ctx, admission, err)
 				lastErr = err
-				if ctx.Err() != nil || !isRetryable(err, route.RetryCodes) {
+				if ctx.Err() != nil {
+					return nil, meta, ctx.Err()
+				}
+				if !isRetryable(err, route.RetryCodes) {
 					break
 				}
 				if attempt < attempts-1 {
-					if err := waitForRetry(ctx, retryBackoff(route.RetryBackoff, attempt)); err != nil {
+					delay, ok := retryWait(route.RetryBackoff, attempt, err)
+					if !ok {
+						break
+					}
+					if err := waitForRetry(ctx, delay); err != nil {
 						return nil, meta, err
 					}
 				}
@@ -602,7 +705,7 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 		resp, meta, err := prov.ChatCompletion(callCtx, req)
 		cancel()
 		if err == nil {
-			r.recordSuccess(prov.Name())
+			admission.Success()
 			r.recordLatency(prov.Name(), meta.Latency)
 			meta.Fallback = i > 0
 			if meta.Model == "" {
@@ -612,7 +715,7 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 			return provider.StreamFromResponse(ctx, resp), meta, nil
 		}
 		finishProviderSpan(span, meta, err)
-		r.recordFailure(prov.Name())
+		r.recordAttemptFailure(ctx, admission, err)
 		lastErr = err
 		if ctx.Err() != nil {
 			return nil, meta, ctx.Err()
@@ -620,6 +723,185 @@ func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, pr
 	}
 
 	return nil, provider.ProviderMeta{Error: errorString(lastErr)}, fmt.Errorf("all providers exhausted: %w", lastErr)
+}
+
+// errStreamIdleTimeout is reported on the terminal chunk when an upstream
+// stream stays silent for longer than the route timeout after it started.
+var errStreamIdleTimeout = errors.New("stream idle timeout exceeded")
+
+// finalChunkGrace bounds how long the relay waits to hand the terminal error
+// chunk to a consumer whose request context has already ended.
+const finalChunkGrace = time.Second
+
+// startStream runs one streaming attempt against a provider.
+//
+// The route timeout is a time-to-first-response limit: it covers opening the
+// upstream stream and receiving its first chunk. Once the first chunk has
+// arrived the stream is no longer bound by the route timeout, so long
+// generations are not cut off part way; instead the relay applies an idle
+// timeout of the same length between chunks. Because nothing has been sent
+// to the client before the first chunk, a failure in that phase is returned
+// as an error and the caller may retry or fall back to another provider.
+//
+// The returned channel always ends either with the source closing normally
+// or with a terminal chunk whose Err field is set, and the attempt's context
+// is cancelled when the relay finishes so no timer or upstream body is left
+// running.
+func (r *Router) startStream(ctx context.Context, providerName string, streamer provider.StreamProvider, req provider.ChatRequest, timeout time.Duration, attempt int, fallback bool) (<-chan provider.ChatResponseChunk, provider.ProviderMeta, error) {
+	attemptCtx, cancel := context.WithCancel(ctx)
+	var timedOut atomic.Bool
+	var firstByte *time.Timer
+	if timeout > 0 {
+		firstByte = time.AfterFunc(timeout, func() {
+			timedOut.Store(true)
+			cancel()
+		})
+	}
+	stopFirstByte := func() bool {
+		if firstByte == nil {
+			return true
+		}
+		return firstByte.Stop()
+	}
+	timeoutErr := func(name string) error {
+		return fmt.Errorf("provider %q did not start streaming within route timeout %s: %w", name, timeout, context.DeadlineExceeded)
+	}
+	fail := func(span oteltrace.Span, meta provider.ProviderMeta, err error) (<-chan provider.ChatResponseChunk, provider.ProviderMeta, error) {
+		stopFirstByte()
+		cancel()
+		if timedOut.Load() && ctx.Err() == nil {
+			err = timeoutErr(providerName)
+		}
+		if meta.Error == "" {
+			meta.Error = err.Error()
+		}
+		finishProviderSpan(span, meta, err)
+		return nil, meta, err
+	}
+
+	spanCtx, span := startProviderSpan(attemptCtx, providerName, req.Model, attempt, fallback, true)
+	source, meta, err := streamer.ChatCompletionStream(spanCtx, req)
+	if err != nil {
+		return fail(span, meta, err)
+	}
+
+	var first provider.ChatResponseChunk
+	var gotFirst bool
+	select {
+	case first, gotFirst = <-source:
+	case <-attemptCtx.Done():
+	}
+	if !gotFirst {
+		if attemptCtx.Err() != nil {
+			// Timed out or cancelled before anything reached the client.
+			go drainChunks(source)
+			cause := ctx.Err()
+			if cause == nil {
+				cause = attemptCtx.Err()
+			}
+			return fail(span, meta, cause)
+		}
+		// The upstream closed without sending anything: no content, no
+		// finish reason and no error. Native adapters report a missing
+		// terminal event as ErrStreamTruncated; do the same here so the
+		// attempt counts as a failure (and may be retried or fall back)
+		// instead of being logged as an empty successful response.
+		return fail(span, meta, fmt.Errorf("provider %q: %w", providerName, provider.ErrStreamTruncated))
+	}
+	if !stopFirstByte() {
+		// The route timeout fired just as the first chunk arrived; the
+		// attempt context is already cancelled, so the stream is unusable.
+		go drainChunks(source)
+		return fail(span, meta, timeoutErr(providerName))
+	}
+	if first.Err != nil && len(first.Choices) == 0 {
+		// The upstream failed before producing output; nothing was sent to
+		// the client, so let the caller retry or fall back.
+		go drainChunks(source)
+		return fail(span, meta, first.Err)
+	}
+	finishProviderSpan(span, meta, nil)
+
+	out := make(chan provider.ChatResponseChunk)
+	go relayStream(ctx, cancel, source, first, out, timeout)
+	return out, meta, nil
+}
+
+// relayStream forwards chunks from source to out until source closes, the
+// request context ends, or the stream stays idle for longer than idle. It
+// always cancels the attempt context and closes out when it returns.
+func relayStream(ctx context.Context, cancel context.CancelFunc, source <-chan provider.ChatResponseChunk, first provider.ChatResponseChunk, out chan<- provider.ChatResponseChunk, idle time.Duration) {
+	sourceClosed := false
+	defer func() {
+		cancel()
+		if !sourceClosed {
+			// The upstream sees the cancellation and should close soon;
+			// keep reading so a producer blocked on a send can exit.
+			go drainChunks(source)
+		}
+		close(out)
+	}()
+
+	send := func(chunk provider.ChatResponseChunk) bool {
+		select {
+		case out <- chunk:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	sendFinal := func(err error) {
+		final := provider.ChatResponseChunk{Err: err}
+		if ctx.Err() == nil {
+			send(final)
+			return
+		}
+		grace := time.NewTimer(finalChunkGrace)
+		defer grace.Stop()
+		select {
+		case out <- final:
+		case <-grace.C:
+		}
+	}
+
+	if !send(first) {
+		sendFinal(ctx.Err())
+		return
+	}
+	var idleC <-chan time.Time
+	var idleTimer *time.Timer
+	if idle > 0 {
+		idleTimer = time.NewTimer(idle)
+		defer idleTimer.Stop()
+		idleC = idleTimer.C
+	}
+	for {
+		select {
+		case chunk, ok := <-source:
+			if !ok {
+				sourceClosed = true
+				return
+			}
+			if idleTimer != nil {
+				idleTimer.Reset(idle)
+			}
+			if !send(chunk) {
+				sendFinal(ctx.Err())
+				return
+			}
+		case <-ctx.Done():
+			sendFinal(ctx.Err())
+			return
+		case <-idleC:
+			sendFinal(fmt.Errorf("%w after %s", errStreamIdleTimeout, idle))
+			return
+		}
+	}
+}
+
+func drainChunks(source <-chan provider.ChatResponseChunk) {
+	for range source {
+	}
 }
 
 func startProviderSpan(ctx context.Context, providerName, model string, attempt int, fallback bool, stream bool) (context.Context, oteltrace.Span) {
@@ -667,7 +949,7 @@ func (r *Router) selectVariant(model string, req provider.ChatRequest) (Variant,
 
 	variants := make([]Variant, 0, len(route.Variants))
 	for _, variant := range route.Variants {
-		if strings.TrimSpace(variant.Condition) != "" && !matchesCondition(variant.Condition, req) {
+		if strings.TrimSpace(variant.Condition) != "" && !r.matchesCondition(variant.Condition, req) {
 			continue
 		}
 		variants = append(variants, variant)
@@ -710,32 +992,43 @@ func randomInt(max int) int {
 	return int(binary.BigEndian.Uint64(b[:]) % uint64(max))
 }
 
-func (r *Router) allowProvider(providerName string) bool {
-	r.mu.Lock()
-	breaker := r.breakers
-	r.mu.Unlock()
+// allowProvider asks the circuit breaker whether a call to providerName may
+// go ahead. Every admitted call must end in exactly one report on the
+// returned Admission (Success, Failure or Release, usually through
+// recordAttemptFailure) so a half-open probe never stays taken.
+func (r *Router) allowProvider(providerName string) (Admission, bool) {
+	breaker := r.CircuitBreaker()
 	if breaker == nil {
-		return true
+		return Admission{}, true
 	}
-	return breaker.Allow(providerName)
+	return breaker.Acquire(providerName)
 }
 
-func (r *Router) recordSuccess(providerName string) {
-	r.mu.Lock()
-	breaker := r.breakers
-	r.mu.Unlock()
-	if breaker != nil {
-		breaker.RecordSuccess(providerName)
+// reacquire asks the breaker again before a retry against the same
+// provider: the previous attempt's failure may have opened the circuit (or
+// ended the half-open probe), and then the retry must not go ahead.
+func (r *Router) reacquire(providerName string, admission *Admission, lastErr *error) bool {
+	next, ok := r.allowProvider(providerName)
+	if !ok {
+		*lastErr = fmt.Errorf("provider %q circuit is open", providerName)
+		return false
 	}
+	*admission = next
+	return true
 }
 
-func (r *Router) recordFailure(providerName string) {
-	r.mu.Lock()
-	breaker := r.breakers
-	r.mu.Unlock()
-	if breaker != nil {
-		breaker.RecordFailure(providerName)
+// recordAttemptFailure reports a failed provider call to the circuit
+// breaker. A failure caused by the caller (a cancelled request or an expired
+// parent deadline) says nothing about the provider's health, and counting it
+// would let a handful of aborted requests take a healthy provider out of
+// rotation for every tenant, so it only releases the admission (freeing a
+// half-open probe slot) without changing the circuit state.
+func (r *Router) recordAttemptFailure(ctx context.Context, admission Admission, err error) {
+	if !countsAsProviderFailure(ctx, err) {
+		admission.Release()
+		return
 	}
+	admission.Failure()
 }
 
 func (r *Router) recordLatency(providerName string, latency time.Duration) {
@@ -867,14 +1160,20 @@ func appendUniqueProvider(providers []provider.Provider, candidate provider.Prov
 }
 
 func withRouteTimeout(ctx context.Context, timeout string) (context.Context, context.CancelFunc) {
-	if strings.TrimSpace(timeout) == "" {
-		return context.WithCancel(ctx)
-	}
-	duration, err := time.ParseDuration(timeout)
-	if err != nil || duration <= 0 {
+	duration := routeTimeout(timeout)
+	if duration <= 0 {
 		return context.WithCancel(ctx)
 	}
 	return context.WithTimeout(ctx, duration)
+}
+
+// routeTimeout parses a route timeout; zero means no timeout.
+func routeTimeout(timeout string) time.Duration {
+	duration, err := time.ParseDuration(strings.TrimSpace(timeout))
+	if err != nil || duration <= 0 {
+		return 0
+	}
+	return duration
 }
 
 func retryBackoff(value string, attempt int) time.Duration {
@@ -895,52 +1194,73 @@ func waitForRetry(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-var statusCodePattern = regexp.MustCompile(`(?i)status\s*(?:code\s*)?\(?([0-9]{3})\)?`)
-
-func isRetryable(err error, codes []int) bool {
-	if err == nil {
-		return false
-	}
-	// A request field an adapter cannot honour (e.g. seed on Anthropic) will
-	// fail identically on every retry against the same provider; surface it
-	// immediately instead of burning retry budget. Fallback to a different
-	// provider is still attempted by the caller's provider loop.
-	var unsupported *provider.UnsupportedParameterError
-	if errors.As(err, &unsupported) {
-		return false
-	}
-	if len(codes) == 0 {
-		return true
-	}
-	match := statusCodePattern.FindStringSubmatch(err.Error())
-	if len(match) != 2 {
-		return false
-	}
-	for _, code := range codes {
-		if fmt.Sprint(code) == match[1] {
-			return true
-		}
-	}
-	return false
-}
-
-func matchesCondition(expression string, req provider.ChatRequest) bool {
-	env, err := cel.NewEnv(
+// conditionEnv is the shared CEL environment for conditional variants.
+var conditionEnv = sync.OnceValues(func() (*cel.Env, error) {
+	return cel.NewEnv(
 		cel.Variable("model", cel.StringType),
 		cel.Variable("prompt", cel.StringType),
 	)
+})
+
+// compiledCondition is a conditional-variant expression compiled once.
+// A nil program with a non-nil err marks an invalid expression, which never
+// matches.
+type compiledCondition struct {
+	program cel.Program
+	err     error
+}
+
+func compileCondition(expression string) compiledCondition {
+	env, err := conditionEnv()
 	if err != nil {
-		return false
+		return compiledCondition{err: err}
 	}
 	ast, issues := env.Compile(expression)
 	if issues != nil && issues.Err() != nil {
-		return false
+		return compiledCondition{err: issues.Err()}
+	}
+	if ast.OutputType() != cel.BoolType && ast.OutputType() != cel.DynType {
+		return compiledCondition{err: fmt.Errorf("expression must return bool, got %s", ast.OutputType())}
 	}
 	program, err := env.Program(ast)
 	if err != nil {
+		return compiledCondition{err: err}
+	}
+	return compiledCondition{program: program}
+}
+
+// compileRouteConditions compiles every conditional variant of the routes
+// into cache, logging each invalid expression once.
+func compileRouteConditions(cache map[string]compiledCondition, routes map[string]Route) {
+	for model, route := range routes {
+		for _, variant := range route.Variants {
+			expression := strings.TrimSpace(variant.Condition)
+			if expression == "" {
+				continue
+			}
+			if _, ok := cache[expression]; ok {
+				continue
+			}
+			compiled := compileCondition(expression)
+			if compiled.err != nil {
+				log.Printf("router: route %q variant %q has an invalid condition %q; the variant will never be selected: %v", model, variant.Name, expression, compiled.err)
+			}
+			cache[expression] = compiled
+		}
+	}
+}
+
+// matchesCondition evaluates a conditional variant. Every route is stored
+// through SetRoute, ReplaceRoutes or CloneWithRoutes, which compile all of
+// its conditions, so a missing entry cannot happen and means no match.
+func (r *Router) matchesCondition(expression string, req provider.ChatRequest) bool {
+	r.mu.Lock()
+	compiled := r.conditions[strings.TrimSpace(expression)]
+	r.mu.Unlock()
+	if compiled.program == nil {
 		return false
 	}
-	result, _, err := program.Eval(map[string]any{"model": req.Model, "prompt": promptText(req)})
+	result, _, err := compiled.program.Eval(map[string]any{"model": req.Model, "prompt": promptText(req)})
 	if err != nil {
 		return false
 	}

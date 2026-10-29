@@ -5,8 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"math"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -22,7 +23,7 @@ func NewAnthropic(apiKey string) *Anthropic {
 	return &Anthropic{
 		apiKey:  apiKey,
 		baseURL: "https://api.anthropic.com",
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  newProviderClient(defaultRequestTimeout),
 	}
 }
 
@@ -39,6 +40,9 @@ type anthropicRequest struct {
 	MaxTokens    int                    `json:"max_tokens"`
 	System       string                 `json:"system,omitempty"`
 	Stream       bool                   `json:"stream,omitempty"`
+	Temperature  *float64               `json:"temperature,omitempty"`
+	TopP         *float64               `json:"top_p,omitempty"`
+	StopSeqs     []string               `json:"stop_sequences,omitempty"`
 	Tools        []anthropicTool        `json:"tools,omitempty"`
 	ToolChoice   *anthropicToolChoice   `json:"tool_choice,omitempty"`
 	OutputConfig *anthropicOutputConfig `json:"output_config,omitempty"`
@@ -123,7 +127,13 @@ func (a *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		meta.Latency = time.Since(start)
+		upstreamErr := newUpstreamError(meta.Provider, "anthropic error", resp)
+		meta.Error = upstreamErr.Body
+		return ChatResponse{}, meta, upstreamErr
+	}
+	respBody, err := readLimited(resp.Body, maxResponseBodyBytes)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
@@ -131,11 +141,6 @@ func (a *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 	}
 
 	meta.Latency = time.Since(start)
-
-	if resp.StatusCode != http.StatusOK {
-		meta.Error = string(respBody)
-		return ChatResponse{}, meta, fmt.Errorf("anthropic error (status %d): %s", resp.StatusCode, string(respBody))
-	}
 
 	var anthResp anthropicResponse
 	if err := json.Unmarshal(respBody, &anthResp); err != nil {
@@ -147,9 +152,10 @@ func (a *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 	var content string
 	var toolCalls []ToolCall
 	for _, block := range anthResp.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
 			content += block.Text
-		} else if block.Type == "tool_use" {
+		case "tool_use":
 			toolCalls = append(toolCalls, ToolCall{
 				ID:   block.ID,
 				Type: "function",
@@ -162,9 +168,6 @@ func (a *Anthropic) ChatCompletion(ctx context.Context, req ChatRequest) (ChatRe
 	}
 
 	finishReason := mapAnthropicStopReason(anthResp.StopReason)
-	if len(toolCalls) > 0 && anthResp.StopReason == "tool_use" {
-		finishReason = "tool_calls"
-	}
 
 	chatResp := ChatResponse{
 		ID:      anthResp.ID,
@@ -215,21 +218,21 @@ func (a *Anthropic) ChatCompletionStream(ctx context.Context, req ChatRequest) (
 	httpReq.Header.Set("x-api-key", a.apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
-	resp, err := a.client.Do(httpReq)
+	resp, err := streamingClient(a.client).Do(httpReq)
 	if err != nil {
 		meta.Error = err.Error()
 		meta.Latency = time.Since(start)
 		return nil, meta, fmt.Errorf("anthropic stream request: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(resp.Body)
-		meta.Error = string(respBody)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		meta.Latency = time.Since(start)
-		return nil, meta, fmt.Errorf("anthropic stream error (status %d): %s", resp.StatusCode, string(respBody))
+		upstreamErr := newUpstreamError(meta.Provider, "anthropic stream error", resp)
+		_ = resp.Body.Close()
+		meta.Error = upstreamErr.Body
+		return nil, meta, upstreamErr
 	}
 	meta.Latency = time.Since(start)
-	return streamAnthropic(ctx, resp.Body, req.Model, req.StreamOptions != nil && req.StreamOptions.IncludeUsage), meta, nil
+	return streamAnthropic(ctx, resp.Body, req.Model), meta, nil
 }
 
 // toAnthropicRequest translates an OpenAI-compatible ChatRequest into
@@ -286,6 +289,22 @@ func toAnthropicRequest(req ChatRequest, stream bool) (anthropicRequest, error) 
 	if req.MaxCompletionTokens != nil {
 		anthReq.MaxTokens = *req.MaxCompletionTokens
 	}
+	if req.Temperature != nil {
+		// Anthropic accepts 0..1; OpenAI accepts 0..2. Clamp instead of
+		// failing so OpenAI-shaped requests (and fallbacks) keep working.
+		temperature := math.Min(math.Max(*req.Temperature, 0), 1)
+		anthReq.Temperature = &temperature
+	}
+	// Current Claude models reject requests that set both temperature and
+	// top_p, and many OpenAI-shaped clients send both. Keep temperature
+	// (the more common knob) and drop top_p in that case.
+	if req.TopP != nil && req.Temperature == nil {
+		topP := *req.TopP
+		anthReq.TopP = &topP
+	}
+	if len(req.Stop) > 0 {
+		anthReq.StopSeqs = append([]string(nil), req.Stop...)
+	}
 
 	if req.ResponseFormat != nil {
 		switch req.ResponseFormat.Type {
@@ -325,9 +344,10 @@ func toAnthropicRequest(req ChatRequest, stream bool) (anthropicRequest, error) 
 	if req.ToolChoice != nil {
 		switch v := req.ToolChoice.(type) {
 		case string:
-			if v == "auto" || v == "none" {
+			switch v {
+			case "auto", "none":
 				anthReq.ToolChoice = &anthropicToolChoice{Type: v}
-			} else if v == "required" {
+			case "required":
 				anthReq.ToolChoice = &anthropicToolChoice{Type: "any"}
 			}
 		case map[string]any:
@@ -346,9 +366,15 @@ func toAnthropicRequest(req ChatRequest, stream bool) (anthropicRequest, error) 
 		anthReq.ToolChoice.DisableParallelToolUse = &disable
 	}
 
+	var system []string
 	for _, msg := range req.Messages {
-		if msg.Role == "system" {
-			anthReq.System = msg.Text()
+		// OpenAI "developer" messages are system instructions for newer
+		// models; Anthropic only has one top-level system prompt, so every
+		// system/developer message is joined into it in order.
+		if msg.Role == "system" || msg.Role == "developer" {
+			if text := msg.Text(); text != "" {
+				system = append(system, text)
+			}
 			continue
 		}
 
@@ -409,18 +435,8 @@ func toAnthropicRequest(req ChatRequest, stream bool) (anthropicRequest, error) 
 			Content: content,
 		})
 	}
+	anthReq.System = strings.Join(system, "\n\n")
 	return anthReq, nil
-}
-
-func mapAnthropicStopReason(reason string) string {
-	switch reason {
-	case "end_turn":
-		return "stop"
-	case "max_tokens":
-		return "length"
-	default:
-		return reason
-	}
 }
 
 // Pricing for Anthropic models is resolved from the consolidated catalog

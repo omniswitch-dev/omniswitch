@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -64,7 +66,27 @@ func (a *AlertManager) fire(keyID string, spent, budget, threshold float64) {
 	}
 }
 
-func (a *AlertManager) postJSON(url string, payload any) {
+// alertTarget names a webhook for logs without its path or query. Slack and
+// most webhook URLs carry their secret in the path, so the full URL must
+// never be logged.
+func alertTarget(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return "invalid alert URL"
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+// alertError drops the URL that *url.Error embeds in its message.
+func alertError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return urlErr.Err
+	}
+	return err
+}
+
+func (a *AlertManager) postJSON(rawURL string, payload any) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("failed to marshal alert payload: %v", err)
@@ -72,19 +94,19 @@ func (a *AlertManager) postJSON(url string, payload any) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(body))
 	if err != nil {
-		log.Printf("failed to build alert request: %v", err)
+		log.Printf("failed to build alert request for %s: %v", alertTarget(rawURL), alertError(err))
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := a.client.Do(req)
 	if err != nil {
-		log.Printf("failed to fire alert webhook: %v", err)
+		log.Printf("failed to fire alert webhook %s: %v", alertTarget(rawURL), alertError(err))
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("alert webhook returned status %d", resp.StatusCode)
+		log.Printf("alert webhook %s returned status %d", alertTarget(rawURL), resp.StatusCode)
 	}
 }

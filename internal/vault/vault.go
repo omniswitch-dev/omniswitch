@@ -40,15 +40,16 @@ type VirtualKey struct {
 }
 
 // New creates a new Vault. The passphrase is used to derive the AES-256 encryption key.
-// If passphrase is empty, a random key is generated (keys won't survive restarts).
+// If passphrase is empty, a random ephemeral key is generated (entries won't
+// survive restarts). There is no deterministic fallback key: if the system
+// random source fails, New panics rather than encrypting provider keys under
+// a key that is public in the source code.
 func New(st *store.Store, passphrase string) *Vault {
 	var masterKey []byte
 	if passphrase == "" {
 		masterKey = make([]byte, 32)
 		if _, err := rand.Read(masterKey); err != nil {
-			// Fallback to deterministic key (not secure, but functional).
-			h := sha256.Sum256([]byte("sentinel-default-key"))
-			masterKey = h[:]
+			panic(fmt.Sprintf("vault: generate ephemeral master key: %v", err))
 		}
 	} else {
 		h := sha256.Sum256([]byte(passphrase))

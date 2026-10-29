@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/omniswitch-dev/omniswitch/internal/gateway"
 )
 
 type Handler struct {
@@ -33,6 +35,9 @@ type RotateVirtualKeyRequest struct {
 }
 
 func (h *Handler) CreateVirtualKey(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	var req CreateVirtualKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -80,6 +85,9 @@ func (h *Handler) CreateVirtualKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListVirtualKeys(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	keys, err := h.vault.List(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -92,6 +100,9 @@ func (h *Handler) ListVirtualKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) RotateVirtualKey(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	var req RotateVirtualKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -110,6 +121,9 @@ func (h *Handler) RotateVirtualKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) RevokeVirtualKey(w http.ResponseWriter, r *http.Request) {
+	if !requireGlobal(w, r) {
+		return
+	}
 	name := strings.TrimSpace(r.URL.Query().Get("name"))
 	if name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
@@ -120,6 +134,18 @@ func (h *Handler) RevokeVirtualKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+}
+
+// requireGlobal rejects tenant-scoped callers. Virtual keys register
+// providers in the gateway-wide provider registry, which every tenant
+// routes through, so only global callers (no workspace and no
+// organization) may list, create, rotate or revoke them (finding SEC-3).
+func requireGlobal(w http.ResponseWriter, r *http.Request) bool {
+	if gateway.ScopeFromContext(r.Context()).Global() {
+		return true
+	}
+	writeError(w, http.StatusForbidden, "virtual keys configure gateway-wide providers; only global callers without a workspace or organization can manage them")
+	return false
 }
 
 func newID(prefix string) string {
