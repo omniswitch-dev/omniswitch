@@ -1,0 +1,4 @@
+# Expected SigV4 HMAC in the Bedrock regression test, computed from public
+# dummy credentials. This exception covers only this historical finding;
+# other commits, files, and signatures remain subject to secret scanning.
+650e0b34a51c84c71119059b0876e9f8b912189c:internal/provider/bedrock_sigv4_test.go:generic-api-key:29
