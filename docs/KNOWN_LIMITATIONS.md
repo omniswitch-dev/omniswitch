@@ -27,7 +27,12 @@ OmniSwitch is in public beta. This page lists limitations that are current, know
 
 ## Authorization
 
-- **`authorization.external` is not implemented.** If you set this option in `GatewayConfig`, config validation now fails explicitly with a "not implemented" error instead of silently accepting the setting and doing nothing (see the sibling first-run/config-truth work tracked in `ROADMAP.md`). Use the built-in API key or OIDC/JWKS + CEL policy authorization instead.
+- **External authorization uses OmniSwitch's HTTP JSON decision protocol.** It does not implement Envoy ext_authz gRPC/HTTP wire compatibility, credential injection, or arbitrary request-body forwarding. It requires authentication to be enabled and URL/timeout changes require a restart. See [configuration](CONFIGURATION.md#external-authorization).
+- **Per-key model restrictions apply to exact client-facing model IDs.** They do not limit providers or the destinations behind operator-controlled aliases, fallbacks, or shadow traffic. No wildcard model matching or per-provider key permissions are implemented.
+
+## Prompt deployment
+
+- **Prompt labels are API-managed pointers into the existing shared prompt registry.** Promotion and rollback persist across restarts; workspace isolation, a deployment UI, compare-and-swap promotions, and automatic rendering during inference are not implemented.
 
 ## Reporting something not listed here
 

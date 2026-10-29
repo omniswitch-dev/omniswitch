@@ -6,6 +6,11 @@ OmniSwitch is currently in **public beta** (`v0.2.0-beta.x`). See "Beta scope an
 
 ## Shipped
 
+- Per-key model access restrictions and filtered model/alias discovery.
+- HTTP JSON external authorization with fail-closed policy decisions.
+- Persistent prompt labels for API-driven promotion and rollback.
+- Route-level prompt prepend/append enrichment before guardrails and caching.
+
 - Config hot-reload: routes, guardrails, cache posture, circuit breaker, shadow provider (no restart).
 - Per-request trace waterfalls persisted with logs and rendered in the dashboard.
 - Rust-accelerated guardrail scanning via embedded WASM, with pure-Go fallback.
@@ -24,7 +29,7 @@ OmniSwitch is currently in **public beta** (`v0.2.0-beta.x`). See "Beta scope an
 - Shared storage or external control-plane support for horizontally scaled key, log, budget, and config state (Postgres driver ships; multi-writer HA and migration tooling are still open).
 - SAML/mTLS identity options on top of the current API key and OIDC/JWKS model.
 - Additional native MCP OAuth provider integrations (Keycloak, Auth0) beyond generic RFC 8693 token exchange.
-- Prompt rollback and playground workflows on top of the current prompt version API.
+- Prompt playground and deployment UI on top of the current prompt version and label APIs.
 - Dashboard cost charts and eval report views.
 - MCP spec conformance pass (stateless servers, `_meta` trace context propagation).
 

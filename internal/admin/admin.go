@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/omniswitch-dev/omniswitch/internal/store"
@@ -24,14 +25,15 @@ func New(st *store.Store) *Handler {
 
 // CreateKeyRequest is the request body for creating an API key.
 type CreateKeyRequest struct {
-	Name               string  `json:"name"`
-	WorkspaceID        string  `json:"workspace_id,omitempty"`
-	Role               string  `json:"role,omitempty"`
-	RateLimit          int     `json:"rate_limit,omitempty"`
-	BudgetUSD          float64 `json:"budget_usd,omitempty"`
-	MonthlyCostBudget  float64 `json:"monthly_cost_budget,omitempty"`
-	MonthlyTokenBudget int     `json:"monthly_token_budget,omitempty"`
-	ExpiresIn          string  `json:"expires_in,omitempty"`
+	Name               string   `json:"name"`
+	WorkspaceID        string   `json:"workspace_id,omitempty"`
+	Role               string   `json:"role,omitempty"`
+	RateLimit          int      `json:"rate_limit,omitempty"`
+	BudgetUSD          float64  `json:"budget_usd,omitempty"`
+	MonthlyCostBudget  float64  `json:"monthly_cost_budget,omitempty"`
+	MonthlyTokenBudget int      `json:"monthly_token_budget,omitempty"`
+	ExpiresIn          string   `json:"expires_in,omitempty"`
+	AllowedModels      []string `json:"allowed_models,omitempty"`
 }
 
 // CreateKeyResponse includes the full API key (shown only once).
@@ -54,6 +56,16 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	if req.RateLimit <= 0 {
 		req.RateLimit = 60
 	}
+	if len(req.AllowedModels) > 256 {
+		writeError(w, http.StatusBadRequest, "allowed_models must contain at most 256 model IDs")
+		return
+	}
+	for _, model := range req.AllowedModels {
+		if strings.TrimSpace(model) == "" || strings.TrimSpace(model) != model {
+			writeError(w, http.StatusBadRequest, "allowed_models must contain non-empty model IDs without surrounding whitespace")
+			return
+		}
+	}
 
 	rawKey, err := generateKey()
 	if err != nil {
@@ -75,6 +87,7 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		MonthlyCostBudget:  req.MonthlyCostBudget,
 		MonthlyTokenBudget: req.MonthlyTokenBudget,
 		Enabled:            true,
+		AllowedModels:      req.AllowedModels,
 	}
 
 	if req.ExpiresIn != "" {

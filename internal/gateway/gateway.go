@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -159,6 +160,12 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
+	// Compatibility and A2A handlers call this pipeline directly, so enforce
+	// the client-facing model here as well as at the HTTP authorization layer.
+	if identity, ok := IdentityFromContext(r.Context()); ok && !identity.AllowsModel(req.Model) {
+		writeError(w, http.StatusForbidden, "API key is not allowed to access this model")
+		return
+	}
 	activeRouter := h.router
 	configRef := strings.TrimSpace(r.Header.Get("x-omniswitch-config"))
 	if configRef != "" {
@@ -172,7 +179,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		activeRouter = configRouter
 		span.SetAttributes(attribute.String("sentinel.config", configRef))
 	}
-	transformed, err := activeRouter.TransformRequest(req)
+	transformed, enrichmentKey, err := activeRouter.TransformRequestWithPolicyKey(req)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "invalid route transformation")
@@ -189,6 +196,9 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	shadowHint := firstNonEmpty(r.Header.Get("x-omniswitch-shadow-provider"), activeRouter.ShadowProviderForModel(req.Model), h.shadowProvider)
 	apiKeyID := r.Header.Get("x-omniswitch-key-id")
 	tenantCacheScope := h.tenantCacheScope(r)
+	if enrichmentKey != "" {
+		tenantCacheScope += "|enrichment:" + enrichmentKey
+	}
 	traceRecorder := newTraceRecorder()
 	ctx = WithRequestID(r.Context(), reqID)
 	ctx = WithTraceID(ctx, traceID)
@@ -452,6 +462,24 @@ type streamContext struct {
 // ListModels handles GET /v1/models.
 func (h *Handler) ListModels(w http.ResponseWriter, r *http.Request) {
 	models := h.registry.AllModels()
+	seen := make(map[string]bool, len(models))
+	for _, model := range models {
+		seen[model.ID] = true
+	}
+	for _, name := range h.router.LogicalModels() {
+		if !seen[name] {
+			models = append(models, provider.ModelInfo{ID: name, Object: "model", OwnedBy: "omniswitch", Provider: "omniswitch"})
+		}
+	}
+	identity, _ := IdentityFromContext(r.Context())
+	visible := make([]provider.ModelInfo, 0, len(models))
+	for _, model := range models {
+		if identity.AllowsModel(model.ID) {
+			visible = append(visible, model)
+		}
+	}
+	models = visible
+	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": models})
 }
 

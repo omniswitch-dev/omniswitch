@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -36,18 +37,20 @@ const (
 
 // Route defines how to reach a provider for a given request.
 type Route struct {
-	Strategy       Strategy       `json:"strategy,omitempty" yaml:"strategy,omitempty"`
-	Provider       string         `json:"provider" yaml:"provider"`
-	Fallbacks      []string       `json:"fallbacks,omitempty" yaml:"fallbacks,omitempty"`
-	MaxRetries     int            `json:"max_retries,omitempty" yaml:"max_retries,omitempty"`
-	RetryBackoff   string         `json:"retry_backoff,omitempty" yaml:"retry_backoff,omitempty"`
-	RetryCodes     []int          `json:"retry_codes,omitempty" yaml:"retry_codes,omitempty"`
-	Timeout        string         `json:"timeout,omitempty" yaml:"timeout,omitempty"`
-	ShadowProvider string         `json:"shadow_provider,omitempty" yaml:"shadow_provider,omitempty"`
-	DefaultParams  map[string]any `json:"default_params,omitempty" yaml:"default_params,omitempty"`
-	OverrideParams map[string]any `json:"override_params,omitempty" yaml:"override_params,omitempty"`
-	DropParams     []string       `json:"drop_params,omitempty" yaml:"drop_params,omitempty"`
-	Variants       []Variant      `json:"variants,omitempty" yaml:"variants,omitempty"`
+	Strategy        Strategy           `json:"strategy,omitempty" yaml:"strategy,omitempty"`
+	Provider        string             `json:"provider" yaml:"provider"`
+	Fallbacks       []string           `json:"fallbacks,omitempty" yaml:"fallbacks,omitempty"`
+	MaxRetries      int                `json:"max_retries,omitempty" yaml:"max_retries,omitempty"`
+	RetryBackoff    string             `json:"retry_backoff,omitempty" yaml:"retry_backoff,omitempty"`
+	RetryCodes      []int              `json:"retry_codes,omitempty" yaml:"retry_codes,omitempty"`
+	Timeout         string             `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	ShadowProvider  string             `json:"shadow_provider,omitempty" yaml:"shadow_provider,omitempty"`
+	DefaultParams   map[string]any     `json:"default_params,omitempty" yaml:"default_params,omitempty"`
+	OverrideParams  map[string]any     `json:"override_params,omitempty" yaml:"override_params,omitempty"`
+	DropParams      []string           `json:"drop_params,omitempty" yaml:"drop_params,omitempty"`
+	Variants        []Variant          `json:"variants,omitempty" yaml:"variants,omitempty"`
+	PrependMessages []provider.Message `json:"prepend_messages,omitempty" yaml:"prepend_messages,omitempty"`
+	AppendMessages  []provider.Message `json:"append_messages,omitempty" yaml:"append_messages,omitempty"`
 }
 
 type Variant struct {
@@ -153,6 +156,18 @@ func (r *Router) RouteFor(model string) (Route, bool) {
 	return route, ok
 }
 
+// LogicalModels includes operator-defined aliases in model discovery.
+func (r *Router) LogicalModels() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	models := make([]string, 0, len(r.routes))
+	for model := range r.routes {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	return models
+}
+
 // CloneWithRoutes returns a request-scoped router that inherits the registry,
 // base routes, and circuit breaker, then overlays the supplied routes.
 func (r *Router) CloneWithRoutes(overrides map[string]Route) *Router {
@@ -173,27 +188,51 @@ func (r *Router) CloneWithRoutes(overrides map[string]Route) *Router {
 // TransformRequest applies Portkey-style request shaping to the logical route.
 // Defaults only fill omitted fields; overrides always win; drops run last.
 func (r *Router) TransformRequest(req provider.ChatRequest) (provider.ChatRequest, error) {
+	transformed, _, err := r.TransformRequestWithPolicyKey(req)
+	return transformed, err
+}
+
+// TransformRequestWithPolicyKey returns an enrichment fingerprint from the
+// same route snapshot used for transformation. Gateways can use it to isolate
+// semantic caches across prompt-policy revisions, even when token counts match.
+func (r *Router) TransformRequestWithPolicyKey(req provider.ChatRequest) (provider.ChatRequest, string, error) {
 	route, ok := r.routeFor(req.Model)
 	if !ok {
-		return req, nil
+		return req, "", nil
 	}
 	for field, value := range route.DefaultParams {
 		if requestFieldSet(req, field) {
 			continue
 		}
 		if err := setRequestField(&req, field, value); err != nil {
-			return req, fmt.Errorf("route %q default_params.%s: %w", req.Model, field, err)
+			return req, "", fmt.Errorf("route %q default_params.%s: %w", req.Model, field, err)
 		}
 	}
 	for field, value := range route.OverrideParams {
 		if err := setRequestField(&req, field, value); err != nil {
-			return req, fmt.Errorf("route %q override_params.%s: %w", req.Model, field, err)
+			return req, "", fmt.Errorf("route %q override_params.%s: %w", req.Model, field, err)
 		}
 	}
 	for _, field := range route.DropParams {
 		dropRequestField(&req, field)
 	}
-	return req, nil
+	// Allocate a fresh slice so requests cannot mutate the route or one another.
+	policyKey := ""
+	if len(route.PrependMessages)+len(route.AppendMessages) > 0 {
+		data, err := json.Marshal(struct {
+			Prepend []provider.Message `json:"prepend"`
+			Append  []provider.Message `json:"append"`
+		}{route.PrependMessages, route.AppendMessages})
+		if err != nil {
+			return req, "", fmt.Errorf("encode prompt enrichment: %w", err)
+		}
+		policyKey = fmt.Sprintf("%x", sha256.Sum256(data))
+		messages := make([]provider.Message, 0, len(route.PrependMessages)+len(req.Messages)+len(route.AppendMessages))
+		messages = append(messages, route.PrependMessages...)
+		messages = append(messages, req.Messages...)
+		req.Messages = append(messages, route.AppendMessages...)
+	}
+	return req, policyKey, nil
 }
 
 func (r *Router) ShadowProviderForModel(model string) string {

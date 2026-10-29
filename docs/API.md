@@ -254,6 +254,7 @@ Creates a OmniSwitch API key.
   "name": "production-app",
   "workspace_id": "ws_123",
   "role": "admin",
+  "allowed_models": ["support", "gpt-4o-mini"],
   "rate_limit": 120,
   "monthly_cost_budget": 50,
   "monthly_token_budget": 1000000
@@ -263,6 +264,18 @@ Creates a OmniSwitch API key.
 ### `GET /api/keys`
 
 Lists API keys.
+
+`allowed_models` is an optional list of at most 256 exact client-facing model
+IDs. Omitted, `null`, or `[]` preserves unrestricted model access. With
+authentication enabled, a model outside the list returns 403 before inference;
+the list applies to all POST `/v1/*` inference endpoints, including streaming,
+and to the shared chat pipeline used by A2A messages.
+`GET /v1/models` shows only permitted registered models and configured route
+aliases. This is a model-name policy, not a provider allowlist: an allowed
+logical route still uses operator-configured variants, fallbacks, request
+shaping, guardrail reroutes, and shadow providers. Use CEL/external policy and
+trusted routing configuration for additional restrictions. Existing keys keep
+their access after the automatic schema migration.
 
 ### `DELETE /api/keys?id=<key_id>`
 
@@ -346,6 +359,43 @@ Lists all versions for a prompt name, newest version first.
 ### `POST /api/prompts/render`
 
 Renders a prompt template with variables.
+
+Select one immutable version with `prompt_id`, or resolve a deployment label:
+
+```json
+{
+  "name": "support",
+  "label": "production",
+  "variables": {"name": "Ada"}
+}
+```
+
+These selectors are mutually exclusive. Missing versions or labels return 404.
+The response is `{"rendered":"..."}`. Values containing `{{other_variable}}`
+are inserted literally; replacements never recursively expand supplied values.
+Unprovided variables remain unchanged.
+
+### `POST /api/prompts/labels`
+
+Promotes a prompt version to a named label. Reassign the same label to an older
+`prompt_id` to roll back. The move is atomic, persists across restarts, and does
+not change any prompt version. It requires a member, admin, or owner key when
+authentication is enabled.
+
+```json
+{"name":"support","label":"production","prompt_id":"prompt_123"}
+```
+
+Labels are 1–64 characters, start with a letter or digit, and otherwise contain
+letters, digits, `.`, `_`, or `-`. A version belonging to another prompt name
+returns 404 and leaves the existing label unchanged. Responses include `name`,
+`label`, `prompt_id`, and `updated_at`.
+
+### `GET /api/prompts/labels?name=<prompt_name>`
+
+Lists that prompt's deployment labels in `{"labels":[...]}`, sorted by label.
+An unknown prompt returns an empty list. Versions are shared through the
+existing prompt registry; labels do not introduce workspace isolation.
 
 ### `POST /api/evals/policy`
 

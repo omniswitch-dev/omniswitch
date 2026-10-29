@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/omniswitch-dev/omniswitch/internal/provider"
 	"github.com/omniswitch-dev/omniswitch/internal/router"
 
 	"go.yaml.in/yaml/v3"
@@ -360,8 +361,16 @@ func Validate(cfg Config) error {
 			return fmt.Errorf("authorization.rules[%d].effect must be allow or deny", index)
 		}
 	}
-	if cfg.Authorization.External.URL != "" || cfg.Authorization.External.Timeout != nil {
-		return fmt.Errorf("authorization.external is not implemented in this release; remove it from the config and use authorization.rules (CEL) instead")
+	if cfg.Authorization.External.URL != "" {
+		parsed, err := url.Parse(cfg.Authorization.External.URL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+			return fmt.Errorf("authorization.external.url must be an absolute HTTP(S) URL without credentials or fragment")
+		}
+	}
+	if cfg.Authorization.External.Timeout != nil {
+		if cfg.Authorization.External.URL == "" || cfg.Authorization.External.Timeout.Duration <= 0 {
+			return fmt.Errorf("authorization.external.timeout requires a URL and must be positive")
+		}
 	}
 	if cfg.RateLimit.Requests != nil && *cfg.RateLimit.Requests < 1 {
 		return fmt.Errorf("rate_limit.requests must be positive")
@@ -518,6 +527,21 @@ func Validate(cfg Config) error {
 		}
 		if route.MaxRetries < 0 {
 			return fmt.Errorf("route %q max_retries must be non-negative", model)
+		}
+		for field, messages := range map[string][]provider.Message{"prepend_messages": route.PrependMessages, "append_messages": route.AppendMessages} {
+			for index, message := range messages {
+				switch message.Role {
+				case "system", "developer", "user", "assistant":
+				default:
+					return fmt.Errorf("route %q %s[%d].role must be system, developer, user, or assistant", model, field, index)
+				}
+				if strings.TrimSpace(message.Content) == "" {
+					return fmt.Errorf("route %q %s[%d].content must be non-empty text", model, field, index)
+				}
+				if len(message.ContentParts) > 0 || len(message.ToolCalls) > 0 || message.ToolCallID != "" {
+					return fmt.Errorf("route %q %s[%d] supports plain text messages only", model, field, index)
+				}
+			}
 		}
 		if route.Timeout != "" {
 			if duration, err := time.ParseDuration(route.Timeout); err != nil || duration <= 0 {

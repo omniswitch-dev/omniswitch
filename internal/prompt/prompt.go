@@ -2,12 +2,13 @@ package prompt
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/omniswitch-dev/omniswitch/internal/store"
@@ -32,6 +33,8 @@ type CreatePromptRequest struct {
 // RenderRequest is the request body for rendering a prompt template.
 type RenderRequest struct {
 	PromptID  string            `json:"prompt_id"`
+	Name      string            `json:"name,omitempty"`
+	Label     string            `json:"label,omitempty"`
 	Variables map[string]string `json:"variables"`
 }
 
@@ -103,22 +106,45 @@ func (h *Handler) ListPromptVersions(w http.ResponseWriter, r *http.Request) {
 
 // RenderPrompt handles POST /api/prompts/render.
 func (h *Handler) RenderPrompt(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
+		return
+	}
 	var req RenderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	p, err := h.store.GetPrompt(r.Context(), req.PromptID)
+	if (req.PromptID == "" && (req.Name == "" || req.Label == "")) || (req.PromptID != "" && (req.Name != "" || req.Label != "")) {
+		writeError(w, http.StatusBadRequest, "provide either prompt_id or both name and label")
+		return
+	}
+	var p store.Prompt
+	var err error
+	if req.PromptID != "" {
+		p, err = h.store.GetPrompt(r.Context(), req.PromptID)
+	} else {
+		p, err = h.store.GetPromptByLabel(r.Context(), req.Name, req.Label)
+	}
 	if err != nil {
-		writeError(w, http.StatusNotFound, "prompt not found")
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "prompt not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to load prompt")
+		}
 		return
 	}
 
 	rendered := p.Template
-	for key, value := range req.Variables {
-		rendered = strings.ReplaceAll(rendered, "{{"+key+"}}", value)
-	}
+	// Replace each original placeholder once. Values containing template syntax
+	// remain literal, independent of map iteration order.
+	rendered = varPattern.ReplaceAllStringFunc(rendered, func(match string) string {
+		if value, ok := req.Variables[match[2:len(match)-2]]; ok {
+			return value
+		}
+		return match
+	})
 
 	writeJSON(w, http.StatusOK, map[string]string{"rendered": rendered})
 }

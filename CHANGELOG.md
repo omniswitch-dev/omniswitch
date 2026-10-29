@@ -6,7 +6,17 @@ The format is based on Keep a Changelog, and this project follows semantic versi
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- Per-API-key `allowed_models` restrictions with persistent storage, automatic migration for existing keys, filtered model discovery, and discovery of logical route aliases.
+- Fail-closed HTTP JSON external authorization after API-key model, CEL, and role checks. Callouts exclude credentials and prompt content, reject redirects, and enforce time and response-size limits.
+- Persistent prompt deployment labels with atomic promotion/rollback via `/api/prompts/labels` and rendering by name/label.
+- Route-level `prepend_messages` and `append_messages` enrichment before guardrails and cache lookup, including the compatible streaming chat pipeline.
+- A source-backed [competitive feature review](docs/comparison/FEATURE_REVIEW_2026-10-29.md) with implementation scope and remaining gaps.
+
+### Fixed
+
+- Prompt template values containing other placeholder names are inserted literally, avoiding map-order-dependent recursive substitution.
 
 ## [0.2.0-beta.1] - Unreleased
 

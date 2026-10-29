@@ -26,6 +26,8 @@ type runtimeSettings struct {
 	circuitBreakerCooldown time.Duration
 	guardrailConfig        guardrail.Config
 	authorizationRules     []gateway.AuthorizationRule
+	externalAuthURL        string
+	externalAuthTimeout    time.Duration
 	rateLimitRequests      int
 	rateLimitWindow        time.Duration
 	rateLimitRedisURL      string
@@ -252,6 +254,10 @@ func applyGatewayConfig(settings *runtimeSettings, cfg gatewayconfig.Config) {
 			})
 		}
 	}
+	settings.externalAuthURL = cfg.Authorization.External.URL
+	if cfg.Authorization.External.Timeout != nil {
+		settings.externalAuthTimeout = cfg.Authorization.External.Timeout.Duration
+	}
 	if cfg.Guardrails.Rules != nil || cfg.Guardrails.ToolRules != nil || cfg.Guardrails.Webhooks != nil || cfg.Guardrails.LLMJudges != nil {
 		settings.guardrailConfig = guardrailConfigFromGatewayConfig(cfg, settings.guardrailConfig)
 	}
@@ -361,6 +367,12 @@ func mergeRoute(base, override router.Route) router.Route {
 	}
 	if override.Variants != nil {
 		base.Variants = override.Variants
+	}
+	if override.PrependMessages != nil {
+		base.PrependMessages = override.PrependMessages
+	}
+	if override.AppendMessages != nil {
+		base.AppendMessages = override.AppendMessages
 	}
 	return base
 }

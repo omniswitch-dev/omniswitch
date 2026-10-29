@@ -18,7 +18,7 @@ func TestCreateListDeleteAPIKey(t *testing.T) {
 	st := newAdminTestStore(t)
 	handler := New(st)
 
-	createReq := httptest.NewRequest(http.MethodPost, "/api/keys", strings.NewReader(`{"name":"local","rate_limit":3,"workspace_id":"ws_1","role":"admin"}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/keys", strings.NewReader(`{"name":"local","rate_limit":3,"workspace_id":"ws_1","role":"admin","allowed_models":["support"]}`))
 	createRec := httptest.NewRecorder()
 	handler.CreateAPIKey(createRec, createReq)
 	if createRec.Code != http.StatusCreated {
@@ -40,11 +40,17 @@ func TestCreateListDeleteAPIKey(t *testing.T) {
 	if stored.RateLimit != 3 || stored.WorkspaceID != "ws_1" || stored.Role != "admin" {
 		t.Fatalf("stored key = %+v, want rate limit 3 and workspace role", stored)
 	}
+	if len(stored.AllowedModels) != 1 || stored.AllowedModels[0] != "support" {
+		t.Fatalf("allowed_models = %v", stored.AllowedModels)
+	}
 
 	listRec := httptest.NewRecorder()
 	handler.ListAPIKeys(listRec, httptest.NewRequest(http.MethodGet, "/api/keys", nil))
 	if listRec.Code != http.StatusOK || !bytes.Contains(listRec.Body.Bytes(), []byte(`"keys"`)) {
 		t.Fatalf("ListAPIKeys status/body = %d/%s", listRec.Code, listRec.Body.String())
+	}
+	if !strings.Contains(listRec.Body.String(), `"allowed_models":["support"]`) {
+		t.Fatalf("model restrictions missing from key listing: %s", listRec.Body)
 	}
 
 	deleteRec := httptest.NewRecorder()
