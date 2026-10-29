@@ -37,6 +37,8 @@ type CreatePromptRequest struct {
 // RenderRequest is the request body for rendering a prompt template.
 type RenderRequest struct {
 	PromptID  string            `json:"prompt_id"`
+	Name      string            `json:"name,omitempty"`
+	Label     string            `json:"label,omitempty"`
 	Variables map[string]string `json:"variables"`
 	// WorkspaceID selects the prompt namespace; see resolveWorkspace.
 	WorkspaceID string `json:"workspace_id,omitempty"`
@@ -132,6 +134,10 @@ var errRenderTooLarge = fmt.Errorf("rendered prompt exceeds %d bytes", MaxRender
 
 // RenderPrompt handles POST /api/prompts/render.
 func (h *Handler) RenderPrompt(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
+		return
+	}
 	var req RenderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -148,9 +154,19 @@ func (h *Handler) RenderPrompt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if (req.PromptID == "" && (req.Name == "" || req.Label == "")) || (req.PromptID != "" && (req.Name != "" || req.Label != "")) {
+		writeError(w, http.StatusBadRequest, "provide either prompt_id or both name and label")
+		return
+	}
 	var p store.Prompt
 	var err error
-	if gateway.ScopeFromContext(r.Context()).Global() && req.WorkspaceID == "" {
+	if req.PromptID == "" {
+		workspaceID, ok := h.resolveWorkspace(w, r, req.WorkspaceID)
+		if !ok {
+			return
+		}
+		p, err = h.store.GetWorkspacePromptByLabel(r.Context(), workspaceID, req.Name, req.Label)
+	} else if gateway.ScopeFromContext(r.Context()).Global() && req.WorkspaceID == "" {
 		// Prompt IDs are unique across namespaces, so a global caller
 		// renders any prompt by ID, as before.
 		p, err = h.store.GetPrompt(r.Context(), req.PromptID)
@@ -162,7 +178,11 @@ func (h *Handler) RenderPrompt(w http.ResponseWriter, r *http.Request) {
 		p, err = h.store.GetWorkspacePrompt(r.Context(), workspaceID, req.PromptID)
 	}
 	if err != nil {
-		writeError(w, http.StatusNotFound, "prompt not found")
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "prompt not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to load prompt")
+		}
 		return
 	}
 

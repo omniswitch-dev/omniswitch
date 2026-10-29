@@ -6,6 +6,11 @@ material.
 
 ## Files
 
+- [2026-10-29 feature review](FEATURE_REVIEW_2026-10-29.md) -- engineering
+  research and implementation scope for model-scoped keys, external policy
+  decisions, prompt labels, and prompt enrichment. This supplements the pinned
+  benchmark register; it is not a new performance or parity claim.
+
 - `claims.yaml` -- hand-authored data. One row per `(gateway, capability)`
   pair. Fields per row:
   - `capability` / `gateway`: slugs matching the `capabilities` / `gateways`

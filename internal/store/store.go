@@ -96,6 +96,7 @@ type APIKey struct {
 	MonthlyTokenBudget int               `json:"monthly_token_budget,omitempty"`
 	Enabled            bool              `json:"enabled"`
 	Metadata           map[string]string `json:"metadata,omitempty"`
+	AllowedModels      []string          `json:"allowed_models,omitempty"`
 }
 
 // Prompt represents a stored prompt template.
@@ -443,6 +444,7 @@ var schemaTables = []string{
 			spend_usd {{FLOAT}} DEFAULT 0,
 			monthly_cost_budget {{FLOAT}} DEFAULT 0,
 			monthly_token_budget INTEGER DEFAULT 0,
+			allowed_models TEXT NOT NULL DEFAULT '[]',
 			enabled INTEGER DEFAULT 1,
 			workspace_id TEXT,
 			role TEXT,
@@ -457,6 +459,14 @@ var schemaTables = []string{
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
 			metadata TEXT
+		)`,
+	`CREATE TABLE IF NOT EXISTS prompt_labels (
+			workspace_id TEXT NOT NULL DEFAULT '',
+			name TEXT NOT NULL,
+			label TEXT NOT NULL,
+			prompt_id TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (workspace_id, name, label)
 		)`,
 	`CREATE TABLE IF NOT EXISTS guardrail_events (
 			id TEXT PRIMARY KEY,
@@ -586,6 +596,7 @@ var legacyColumns = []struct{ table, column, definition string }{
 	{"api_keys", "spend_usd", "{{FLOAT}} DEFAULT 0"},
 	{"api_keys", "workspace_id", "TEXT"},
 	{"api_keys", "role", "TEXT"},
+	{"api_keys", "allowed_models", "TEXT NOT NULL DEFAULT '[]'"},
 	{"prompts", "workspace_id", "TEXT NOT NULL DEFAULT ''"},
 	{"semantic_cache", "cache_key", "TEXT"},
 	{"semantic_cache", "expires_at", "TEXT"},
@@ -1033,10 +1044,14 @@ func (s *Store) getProviderMetrics(ctx context.Context, since time.Time, scope L
 // apiKeyColumns selects a full api_keys row for scanAPIKey-style reads.
 const apiKeyColumns = `id, name, key_hash, key_prefix, created_at, expires_at, COALESCE(rate_limit, 0), COALESCE(budget_usd, 0),
 	COALESCE(spend_usd, 0), COALESCE(monthly_cost_budget, 0), COALESCE(monthly_token_budget, 0), COALESCE(enabled, 0),
-	workspace_id, role, COALESCE(metadata, '')`
+	workspace_id, role, COALESCE(metadata, ''), COALESCE(allowed_models, '[]')`
 
 // InsertAPIKey stores an API key.
 func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
+	allowedModels, err := json.Marshal(key.AllowedModels)
+	if err != nil {
+		return err
+	}
 	meta, _ := json.Marshal(key.Metadata)
 	var expiresAt *string
 	if key.ExpiresAt != nil {
@@ -1047,10 +1062,10 @@ func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
 	// between an insert and a follow-up update. spend_usd is only written
 	// for a new key: re-running the upsert (the bootstrap key on every
 	// restart) must not reset accumulated spend.
-	_, err := s.exec(ctx,
+	_, err = s.exec(ctx,
 		`INSERT INTO api_keys (id, name, key_hash, key_prefix, created_at, expires_at, rate_limit,
-			budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, workspace_id, role, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			budget_usd, spend_usd, monthly_cost_budget, monthly_token_budget, enabled, workspace_id, role, metadata, allowed_models)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			key_hash = excluded.key_hash,
@@ -1063,11 +1078,12 @@ func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
 			enabled = excluded.enabled,
 			workspace_id = excluded.workspace_id,
 			role = excluded.role,
-			metadata = excluded.metadata`,
+			metadata = excluded.metadata,
+			allowed_models = excluded.allowed_models`,
 		key.ID, key.Name, key.KeyHash, key.KeyPrefix,
 		formatTime(key.CreatedAt), expiresAt, key.RateLimit,
 		key.BudgetUSD, key.SpendUSD, key.MonthlyCostBudget, key.MonthlyTokenBudget,
-		boolToInt(key.Enabled), key.WorkspaceID, key.Role, string(meta),
+		boolToInt(key.Enabled), key.WorkspaceID, key.Role, string(meta), string(allowedModels),
 	)
 	return err
 }
@@ -1075,14 +1091,14 @@ func (s *Store) InsertAPIKey(ctx context.Context, key APIKey) error {
 // GetAPIKeyByHash looks up an API key by its SHA-256 hash.
 func (s *Store) GetAPIKeyByHash(ctx context.Context, hash string) (APIKey, error) {
 	var key APIKey
-	var createdAt, metaStr string
+	var createdAt, metaStr, allowedModels string
 	var expiresAt, workspaceID, role sql.NullString
 	var enabled int
 
 	err := s.queryRow(ctx,
 		"SELECT "+apiKeyColumns+" FROM api_keys WHERE key_hash = ?",
 		hash,
-	).Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &createdAt, &expiresAt, &key.RateLimit, &key.BudgetUSD, &key.SpendUSD, &key.MonthlyCostBudget, &key.MonthlyTokenBudget, &enabled, &workspaceID, &role, &metaStr)
+	).Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &createdAt, &expiresAt, &key.RateLimit, &key.BudgetUSD, &key.SpendUSD, &key.MonthlyCostBudget, &key.MonthlyTokenBudget, &enabled, &workspaceID, &role, &metaStr, &allowedModels)
 	if err != nil {
 		return key, err
 	}
@@ -1096,6 +1112,9 @@ func (s *Store) GetAPIKeyByHash(ctx context.Context, hash string) (APIKey, error
 	key.Role = nullableString(role)
 	key.Enabled = enabled == 1
 	_ = json.Unmarshal([]byte(metaStr), &key.Metadata)
+	if err := json.Unmarshal([]byte(allowedModels), &key.AllowedModels); err != nil {
+		return APIKey{}, fmt.Errorf("invalid stored model access policy: %w", err)
+	}
 	return key, nil
 }
 
@@ -1111,7 +1130,7 @@ func (s *Store) listAPIKeys(ctx context.Context, where string, args ...any) ([]A
 	}
 	rows, err := s.query(ctx,
 		`SELECT id, name, key_prefix, created_at, expires_at, COALESCE(rate_limit, 0), COALESCE(budget_usd, 0), COALESCE(spend_usd, 0),
-			COALESCE(monthly_cost_budget, 0), COALESCE(monthly_token_budget, 0), COALESCE(enabled, 0), workspace_id, role
+			COALESCE(monthly_cost_budget, 0), COALESCE(monthly_token_budget, 0), COALESCE(enabled, 0), workspace_id, role, COALESCE(allowed_models, '[]')
 		FROM api_keys`+where+` ORDER BY created_at DESC`, args...)
 	if err != nil {
 		return nil, err
@@ -1121,10 +1140,10 @@ func (s *Store) listAPIKeys(ctx context.Context, where string, args ...any) ([]A
 	var keys []APIKey
 	for rows.Next() {
 		var k APIKey
-		var createdAt string
+		var createdAt, allowedModels string
 		var expiresAt, workspaceID, role sql.NullString
 		var enabled int
-		if err := rows.Scan(&k.ID, &k.Name, &k.KeyPrefix, &createdAt, &expiresAt, &k.RateLimit, &k.BudgetUSD, &k.SpendUSD, &k.MonthlyCostBudget, &k.MonthlyTokenBudget, &enabled, &workspaceID, &role); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.KeyPrefix, &createdAt, &expiresAt, &k.RateLimit, &k.BudgetUSD, &k.SpendUSD, &k.MonthlyCostBudget, &k.MonthlyTokenBudget, &enabled, &workspaceID, &role, &allowedModels); err != nil {
 			return nil, err
 		}
 		k.CreatedAt = parseTime(createdAt)
@@ -1135,6 +1154,9 @@ func (s *Store) listAPIKeys(ctx context.Context, where string, args ...any) ([]A
 		k.WorkspaceID = nullableString(workspaceID)
 		k.Role = nullableString(role)
 		k.Enabled = enabled == 1
+		if err := json.Unmarshal([]byte(allowedModels), &k.AllowedModels); err != nil {
+			return nil, fmt.Errorf("invalid stored model access policy: %w", err)
+		}
 		keys = append(keys, k)
 	}
 	return keys, rows.Err()
@@ -1290,14 +1312,14 @@ func (s *Store) listGuardrailEventsForRequests(ctx context.Context, requestIDs [
 
 func (s *Store) GetAPIKeyByID(ctx context.Context, id string) (APIKey, error) {
 	var key APIKey
-	var createdAt, metaStr string
+	var createdAt, metaStr, allowedModels string
 	var expiresAt, workspaceID, role sql.NullString
 	var enabled int
 
 	err := s.queryRow(ctx,
 		"SELECT "+apiKeyColumns+" FROM api_keys WHERE id = ?",
 		id,
-	).Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &createdAt, &expiresAt, &key.RateLimit, &key.BudgetUSD, &key.SpendUSD, &key.MonthlyCostBudget, &key.MonthlyTokenBudget, &enabled, &workspaceID, &role, &metaStr)
+	).Scan(&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix, &createdAt, &expiresAt, &key.RateLimit, &key.BudgetUSD, &key.SpendUSD, &key.MonthlyCostBudget, &key.MonthlyTokenBudget, &enabled, &workspaceID, &role, &metaStr, &allowedModels)
 	if err != nil {
 		return key, err
 	}
@@ -1311,6 +1333,9 @@ func (s *Store) GetAPIKeyByID(ctx context.Context, id string) (APIKey, error) {
 	key.Role = nullableString(role)
 	key.Enabled = enabled == 1
 	_ = json.Unmarshal([]byte(metaStr), &key.Metadata)
+	if err := json.Unmarshal([]byte(allowedModels), &key.AllowedModels); err != nil {
+		return APIKey{}, fmt.Errorf("invalid stored model access policy: %w", err)
+	}
 	return key, nil
 }
 

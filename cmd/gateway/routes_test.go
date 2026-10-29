@@ -115,6 +115,7 @@ func TestGatewayMuxRegistersRoutes(t *testing.T) {
 		{http.MethodGet, "/api/workspace-members"},
 		{http.MethodGet, "/api/prompts"},
 		{http.MethodGet, "/api/prompts/versions"},
+		{http.MethodGet, "/api/prompts/labels"},
 		{http.MethodGet, "/api/evals/policy"},
 		{http.MethodGet, "/api/logs"},
 		{http.MethodGet, "/api/health"},

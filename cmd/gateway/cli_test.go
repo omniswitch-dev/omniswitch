@@ -129,7 +129,7 @@ func TestDispatchValidateConfigFromEnv(t *testing.T) {
 func TestDispatchValidateConfigInvalid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.yaml")
-	body := "apiVersion: omniswitch.dev/v1\nkind: GatewayConfig\nauthorization:\n  external:\n    url: https://example.com/authz\n"
+	body := "apiVersion: omniswitch.dev/v1\nkind: GatewayConfig\nauthorization:\n  external:\n    url: file:///authz\n"
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -139,8 +139,8 @@ func TestDispatchValidateConfigInvalid(t *testing.T) {
 	if action != actionExit || code != 1 {
 		t.Fatalf("dispatch(validate-config %s) = (%v, %d), want (actionExit, 1)", path, action, code)
 	}
-	if !strings.Contains(stderr.String(), "not implemented") {
-		t.Fatalf("stderr = %q, want a not-implemented error for authorization.external", stderr.String())
+	if !strings.Contains(stderr.String(), "authorization.external.url") {
+		t.Fatalf("stderr = %q, want an invalid URL error for authorization.external", stderr.String())
 	}
 }
 

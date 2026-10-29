@@ -232,6 +232,7 @@ func registerPromptRoutes(mux *http.ServeMux, promptHandler *prompt.Handler) {
 		}
 		promptHandler.RenderPrompt(w, r)
 	})
+	mux.HandleFunc("/api/prompts/labels", promptHandler.Labels)
 }
 
 // registerEvalRoutes registers the policy replay endpoint.
@@ -276,6 +277,13 @@ func wrapGatewayMiddleware(settings runtimeSettings, st *store.Store, mux http.H
 		return nil, nil, fmt.Errorf("failed to initialize authorization policy: %w", err)
 	}
 	authorize.SetPolicy(authorizationPolicy)
+	if settings.externalAuthURL != "" {
+		external, err := gateway.NewExternalAuthorizer(settings.externalAuthURL, settings.externalAuthTimeout)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to initialize external authorization: %w", err)
+		}
+		authorize.SetExternalAuthorizer(external)
+	}
 	rateLimiter, closeRateLimiter, err := buildRateLimiter(settings)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to initialize rate limiter: %w", err)

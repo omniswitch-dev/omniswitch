@@ -54,6 +54,12 @@ A hardening release: security fixes, verified bug fixes, new regression tests an
 
 ### Added
 
+- Per-key exact-name model restrictions and filtered model/alias discovery. Child keys inherit a restricted caller's model list and cannot broaden it.
+- Fail-closed HTTP JSON external authorization after model, CEL and role checks, with bounded responses, deadlines, and no credential/prompt forwarding.
+- Workspace-scoped prompt deployment labels with atomic promotion/rollback and rendering by name/label.
+- Route-level prepend/append prompt enrichment before guardrails and caching, with policy fingerprints isolating semantic-cache entries.
+- A source-backed [competitive feature review](docs/comparison/FEATURE_REVIEW_2026-10-29.md) and a runnable configuration example.
+
 - `OMNISWITCH_LOG_RETENTION_DAYS` deletes request logs, guardrail events and shadow requests older than the given number of days, once at startup and then every hour. The current UTC month is always kept. Expired semantic-cache entries are deleted every hour.
 - Retries honor the upstream `Retry-After` header, and upstream errors keep their HTTP status (`provider.UpstreamError`).
 - MCP policies can use the `target`, `session`, `metadata` and `args` CEL variables, `tool.full_name` and `action.operation`. MCP requests start an OpenTelemetry span and propagate W3C trace context. Audit events record the method, target, key, workspace, session and trace.

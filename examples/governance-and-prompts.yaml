@@ -1,0 +1,36 @@
+apiVersion: omniswitch.dev/v1
+kind: GatewayConfig
+
+# Set OPENAI_API_KEY and OMNISWITCH_BOOTSTRAP_API_KEY before first startup.
+# OMNISWITCH_CONFIG=examples/governance-and-prompts.yaml go run ./cmd/gateway serve
+gateway:
+  auth: true
+  data_dir: ./data
+  log_payloads: false
+
+providers:
+  - name: openai-prod
+    type: openai
+    api_key_env: OPENAI_API_KEY
+
+routes:
+  support:
+    provider: "@openai-prod"
+    override_params:
+      model: "@openai-prod/gpt-4o-mini"
+    prepend_messages:
+      - role: system
+        content: Answer support questions in plain language.
+    append_messages:
+      - role: user
+        content: Keep the answer concise.
+
+# Optional: start your HTTP JSON decision service before enabling this block.
+# authorization:
+#   external:
+#     url: http://127.0.0.1:8091/check
+#     timeout: 2s
+
+# Restrict a workload key with POST /api/keys:
+# {"name":"support-app","allowed_models":["support"],"rate_limit":60}
+# Prompt deployment examples are documented in docs/API.md.

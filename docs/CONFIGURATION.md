@@ -449,11 +449,6 @@ alert for one key and threshold once. A restart or a config file reload
 clears this record, so the alert can fire again. Alerts reload alongside
 guardrails when `OMNISWITCH_CONFIG` hot-reload is enabled.
 
-`authorization.external` (an out-of-process HTTP authorization callout) is not
-implemented in this release. Configuring `authorization.external.url` or
-`authorization.external.timeout` fails config validation with a clear error;
-use `authorization.rules` (CEL) instead.
-
 ## Authorization and Rate Limits
 
 `authorization.rules` are CEL policies evaluated after API-key authentication.
@@ -461,6 +456,55 @@ They receive `method`, `path`, `model`, `api_key_id`, `workspace_id`,
 `organization_id`, `role`, `subject`, and `claims`. A matching `deny` always
 wins. When any `allow` rule exists, a request must also match at least one
 allow rule. This composes with the built-in role checks for the control plane.
+
+### External authorization
+
+An optional HTTP JSON callout adds organization-specific policy after API key
+model restrictions, CEL, and built-in role checks. Enable authentication:
+
+```yaml
+gateway:
+  auth: true
+authorization:
+  external:
+    url: http://127.0.0.1:8091/check
+    timeout: 2s
+```
+
+The gateway POSTs the following attributes to the operator-configured service:
+
+```json
+{
+  "method":"POST",
+  "path":"/v1/chat/completions",
+  "model":"support",
+  "identity": {
+    "api_key_id":"key_123",
+    "subject":"",
+    "workspace_id":"ws_123",
+    "organization_id":"org_123",
+    "role":"member",
+    "auth_method":"api_key"
+  }
+}
+```
+
+It sends no bearer token, request headers, query string, JWT claims, or prompt
+content. The response must be a 2xx JSON object with an explicit boolean:
+`{"allowed":true}` or `{"allowed":false,"message":"policy denied"}`.
+A denial returns 403. Network errors, timeouts, redirects, non-2xx status,
+missing/invalid decisions, or responses larger than 64 KiB return 503. Failure
+always denies access. Redirects are never followed. The timeout defaults to
+2 seconds and follows client cancellation. The callout cannot override a local
+denial or elevate roles. Health probes and public agent discovery bypass it.
+
+Inference model inspection uses the existing 1 MiB authorization body limit;
+policy decisions inspect the original client-facing model before routing.
+The URL/timeout are startup settings; restart after changing them. HTTPS is
+supported; service credentials, Envoy ext_authz gRPC/HTTP wire compatibility,
+and arbitrary request-body policy input are outside this JSON protocol.
+
+### Request quotas
 
 `rate_limit` controls the default request quota. Every API key can still set
 its own quota in the control plane. Without `redis_url`, the gateway uses a
@@ -565,6 +609,37 @@ remembers unknown config names for 2 seconds. The cache holds at most 512
 entries (each config uses one entry for its name and one for its ID). A
 change made through `/api/configs` takes effect at once on the replica that
 handled it. Other replicas see the change within 5 seconds.
+
+### Prompt enrichment
+
+Routes can prepend or append operator-managed text messages to every chat
+request. This also applies to the chat pipeline used by Responses and Messages
+compatibility endpoints, including streaming:
+
+```yaml
+routes:
+  support:
+    provider: openai
+    override_params:
+      model: gpt-4o-mini
+    prepend_messages:
+      - role: system
+        content: Answer support questions in plain language.
+    append_messages:
+      - role: user
+        content: Keep the answer concise.
+```
+
+Enrichment runs after parameter shaping, before guardrails and cache lookup.
+Its text is therefore scanned and contributes to cache keys. An enrichment
+fingerprint also isolates semantic-cache entries across prompt-policy changes,
+including edits with identical token frequencies. Messages retain
+the configured order and never modify another request. Supported roles are
+`system`, `developer`, `user`, and `assistant`, with non-empty text content.
+Provider-specific role support still applies. Embeddings, reranking, and MCP
+tool traffic do not receive chat messages. Enrichment updates with the route
+table on config hot-reload; it is not a substitute for authorization or
+guardrails.
 
 ## Guardrails
 

@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,6 +35,7 @@ type Identity struct {
 	OrganizationID string
 	Role           string
 	Claims         map[string]any
+	AllowedModels  []string
 }
 
 // TokenAuthenticator validates a bearer token from an external identity
@@ -140,6 +142,7 @@ func (a *AuthMiddleware) Wrap(next http.Handler) http.Handler {
 				WorkspaceID:    apiKey.WorkspaceID,
 				OrganizationID: organizationID,
 				Role:           normalizeRole(apiKey.Role),
+				AllowedModels:  append([]string(nil), apiKey.AllowedModels...),
 			})
 			return
 		}
@@ -185,8 +188,9 @@ func (a *AuthMiddleware) serveIdentity(w http.ResponseWriter, r *http.Request, n
 // MCP requests remain available to any valid workload key, while destructive
 // management actions require an administrator key.
 type AuthorizationMiddleware struct {
-	enabled bool
-	policy  *AuthorizationPolicy
+	enabled  bool
+	policy   *AuthorizationPolicy
+	external *ExternalAuthorizer
 }
 
 func NewAuthorizationMiddleware(enabled bool) *AuthorizationMiddleware {
@@ -197,6 +201,10 @@ func NewAuthorizationMiddleware(enabled bool) *AuthorizationMiddleware {
 // separate from authentication so deployments can adopt policy gradually.
 func (a *AuthorizationMiddleware) SetPolicy(policy *AuthorizationPolicy) {
 	a.policy = policy
+}
+
+func (a *AuthorizationMiddleware) SetExternalAuthorizer(external *ExternalAuthorizer) {
+	a.external = external
 }
 
 func (a *AuthorizationMiddleware) Wrap(next http.Handler) http.Handler {
@@ -213,21 +221,45 @@ func (a *AuthorizationMiddleware) Wrap(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "authenticated identity is required")
 			return
 		}
+		if len(identity.AllowedModels) > 0 && r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/") {
+			model, err := modelFromRequest(r)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid request body for model access check")
+				return
+			}
+			if !identity.AllowsModel(model) {
+				writeError(w, http.StatusForbidden, "API key is not allowed to access this model")
+				return
+			}
+		}
 		if allowed, reason := a.policy.Evaluate(r, identity); !allowed {
 			writeError(w, http.StatusForbidden, reason)
 			return
 		}
 		required := requiredRole(r.Method, r.URL.Path)
-		if required == "" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if roleRank(identity.Role) < roleRank(required) {
+		if required != "" && roleRank(identity.Role) < roleRank(required) {
 			writeError(w, http.StatusForbidden, "insufficient role for this endpoint")
 			return
 		}
+		if a.external != nil {
+			allowed, reason, err := a.external.Evaluate(r, identity)
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "external authorization unavailable")
+				return
+			}
+			if !allowed {
+				writeError(w, http.StatusForbidden, reason)
+				return
+			}
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// AllowsModel checks exact client-facing model names. An empty list preserves
+// unrestricted access for existing keys. Operators control alias destinations.
+func (i Identity) AllowsModel(model string) bool {
+	return len(i.AllowedModels) == 0 || slices.Contains(i.AllowedModels, model)
 }
 
 func isPublicDiscoveryRoute(r *http.Request) bool {
@@ -268,7 +300,7 @@ func requiredRole(method, path string) string {
 			return "viewer"
 		}
 		return "admin"
-	case "/api/prompts", "/api/prompts/versions", "/api/prompts/render", "/api/evals/policy":
+	case "/api/prompts", "/api/prompts/versions", "/api/prompts/render", "/api/prompts/labels", "/api/evals/policy":
 		if read {
 			return "viewer"
 		}
