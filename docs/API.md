@@ -78,46 +78,73 @@ cache, budget, guardrail, and logging path as chat completions.
 Supported request fields:
 
 - `model`, `instructions`, `temperature`, `max_output_tokens`, `top_p`.
-- `input` as a string or as an array of `message` items. A message's content
-  is a string or an array of `input_text`, `output_text`, `text`,
-  `input_image` and `image_url` parts.
-- `tools` with named `function` tools, and `tool_choice` (`auto`, `none`,
-  `required`, or a named function).
-- `stream`.
+- `input` as a string or an array of `message`, `function_call`, and
+  `function_call_output` items. Message content is a string or an array of
+  `input_text`, `output_text`, `text`, `input_image`, and `image_url` parts.
+- Named `function` tools, including `strict`, `tool_choice` (`auto`, `none`,
+  `required`, or a named function), and `parallel_tool_calls`.
+- `text.format` with `text`, `json_object`, or `json_schema` (requiring `name`
+  and `schema`, optionally `description` and `strict`). Provider support governs
+  structured output; unsupported native-adapter controls return an error.
+- `stream` and `store: false` (the gateway does not persist Responses state).
 
-The endpoint returns HTTP 400 for:
+For tool loops, resend the full history: original messages, returned
+`function_call` items, and a `function_call_output` for each call. Function calls
+require `call_id`, `name`, and JSON-object `arguments`; tool results require a
+matching unresolved `call_id` and string `output`. Consecutive calls become one
+assistant turn, including parallel calls. See [agent workflows](AGENT_WORKFLOWS.md).
 
-- built-in tools (for example `web_search` or `file_search`) and function
-  tools without a name;
-- other input item types, including `function_call_output`;
-- other content part types, such as audio and file parts.
+HTTP 400 is returned for built-in tools, unknown item/content types, invalid
+choices or tool history, non-string tool results, and requests for stored state
+(`previous_response_id`, non-null `conversation`, `store: true`, or
+`background: true`). Unmodeled fields, including `reasoning`, are still ignored.
+This is a stateless compatibility subset, not full Responses parity.
 
-A client cannot send tool results back through this endpoint. Use
-[`POST /v1/chat/completions`](#post-v1chatcompletions) for multi-turn tool use.
-
-The endpoint ignores `previous_response_id`, `store`, `background`,
-`text.format`, `reasoning`, and other fields that are not in the list above.
-
-A response puts the assistant text in a `message` output item and each tool
-call in a `function_call` output item. With `stream: true`, the endpoint
-sends these SSE events: `response.created`, `response.output_text.delta`,
-`response.output_item.added`, `response.function_call_arguments.delta`,
+A response puts assistant text in a `message` output item and each tool call in
+its own `function_call` item. Streaming emits `response.created`,
+`response.output_item.added`, `response.content_part.added`,
+`response.output_text.delta`, `response.output_text.done`,
+`response.content_part.done`, `response.function_call_arguments.delta`,
 `response.function_call_arguments.done`, `response.output_item.done`, and
-`response.completed`, then `[DONE]`. An error after the stream starts sends
+`response.completed` as applicable, followed by `[DONE]`. Events have monotonic
+`sequence_number` values, and the completed response includes the assembled
+`output` array even for text-only streams. A mid-stream error sends
 `response.failed`.
 
 ### `POST /v1/messages`
 
-Accepts the core Anthropic Messages shape (`model`, `messages`, `system`,
-`max_tokens`, `temperature`, `top_p`, `stream`) and returns an
-Anthropic-style message result through the common OmniSwitch path.
+Accepts an Anthropic Messages compatibility subset through the same governed
+chat pipeline. With authentication enabled, the SDK's `x-api-key` header accepts
+an OmniSwitch API key on `/v1/messages`. An explicit `Authorization` header
+always takes precedence; OIDC tokens still require Bearer authentication.
 
-The endpoint does not accept or forward client `tools`, so the routed model
-normally returns text only. The non-streaming response has one `text`
-content block. With `stream: true`, the endpoint sends Anthropic SSE events.
-If the upstream returns tool calls, the stream sends them as `tool_use`
-content blocks with `input_json_delta` deltas and ends with `stop_reason:
-tool_use`.
+Supported fields:
+
+- `model`, `messages` (`user` or `assistant`), `max_tokens`, `temperature`,
+  `top_p`, `stop_sequences`, and `stream`. Omitted `max_tokens` retains the
+  gateway/provider default; explicit values must be positive.
+- `system` as a string or an array of text blocks.
+- String message content or `text`, user `image` (URL or base64), assistant
+  `tool_use`, and user `tool_result` blocks.
+- Custom tool definitions (`name`, `description`, `input_schema`, `strict`)
+  and `tool_choice` (`auto`, `none`, `any`, or `tool` with a name), including
+  `disable_parallel_tool_use`.
+
+Tool results must precede text/images in their user message and reference an
+unresolved `tool_use_id` from the full supplied history. Results can be strings
+or text-block arrays; image/document tool results are unsupported. `is_error:
+true` is represented as a `Tool error: ` prefix in the canonical tool message.
+Unknown content blocks, server tools, malformed IDs/arguments, and non-null
+`thinking` requests are rejected with HTTP 400. Other unmodeled request fields
+are ignored. No extended-thinking, prompt-cache-control, or full vendor parity
+is claimed.
+
+Non-streaming output includes `text` and `tool_use` blocks, with parsed JSON
+inputs, usage, and `stop_reason: tool_use` for tool turns. Invalid upstream JSON
+arguments return HTTP 502. Streaming uses Anthropic SSE events with
+`input_json_delta` for tool arguments. Custom-tool `strict` is forwarded to
+OpenAI-compatible and native Anthropic providers; Google/Bedrock adapters reject
+`strict: true` rather than silently discarding it.
 
 ### `POST /v1/embeddings`
 

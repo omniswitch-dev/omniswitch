@@ -329,6 +329,9 @@ func (b *Bedrock) toConverseRequest(req ChatRequest) (bedrockConverseRequest, er
 	if len(req.Tools) > 0 {
 		out.ToolConfig = &bedrockToolConfig{Tools: make([]bedrockTool, 0, len(req.Tools))}
 		for _, tool := range req.Tools {
+			if tool.Function.Strict != nil && *tool.Function.Strict {
+				return bedrockConverseRequest{}, NewUnsupportedParameterError("bedrock", "tools.function.strict")
+			}
 			if tool.Type != "" && tool.Type != "function" {
 				continue
 			}

@@ -63,6 +63,7 @@ type anthropicTool struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	InputSchema any    `json:"input_schema"`
+	Strict      *bool  `json:"strict,omitempty"`
 }
 
 type anthropicToolChoice struct {
@@ -337,6 +338,7 @@ func toAnthropicRequest(req ChatRequest, stream bool) (anthropicRequest, error) 
 			Name:        t.Function.Name,
 			Description: t.Function.Description,
 			InputSchema: schema,
+			Strict:      t.Function.Strict,
 		})
 	}
 

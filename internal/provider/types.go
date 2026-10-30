@@ -198,6 +198,7 @@ type ToolFunction struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Parameters  any    `json:"parameters,omitempty"`
+	Strict      *bool  `json:"strict,omitempty"`
 }
 
 // ToolCall represents an LLM-initiated function invocation.
