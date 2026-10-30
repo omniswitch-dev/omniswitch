@@ -44,3 +44,9 @@ tmp/
 
 # Rust accelerator build output
 accel/target/
+
+# Python package builds
+__pycache__/
+*.egg-info/
+sdk/python/build/
+sdk/python/omniswitch/bin/

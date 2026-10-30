@@ -144,6 +144,9 @@ func registerProviderAccount(registry *provider.Registry, account gatewayconfig.
 	providerType := strings.ToLower(strings.TrimSpace(account.Type))
 
 	switch providerType {
+	case "demo":
+		registry.Register(provider.NewAlias(account.Name, provider.NewDemo()))
+		return
 	case "azure", "azure-openai":
 		envKey := strings.TrimSpace(account.APIKeyEnv)
 		if envKey == "" {

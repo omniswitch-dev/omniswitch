@@ -42,6 +42,15 @@ func main() {
 	if action == actionExit {
 		os.Exit(code)
 	}
+	if action == actionStart {
+		args := os.Args[1:]
+		if len(args) > 0 {
+			args = args[1:]
+		}
+		if serve, code := prepareManagedStart(args, os.Stdout, os.Stderr); !serve {
+			os.Exit(code)
+		}
+	}
 	runServe()
 }
 
@@ -106,6 +115,9 @@ func runServe() {
 	}()
 	if err := ensureBootstrapKey(context.Background(), st, settings); err != nil {
 		log.Fatalf("failed to initialize authentication: %v", err)
+	}
+	if err := ensureManagedAppKey(context.Background(), st, settings); err != nil {
+		log.Fatalf("failed to initialize local app key: %v", err)
 	}
 	vaultManager := vault.New(st, settings.vaultKey)
 	if settings.vaultKey == "" {

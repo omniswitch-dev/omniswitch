@@ -1,28 +1,58 @@
-# OmniSwitch Python SDK
+# OmniSwitch: install, connect, build
 
-`omniswitch` is a thin wrapper around the official OpenAI Python client. It
-keeps the OpenAI client surface while routing requests through a self-hosted
-OmniSwitch gateway and injecting OmniSwitch headers for configs, traces,
-sessions, provider overrides, and shadow traffic.
+The release wheel includes the complete gateway. No Go compiler, Docker,
+provider SDK, or first-run binary download is required.
 
-## Install
+> PyPI publication is being prepared in this branch. The bare install command
+> below becomes available after the first verified package release is published
+> by `omniswitch-dev/omniswitch`. Until then, install a wheel built by this
+> repository's Python package workflow, not an unrelated package.
 
-The SDK is not published to PyPI yet. If a package named `omniswitch`
-appears on PyPI before we publish, it is not ours. Install from the
-repository instead:
+## Install a published release
 
 ```bash
-pip install "git+https://github.com/omniswitch-dev/omniswitch#subdirectory=sdk/python"
+pip install omniswitch
+omniswitch
 ```
 
-For reproducible installs, pin a release tag or commit by adding
-`@<tag-or-commit>` after the repository URL, for example
-`git+https://github.com/omniswitch-dev/omniswitch@<tag>#subdirectory=sdk/python`.
-
-For local development from a checkout of this repository:
+Your browser opens a short local setup. Choose a provider, paste its key (or
+use a detected environment key), and copy your integration. A free simulated
+demo is available before connecting a real provider. Subsequent launches reuse
+the saved profile.
 
 ```bash
-pip install -e sdk/python
+omniswitch start --no-browser  # Print a private setup link for headless use
+omniswitch start --demo        # Start a simulated demo on a fresh profile
+omniswitch start --setup       # Reconnect your provider
+omniswitch serve               # Advanced environment/config-driven server
+```
+
+The package launches a loopback gateway with authentication enabled, a separate
+app key restricted to model `default`, and local SQLite state. See
+[onboarding and integrations](https://github.com/omniswitch-dev/omniswitch/blob/main/docs/ONBOARDING.md).
+
+Release wheels support Linux x86-64/ARM64, macOS 12+ Intel/Apple Silicon, and
+Windows x86-64. Python 3.9+ is required. Source installs contain the SDK/launcher
+only; use a platform wheel for the bundled gateway, or set `OMNISWITCH_BINARY`
+to a locally built gateway executable.
+
+## Optional Python SDK
+
+Standard OpenAI-compatible SDKs work with the integration code provided by the
+setup page. For the additional OmniSwitch convenience wrapper:
+
+```bash
+pip install 'omniswitch[sdk]'
+```
+
+With the optional extra, `OmniSwitch()` automatically discovers the saved local
+profile and uses its app key. Choose model `default`. Explicit gateway URLs
+keep their own credentials and disable local credential discovery.
+
+For SDK development from a checkout:
+
+```bash
+pip install -e 'sdk/python[sdk]'
 ```
 
 ## Use

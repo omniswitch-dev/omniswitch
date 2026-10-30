@@ -6,6 +6,27 @@ The format is based on Keep a Changelog, and this project follows semantic versi
 
 ## [Unreleased]
 
+### One-command onboarding and packaged gateway
+
+- Platform-specific Python wheels bundle the Go gateway and expose `omniswitch`
+  and `python -m omniswitch`, without requiring Go, Docker, SDK dependencies, or
+  a first-run binary download. The existing Python client is an optional `sdk`
+  extra and keeps its import API. The optional client discovers saved loopback
+  profiles automatically, without reusing local credentials for custom URLs.
+- Added guided local setup with provider credential detection, model discovery,
+  saved profiles, a simulated no-key demo, copyable integration examples,
+  downloadable environment settings, and an explicit first-request action.
+- Managed profiles generate separate owner/app credentials. The app key is
+  restricted to model `default`; profile credentials use a private local file.
+- The browser app shell is now public static HTML; APIs and inference retain
+  authentication. Browser handoff keys are removed from the URL fragment.
+- Added native platform install-smoke CI and a PyPI Trusted Publishing workflow.
+  Public PyPI availability requires owner setup and a published package release.
+- Behavior change: no-argument launches now use guided/saved-profile startup,
+  except when `OMNISWITCH_CONFIG` is explicitly set. Use `serve` for the original
+  environment/config-driven startup. Managed starts isolate gateway settings.
+
+
 ### Agent workflows and first-run diagnostics
 
 - Responses accepts stateless `function_call`/`function_call_output` history,

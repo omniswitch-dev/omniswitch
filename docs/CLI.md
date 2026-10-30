@@ -1,14 +1,18 @@
 # Command Line
 
 The `omniswitch` binary is both the gateway server and its own CLI. Running
-it with no arguments is equivalent to `omniswitch serve`.
+it with no arguments opens guided setup or starts the saved local profile.
+If `OMNISWITCH_CONFIG` is explicitly set, a no-argument invocation retains the
+direct server behavior. `omniswitch serve` always uses the existing environment
+and config-driven server path.
 
 ```
 Usage:
   omniswitch [command]
 
 Commands:
-  serve             Start the gateway server (default when no command is given)
+  start             Open guided setup or start your saved gateway (default)
+  serve             Start directly from environment variables/config
   validate-config   Validate a gateway config file and exit (defaults to $OMNISWITCH_CONFIG)
   doctor            Check a running gateway's health, readiness, and model access
   version           Print version information
@@ -22,6 +26,28 @@ Flags:
 None of `--help`, `--version`, or `validate-config` start the HTTP server or
 bind a port, so they are safe to run in scripts, health checks, or CI even
 while a gateway instance is already listening on the configured address.
+
+## `omniswitch start`
+
+Open the local first-run setup, or launch the saved profile without repeating
+it. The setup page connects OpenAI, Anthropic, Gemini, Groq, OpenRouter, or a
+local OpenAI-compatible server. Environment credentials are detected but never
+returned to the page. Model discovery verifies the connection without paid
+inference. A demo produces simulated responses without external requests.
+
+Flags: `--no-browser` prints the private setup link, `--demo` creates a demo on a
+fresh profile, `--setup` reconnects the provider while preserving local keys,
+`--port` chooses the loopback port (`8080` initially, `0` for a free port), and
+`--home` chooses a profile directory. The last selected port is remembered.
+Use `--home` again when restarting a custom profile. A real-provider profile is
+not silently replaced by `--demo`; use a separate `--home` for that.
+
+Managed starts use their own settings and SQLite directory. Environment variables
+prefixed `OMNISWITCH_` do not override this local profile after preparation;
+use explicit `serve` for advanced settings, custom config, external storage,
+Redis, OIDC, or deployment beyond the local machine.
+
+See [onboarding](ONBOARDING.md) for the flow and credential/storage behavior.
 
 ## `omniswitch serve`
 

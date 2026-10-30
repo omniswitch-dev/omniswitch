@@ -9,16 +9,20 @@ configuration, tracing, and session headers.
 from __future__ import annotations
 
 import os
+import json
+from pathlib import Path
+import stat
+import sys
 from typing import Any, Mapping, Optional
 
 try:
     from openai import OpenAI
 except ImportError as exc:  # pragma: no cover - exercised by packaging users.
     raise ImportError(
-        "The 'openai' package is required. Install it with: pip install openai>=1.0"
+        "The 'openai' package is required. Install it with: pip install 'omniswitch[sdk]'"
     ) from exc
 
-__version__ = "0.1.0"
+from ._version import __version__
 
 DEFAULT_GATEWAY_URL = "http://localhost:8080/v1"
 
@@ -32,6 +36,36 @@ ENV_PROVIDER = "OMNISWITCH_PROVIDER"
 ENV_TRACE_ID = "OMNISWITCH_TRACE_ID"
 ENV_SESSION_ID = "OMNISWITCH_SESSION_ID"
 ENV_SHADOW_PROVIDER = "OMNISWITCH_CLIENT_SHADOW_PROVIDER"
+
+
+def _local_profile_defaults() -> tuple[str, str] | tuple[None, None]:
+    """Discover only a local managed profile; never send its key to a custom URL."""
+    directory = os.environ.get("OMNISWITCH_HOME")
+    if not directory:
+        if sys.platform == "win32":
+            root = os.environ.get("APPDATA")
+            if not root:
+                return None, None
+        elif sys.platform == "darwin":
+            root = str(Path.home() / "Library" / "Application Support")
+        else:
+            root = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+        directory = str(Path(root) / "omniswitch")
+    path = Path(directory) / "profile.json"
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 131072:
+            return None, None
+        profile = json.loads(path.read_text(encoding="utf-8"))
+        host, port = profile["listen"].rsplit(":", 1)
+        key = profile["app_key"]
+        if (profile.get("version") != 1 or host != "127.0.0.1"
+                or not 0 < int(port) <= 65535 or not isinstance(key, str)
+                or not key or key == profile.get("gateway_key")):
+            return None, None
+        return f"http://127.0.0.1:{int(port)}/v1", key
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None, None
 
 
 class OmniSwitch(OpenAI):
@@ -71,10 +105,13 @@ class OmniSwitch(OpenAI):
         default_headers: Optional[Mapping[str, str]] = None,
         **kwargs: Any,
     ) -> None:
+        local_url, local_key = (None, None)
+        if not gateway_url and not os.environ.get(ENV_GATEWAY_URL):
+            local_url, local_key = _local_profile_defaults()
         base_url = normalize_gateway_url(
-            gateway_url or os.environ.get(ENV_GATEWAY_URL, DEFAULT_GATEWAY_URL)
+            gateway_url or os.environ.get(ENV_GATEWAY_URL) or local_url or DEFAULT_GATEWAY_URL
         )
-        key = api_key or os.environ.get(ENV_API_KEY, "omniswitch-no-auth")
+        key = api_key or os.environ.get(ENV_API_KEY) or local_key or "omniswitch-no-auth"
         # Precedence: explicit argument > caller-supplied default_headers
         # (including headers set by with_config/with_trace/with_provider) >
         # environment variables. The environment variables use the
