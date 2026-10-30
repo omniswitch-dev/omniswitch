@@ -76,7 +76,7 @@ def main():
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     for target in TARGETS if args.target == "all" else [args.target]:
-        print(f"Building {target} → {version}", flush=True)
+        print(f"Building {target} -> {version}", flush=True)
         print(build(target, version, args.output), flush=True)
 
 
