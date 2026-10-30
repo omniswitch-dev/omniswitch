@@ -100,12 +100,9 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-	chatRequest := provider.ChatRequest{Model: request.Model, Messages: request.Messages, MaxTokens: request.MaxTokens, Temperature: request.Temperature, TopP: request.TopP}
-	if strings.TrimSpace(request.System) != "" {
-		chatRequest.Messages = append([]provider.Message{{Role: "system", Content: request.System}}, chatRequest.Messages...)
-	}
-	if strings.TrimSpace(chatRequest.Model) == "" {
-		writeError(w, http.StatusBadRequest, "model is required")
+	chatRequest, err := request.toChatRequest()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if request.Stream {
@@ -119,19 +116,34 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(body)
 		return
 	}
-	content := ""
+	content := []any{}
 	stopReason := "end_turn"
 	if len(chat.Choices) > 0 {
-		content = chat.Choices[0].Message.Content
+		message := chat.Choices[0].Message
+		if message.Content != "" || len(message.ToolCalls) == 0 {
+			content = append(content, map[string]any{"type": "text", "text": message.Content})
+		}
+		for _, call := range message.ToolCalls {
+			input, err := toolArgumentsObject(call.Function.Arguments)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, "upstream returned invalid tool arguments")
+				return
+			}
+			content = append(content, map[string]any{"type": "tool_use", "id": call.ID, "name": call.Function.Name, "input": input})
+		}
 		stopReason = mapOpenAIStopReason(chat.Choices[0].FinishReason)
+		if len(message.ToolCalls) > 0 && stopReason == "end_turn" {
+			stopReason = "tool_use"
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":          chat.ID,
-		"type":        "message",
-		"role":        "assistant",
-		"model":       chat.Model,
-		"stop_reason": stopReason,
-		"content":     []any{map[string]string{"type": "text", "text": content}},
+		"id":            chat.ID,
+		"type":          "message",
+		"role":          "assistant",
+		"model":         chat.Model,
+		"stop_reason":   stopReason,
+		"stop_sequence": nil,
+		"content":       content,
 		"usage": map[string]int{
 			"input_tokens":  chat.Usage.PromptTokens,
 			"output_tokens": chat.Usage.CompletionTokens,
@@ -140,15 +152,31 @@ func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 }
 
 type responsesRequest struct {
-	Model           string          `json:"model"`
-	Input           json.RawMessage `json:"input"`
-	Instructions    string          `json:"instructions,omitempty"`
-	Temperature     *float64        `json:"temperature,omitempty"`
-	MaxOutputTokens *int            `json:"max_output_tokens,omitempty"`
-	TopP            *float64        `json:"top_p,omitempty"`
-	Stream          bool            `json:"stream,omitempty"`
-	Tools           []responsesTool `json:"tools,omitempty"`
-	ToolChoice      json.RawMessage `json:"tool_choice,omitempty"`
+	Model              string               `json:"model"`
+	Input              json.RawMessage      `json:"input"`
+	Instructions       string               `json:"instructions,omitempty"`
+	Temperature        *float64             `json:"temperature,omitempty"`
+	MaxOutputTokens    *int                 `json:"max_output_tokens,omitempty"`
+	TopP               *float64             `json:"top_p,omitempty"`
+	Stream             bool                 `json:"stream,omitempty"`
+	Tools              []responsesTool      `json:"tools,omitempty"`
+	ToolChoice         json.RawMessage      `json:"tool_choice,omitempty"`
+	ParallelToolCalls  *bool                `json:"parallel_tool_calls,omitempty"`
+	Text               *responsesTextConfig `json:"text,omitempty"`
+	PreviousResponseID string               `json:"previous_response_id,omitempty"`
+	Conversation       json.RawMessage      `json:"conversation,omitempty"`
+	Store              *bool                `json:"store,omitempty"`
+	Background         bool                 `json:"background,omitempty"`
+}
+
+type responsesTextConfig struct {
+	Format *struct {
+		Type        string `json:"type"`
+		Name        string `json:"name,omitempty"`
+		Description string `json:"description,omitempty"`
+		Schema      any    `json:"schema,omitempty"`
+		Strict      *bool  `json:"strict,omitempty"`
+	} `json:"format,omitempty"`
 }
 
 // responsesTool is a Responses API tool definition. Only function tools can
@@ -158,11 +186,15 @@ type responsesTool struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Parameters  any    `json:"parameters,omitempty"`
+	Strict      *bool  `json:"strict,omitempty"`
 }
 
 func (r responsesRequest) toChatRequest() (provider.ChatRequest, error) {
 	if strings.TrimSpace(r.Model) == "" {
 		return provider.ChatRequest{}, fmt.Errorf("model is required")
+	}
+	if r.PreviousResponseID != "" || (len(r.Conversation) > 0 && string(r.Conversation) != "null") || r.Background || (r.Store != nil && *r.Store) {
+		return provider.ChatRequest{}, fmt.Errorf("stored responses, conversations, and background mode are unsupported; send the complete input history with store:false")
 	}
 	messages, err := responseInputMessages(r.Input)
 	if err != nil {
@@ -175,13 +207,28 @@ func (r responsesRequest) toChatRequest() (provider.ChatRequest, error) {
 		return provider.ChatRequest{}, fmt.Errorf("input is required")
 	}
 	request := provider.ChatRequest{Model: r.Model, Messages: messages, Temperature: r.Temperature, MaxTokens: r.MaxOutputTokens, TopP: r.TopP}
+	request.ParallelToolCalls = r.ParallelToolCalls
+	if r.Text != nil && r.Text.Format != nil {
+		format := r.Text.Format
+		switch format.Type {
+		case "text", "json_object":
+			request.ResponseFormat = &provider.ResponseFormat{Type: format.Type}
+		case "json_schema":
+			if strings.TrimSpace(format.Name) == "" || format.Schema == nil {
+				return provider.ChatRequest{}, fmt.Errorf("text.format json_schema requires name and schema")
+			}
+			request.ResponseFormat = &provider.ResponseFormat{Type: "json_schema", JSONSchema: &provider.JSONSchemaSpec{Name: format.Name, Description: format.Description, Schema: format.Schema, Strict: format.Strict}}
+		default:
+			return provider.ChatRequest{}, fmt.Errorf("unsupported text.format type %q", format.Type)
+		}
+	}
 	for _, tool := range r.Tools {
 		if tool.Type != "function" || strings.TrimSpace(tool.Name) == "" {
 			return provider.ChatRequest{}, fmt.Errorf("unsupported tool %q of type %q: only named function tools are supported", tool.Name, tool.Type)
 		}
 		request.Tools = append(request.Tools, provider.Tool{
 			Type:     "function",
-			Function: provider.ToolFunction{Name: tool.Name, Description: tool.Description, Parameters: tool.Parameters},
+			Function: provider.ToolFunction{Name: tool.Name, Description: tool.Description, Parameters: tool.Parameters, Strict: tool.Strict},
 		})
 	}
 	if choice, err := responsesToolChoice(r.ToolChoice); err != nil {
@@ -198,7 +245,12 @@ func responsesToolChoice(raw json.RawMessage) (any, error) {
 	}
 	var mode string
 	if err := json.Unmarshal(raw, &mode); err == nil {
-		return mode, nil
+		switch mode {
+		case "auto", "none", "required":
+			return mode, nil
+		default:
+			return nil, fmt.Errorf("unsupported tool_choice %q", mode)
+		}
 	}
 	var named struct {
 		Type string `json:"type"`
@@ -212,9 +264,13 @@ func responsesToolChoice(raw json.RawMessage) (any, error) {
 
 // responsesInputItem is one item of a Responses API input array.
 type responsesInputItem struct {
-	Type    string          `json:"type"`
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+	Type      string          `json:"type"`
+	Role      string          `json:"role"`
+	Content   json.RawMessage `json:"content"`
+	CallID    string          `json:"call_id"`
+	Name      string          `json:"name"`
+	Arguments string          `json:"arguments"`
+	Output    json.RawMessage `json:"output"`
 }
 
 // responsesContentPart is one typed content item of a Responses message.
@@ -226,6 +282,9 @@ type responsesContentPart struct {
 }
 
 func responseInputMessages(raw json.RawMessage) ([]provider.Message, error) {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		return nil, fmt.Errorf("input is required")
+	}
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
 		return []provider.Message{{Role: "user", Content: text}}, nil
@@ -235,8 +294,41 @@ func responseInputMessages(raw json.RawMessage) ([]provider.Message, error) {
 		return nil, fmt.Errorf("input must be a string or message array")
 	}
 	messages := make([]provider.Message, 0, len(items))
+	calls := make(map[string]bool)
 	for _, item := range items {
-		if item.Type != "" && item.Type != "message" {
+		switch item.Type {
+		case "function_call":
+			if strings.TrimSpace(item.CallID) == "" || strings.TrimSpace(item.Name) == "" {
+				return nil, fmt.Errorf("function_call requires call_id and name")
+			}
+			if _, exists := calls[item.CallID]; exists {
+				return nil, fmt.Errorf("duplicate function call_id %q", item.CallID)
+			}
+			if _, err := toolArgumentsObject(item.Arguments); err != nil {
+				return nil, err
+			}
+			calls[item.CallID] = false
+			call := provider.ToolCall{ID: item.CallID, Type: "function", Function: provider.FunctionCall{Name: item.Name, Arguments: item.Arguments}}
+			if n := len(messages); n > 0 && messages[n-1].Role == "assistant" {
+				messages[n-1].ToolCalls = append(messages[n-1].ToolCalls, call)
+			} else {
+				messages = append(messages, provider.Message{Role: "assistant", ToolCalls: []provider.ToolCall{call}})
+			}
+			continue
+		case "function_call_output":
+			resolved, exists := calls[item.CallID]
+			if !exists || resolved {
+				return nil, fmt.Errorf("function_call_output requires an unresolved call_id from the input history")
+			}
+			var output string
+			if err := json.Unmarshal(item.Output, &output); err != nil || string(item.Output) == "null" {
+				return nil, fmt.Errorf("function_call_output output must be a string")
+			}
+			calls[item.CallID] = true
+			messages = append(messages, provider.Message{Role: "tool", ToolCallID: item.CallID, Content: output})
+			continue
+		case "", "message":
+		default:
 			return nil, fmt.Errorf("unsupported input item type %q", item.Type)
 		}
 		message, err := responsesInputMessage(item)
@@ -250,6 +342,11 @@ func responseInputMessages(raw json.RawMessage) ([]provider.Message, error) {
 
 func responsesInputMessage(item responsesInputItem) (provider.Message, error) {
 	message := provider.Message{Role: firstNonEmpty(item.Role, "user")}
+	switch message.Role {
+	case "user", "assistant", "system", "developer":
+	default:
+		return provider.Message{}, fmt.Errorf("unsupported message role %q", message.Role)
+	}
 	if len(item.Content) == 0 || string(item.Content) == "null" {
 		return message, nil
 	}
@@ -297,16 +394,6 @@ func responsesImageURL(part responsesContentPart) (*provider.ImageURL, error) {
 		return &image, nil
 	}
 	return nil, fmt.Errorf("input_image requires an image_url")
-}
-
-type anthropicMessagesRequest struct {
-	Model       string             `json:"model"`
-	Messages    []provider.Message `json:"messages"`
-	System      string             `json:"system,omitempty"`
-	MaxTokens   *int               `json:"max_tokens,omitempty"`
-	Temperature *float64           `json:"temperature,omitempty"`
-	TopP        *float64           `json:"top_p,omitempty"`
-	Stream      bool               `json:"stream,omitempty"`
 }
 
 func (h *Handler) executeCompatibleChat(r *http.Request, request provider.ChatRequest) (provider.ChatResponse, http.Header, int, []byte, error) {
@@ -539,6 +626,7 @@ type responsesStreamTranslator struct {
 	messageIndex int
 	outputs      int
 	toolCalls    streamToolCalls
+	sequence     int
 }
 
 func newResponsesStreamTranslator() *responsesStreamTranslator {
@@ -546,6 +634,17 @@ func newResponsesStreamTranslator() *responsesStreamTranslator {
 }
 
 func (t *responsesStreamTranslator) Translate(payload string) []sseEvent {
+	events := t.translate(payload)
+	for _, event := range events {
+		if data, ok := event.Data.(map[string]any); ok {
+			data["sequence_number"] = t.sequence
+			t.sequence++
+		}
+	}
+	return events
+}
+
+func (t *responsesStreamTranslator) translate(payload string) []sseEvent {
 	if t.completed {
 		return nil
 	}
@@ -580,7 +679,7 @@ func (t *responsesStreamTranslator) Translate(payload string) []sseEvent {
 		t.started = true
 		events = append(events, sseEvent{Event: "response.created", Data: map[string]any{
 			"type":     "response.created",
-			"response": map[string]any{"id": firstNonEmpty(t.id, "resp_stream"), "object": "response", "status": "in_progress", "model": t.model},
+			"response": map[string]any{"id": firstNonEmpty(t.id, "resp_stream"), "object": "response", "status": "in_progress", "model": t.model, "output": []any{}},
 		}})
 	}
 	for _, choice := range chunk.Choices {
@@ -588,6 +687,16 @@ func (t *responsesStreamTranslator) Translate(payload string) []sseEvent {
 			if t.messageIndex < 0 {
 				t.messageIndex = t.outputs
 				t.outputs++
+				events = append(events,
+					sseEvent{Event: "response.output_item.added", Data: map[string]any{
+						"type": "response.output_item.added", "output_index": t.messageIndex,
+						"item": map[string]any{"id": t.messageItemID(), "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}},
+					}},
+					sseEvent{Event: "response.content_part.added", Data: map[string]any{
+						"type": "response.content_part.added", "item_id": t.messageItemID(), "output_index": t.messageIndex, "content_index": 0,
+						"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+					}},
+				)
 			}
 			t.text.WriteString(choice.Delta.Content)
 			events = append(events, sseEvent{
@@ -597,7 +706,7 @@ func (t *responsesStreamTranslator) Translate(payload string) []sseEvent {
 					"response_id":   firstNonEmpty(t.id, "resp_stream"),
 					"item_id":       t.messageItemID(),
 					"output_index":  t.messageIndex,
-					"content_index": choice.Index,
+					"content_index": 0,
 					"delta":         choice.Delta.Content,
 				},
 			})
@@ -661,39 +770,44 @@ func (t *responsesStreamTranslator) completedEvents() []sseEvent {
 	}
 	response := map[string]any{"id": firstNonEmpty(t.id, "resp_stream"), "object": "response", "status": "completed", "model": t.model, "usage": usage}
 	var events []sseEvent
-	if len(t.toolCalls.calls) > 0 {
-		// The output list mirrors the non-stream response: the message
-		// item (when text was streamed) followed by the function calls,
-		// ordered by output_index.
-		output := make([]any, t.outputs)
-		if t.messageIndex >= 0 {
-			output[t.messageIndex] = map[string]any{
-				"id": t.messageItemID(), "type": "message", "role": "assistant", "status": "completed",
-				"content": []any{map[string]any{"type": "output_text", "text": t.text.String(), "annotations": []any{}}},
-			}
+	// The output list mirrors the non-stream response: the message
+	// item (when text was streamed) followed by the function calls,
+	// ordered by output_index.
+	output := make([]any, t.outputs)
+	if t.messageIndex >= 0 {
+		part := map[string]any{"type": "output_text", "text": t.text.String(), "annotations": []any{}}
+		item := map[string]any{
+			"id": t.messageItemID(), "type": "message", "role": "assistant", "status": "completed",
+			"content": []any{part},
 		}
-		for _, call := range t.toolCalls.calls {
-			arguments := call.arguments.String()
-			item := t.functionCallItem(call, "completed", arguments)
-			output[call.position] = item
-			events = append(events,
-				sseEvent{Event: "response.function_call_arguments.done", Data: map[string]any{
-					"type":         "response.function_call_arguments.done",
-					"response_id":  firstNonEmpty(t.id, "resp_stream"),
-					"item_id":      t.functionCallItemID(call),
-					"output_index": call.position,
-					"arguments":    arguments,
-				}},
-				sseEvent{Event: "response.output_item.done", Data: map[string]any{
-					"type":         "response.output_item.done",
-					"response_id":  firstNonEmpty(t.id, "resp_stream"),
-					"output_index": call.position,
-					"item":         item,
-				}},
-			)
-		}
-		response["output"] = output
+		output[t.messageIndex] = item
+		events = append(events,
+			sseEvent{Event: "response.output_text.done", Data: map[string]any{"type": "response.output_text.done", "item_id": t.messageItemID(), "output_index": t.messageIndex, "content_index": 0, "text": t.text.String()}},
+			sseEvent{Event: "response.content_part.done", Data: map[string]any{"type": "response.content_part.done", "item_id": t.messageItemID(), "output_index": t.messageIndex, "content_index": 0, "part": part}},
+			sseEvent{Event: "response.output_item.done", Data: map[string]any{"type": "response.output_item.done", "output_index": t.messageIndex, "item": item}},
+		)
 	}
+	for _, call := range t.toolCalls.calls {
+		arguments := call.arguments.String()
+		item := t.functionCallItem(call, "completed", arguments)
+		output[call.position] = item
+		events = append(events,
+			sseEvent{Event: "response.function_call_arguments.done", Data: map[string]any{
+				"type":         "response.function_call_arguments.done",
+				"response_id":  firstNonEmpty(t.id, "resp_stream"),
+				"item_id":      t.functionCallItemID(call),
+				"output_index": call.position,
+				"arguments":    arguments,
+			}},
+			sseEvent{Event: "response.output_item.done", Data: map[string]any{
+				"type":         "response.output_item.done",
+				"response_id":  firstNonEmpty(t.id, "resp_stream"),
+				"output_index": call.position,
+				"item":         item,
+			}},
+		)
+	}
+	response["output"] = output
 	return append(events,
 		sseEvent{Event: "response.completed", Data: map[string]any{
 			"type":       "response.completed",

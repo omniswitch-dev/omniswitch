@@ -6,6 +6,22 @@ The format is based on Keep a Changelog, and this project follows semantic versi
 
 ## [Unreleased]
 
+### Agent workflows and first-run diagnostics
+
+- Responses accepts stateless `function_call`/`function_call_output` history,
+  parallel tool controls, strict custom tools, and `text.format` structured output.
+- Messages accepts SDK-native `x-api-key` gateway authentication, custom tools, tool-use/result history, string or text-block
+  system prompts, text/image messages, stop sequences, and tool choice. Its
+  non-streaming response now preserves tool calls instead of dropping them.
+- Responses text streams include item/content lifecycle events, sequence numbers,
+  and an assembled final output for SDK stream helpers.
+- Added read-only `omniswitch doctor` with actionable setup checks and JSON output.
+- Behavior changes: unsupported Responses state requests now return 400 instead
+  of silently ignoring state; Messages rejects unsupported blocks/thinking,
+  malformed tool histories, and nonpositive explicit max_tokens. Google/Bedrock
+  reject strict tool-schema requests they cannot enforce. APIs remain subsets.
+
+
 A hardening release: security fixes, verified bug fixes, new regression tests and safer defaults. Read "Breaking and behavior changes" before you upgrade.
 
 ### Breaking and behavior changes

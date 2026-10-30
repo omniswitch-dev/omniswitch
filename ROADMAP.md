@@ -6,6 +6,9 @@ OmniSwitch is currently in **public beta** (`v0.2.0-beta.x`). See "Beta scope an
 
 ## Shipped
 
+- Stateless Responses and Anthropic Messages custom-tool round trips, parallel tool IDs, image inputs, and Responses structured output. Vendor compatibility remains a documented subset.
+- `omniswitch doctor` for read-only health, readiness, and authenticated model discovery checks.
+
 - Per-key model access restrictions and filtered model/alias discovery.
 - HTTP JSON external authorization with fail-closed policy decisions.
 - Persistent prompt labels for API-driven promotion and rollback.
@@ -53,7 +56,7 @@ OmniSwitch is currently in **public beta** (`v0.2.0-beta.x`). See "Beta scope an
 The public beta (`v0.2.0-beta.x`) is scoped to make the OpenAI-compatible gateway, MCP tool proxy, and core guardrail/caching/routing features reliable to install and trust. The following are explicitly **deferred past the beta** and are not planned before `v1.0.0` unless called out otherwise:
 
 - Image, TTS, and transcription HTTP endpoints.
-- Full Responses API and Anthropic Messages tool-use parity (both currently support a documented subset; see `docs/KNOWN_LIMITATIONS.md`).
+- Full Responses API and Anthropic Messages parity beyond the shipped stateless custom-tool subset (stored Responses state, built-in/server tools, thinking, audio/files; see `docs/KNOWN_LIMITATIONS.md`).
 - A2A push notifications and an outbound A2A client (task lifecycle and SSE streaming have shipped).
 - SAML, SCIM, and mTLS identity/transport options.
 - A multi-writer, highly-available control plane (the current Postgres driver is single-writer/experimental; SQLite remains the default).

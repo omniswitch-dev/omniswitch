@@ -22,6 +22,7 @@ across multiple gateway replicas.
 ## Key Capabilities
 
 - **OpenAI-compatible gateway:** `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/embeddings`, `/v1/rerank`, `/v1/moderations`, and `/v1/models`.
+- **Agent tool workflows:** Stateless custom-tool round trips in Responses and Anthropic Messages formats, parallel tool IDs, streamed tool calls, image inputs, and Responses structured output. See the [agent quickstart](docs/AGENT_WORKFLOWS.md) for the supported subset.
 - **Provider routing:** Native OpenAI, Anthropic, Google, Groq, Azure, Bedrock, and Cohere adapters; one-env-var presets for Mistral, xAI, DeepSeek, Together, Fireworks, Perplexity, Cerebras, and OpenRouter; any OpenAI-compatible custom endpoint.
 - **Reliability controls:** Fallback chains, weighted variants, CEL route conditions, retries, retryable status codes, timeouts, circuit breakers, and shadow routing.
 - **Config hot-reload:** Routes, guardrails, cache posture, and circuit breaker settings reload from the config file without restarting; invalid files keep the previous configuration.
@@ -63,6 +64,21 @@ OPENAI_API_KEY=sk-... go run ./cmd/gateway serve
 
 The gateway starts on `http://localhost:8080` and serves the dashboard at
 `http://localhost:8080/`.
+
+In a second terminal, check setup and make your first request:
+
+```bash
+omniswitch doctor
+curl -sS http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Reply with hello from OmniSwitch."}]}'
+```
+
+`doctor` checks health, storage/provider readiness, and model visibility without
+calling a model. The `curl` request uses your configured provider and its normal
+pricing. Open the dashboard's Playground to try prompts and inspect requests.
+For existing apps, use the [standard SDK examples](docs/AGENT_WORKFLOWS.md) with
+your gateway URL and key; no OmniSwitch-specific SDK is required.
 
 Authentication is **off by default**. With auth off and no listen address
 configured, the gateway listens on `127.0.0.1:8080` only, so it is reachable

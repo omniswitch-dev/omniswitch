@@ -99,6 +99,13 @@ func (a *AuthMiddleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 		auth := r.Header.Get("Authorization")
+		// The Anthropic SDK sends x-api-key by default. Accept gateway API
+		// keys on its inference endpoint only; an explicit Authorization
+		// header always takes precedence, including an invalid one.
+		anthropicKey := auth == "" && r.URL.Path == "/v1/messages" && r.Header.Get("x-api-key") != ""
+		if anthropicKey {
+			auth = "Bearer " + r.Header.Get("x-api-key")
+		}
 		if auth == "" {
 			writeError(w, http.StatusUnauthorized, "missing Authorization header")
 			return
@@ -147,7 +154,7 @@ func (a *AuthMiddleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		if a.authenticator == nil {
+		if a.authenticator == nil || anthropicKey {
 			writeError(w, http.StatusUnauthorized, "invalid API key")
 			return
 		}

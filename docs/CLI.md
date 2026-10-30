@@ -10,6 +10,7 @@ Usage:
 Commands:
   serve             Start the gateway server (default when no command is given)
   validate-config   Validate a gateway config file and exit (defaults to $OMNISWITCH_CONFIG)
+  doctor            Check a running gateway's health, readiness, and model access
   version           Print version information
   help              Show this help text
 
@@ -55,6 +56,30 @@ omniswitch validate-config ./broken.yaml
 
 If no path is given, it falls back to `OMNISWITCH_CONFIG`. If neither is set,
 it prints a usage error and exits `2`.
+
+## `omniswitch doctor`
+
+Check a running gateway without making inference requests or changing stored
+state:
+
+```bash
+omniswitch doctor
+OMNISWITCH_API_KEY=your-gateway-key omniswitch doctor --url https://gateway.example.com
+omniswitch doctor --api-key-env OMNISWITCH_BOOTSTRAP_API_KEY --json
+```
+
+The command requests `GET /healthz`, `GET /readyz`, and `GET /v1/models`.
+Authentication is sent only to the models endpoint. It reports common connection,
+authentication, readiness, and empty-model failures with a suggested fix. Keys
+and server response bodies are never printed; redirects are not followed.
+
+Flags: `--url` (default `http://127.0.0.1:8080`, including an optional proxy path
+prefix), `--api-key-env` (default `OMNISWITCH_API_KEY`), `--timeout` (total deadline,
+default `10s`, maximum `1m`), and `--json` (machine-readable `ok` and `checks`).
+Credentials, queries, and fragments in `--url` are rejected. Exit status is `0`
+when all three checks pass, `1` for failed checks, and `2` for invalid arguments.
+A passing check confirms setup reachability and model visibility; it does not
+verify upstream provider credentials, inference quality, or actual model access.
 
 ## `omniswitch version` / `omniswitch --version` / `omniswitch -v`
 

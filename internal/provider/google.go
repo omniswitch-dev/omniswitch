@@ -384,6 +384,9 @@ func toGeminiRequest(req ChatRequest) (geminiRequest, error) {
 	if len(req.Tools) > 0 {
 		tool := geminiTool{FunctionDeclarations: make([]geminiFunctionDeclaration, 0, len(req.Tools))}
 		for _, openAITool := range req.Tools {
+			if openAITool.Function.Strict != nil && *openAITool.Function.Strict {
+				return geminiRequest{}, NewUnsupportedParameterError("google", "tools.function.strict")
+			}
 			if openAITool.Type != "" && openAITool.Type != "function" {
 				continue
 			}

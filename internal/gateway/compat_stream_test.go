@@ -74,13 +74,13 @@ func TestResponsesStreamTranslatorToolCalls(t *testing.T) {
 		chunks     []provider.ChatResponseChunk
 		wantEvents []string
 		// wantOutput lists "type:name-or-text:arguments" per output item;
-		// nil means response.completed carries no output list.
 		wantOutput []string
 	}{
 		{
 			name:       "text only",
 			chunks:     []provider.ChatResponseChunk{textDelta("hello "), textDelta("world"), finishDelta("stop")},
-			wantEvents: []string{"response.created", "response.output_text.delta", "response.output_text.delta", "response.completed", "[DONE]"},
+			wantEvents: []string{"response.created", "response.output_item.added", "response.content_part.added", "response.output_text.delta", "response.output_text.delta", "response.output_text.done", "response.content_part.done", "response.output_item.done", "response.completed", "[DONE]"},
+			wantOutput: []string{"message:hello world:"},
 		},
 		{
 			name: "tool call only",
@@ -100,8 +100,8 @@ func TestResponsesStreamTranslatorToolCalls(t *testing.T) {
 				textDelta("Let me check."), toolDelta(0, "call_1", "get_weather", `{"city":"Paris"}`), finishDelta("tool_calls"),
 			},
 			wantEvents: []string{
-				"response.created", "response.output_text.delta", "response.output_item.added",
-				"response.function_call_arguments.delta", "response.function_call_arguments.done",
+				"response.created", "response.output_item.added", "response.content_part.added", "response.output_text.delta", "response.output_item.added",
+				"response.function_call_arguments.delta", "response.output_text.done", "response.content_part.done", "response.output_item.done", "response.function_call_arguments.done",
 				"response.output_item.done", "response.completed", "[DONE]",
 			},
 			wantOutput: []string{"message:Let me check.:", `function_call:get_weather:{"city":"Paris"}`},
@@ -171,8 +171,20 @@ func TestResponsesStreamTranslatorToolCalls(t *testing.T) {
 			}
 			for _, ev := range eventsNamed(names, data, "response.output_item.added") {
 				item := ev["item"].(map[string]any)
-				if item["status"] != "in_progress" || item["arguments"] != "" || item["type"] != "function_call" {
+				if item["status"] != "in_progress" || (item["type"] != "message" && item["type"] != "function_call") {
 					t.Errorf("added item = %v", item)
+				}
+				if item["type"] == "function_call" && item["arguments"] != "" {
+					t.Errorf("new call already has arguments: %v", item)
+				}
+			}
+			sequence := 0
+			for _, ev := range data {
+				if ev != nil {
+					if ev["sequence_number"] != float64(sequence) {
+						t.Errorf("sequence = %v, want %d", ev["sequence_number"], sequence)
+					}
+					sequence++
 				}
 			}
 			for _, ev := range eventsNamed(names, data, "response.function_call_arguments.done") {

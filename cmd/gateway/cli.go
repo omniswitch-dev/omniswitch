@@ -28,6 +28,7 @@ Usage:
 Commands:
   serve             Start the gateway server (default when no command is given)
   validate-config   Validate a gateway config file and exit (defaults to $OMNISWITCH_CONFIG)
+  doctor            Check a running gateway's health, readiness, and model access
   version           Print version information
   help              Show this help text
 
@@ -62,6 +63,8 @@ func dispatch(args []string, stdout, stderr io.Writer, env func(string) string) 
 	case "help", "--help", "-h":
 		fmt.Fprint(stdout, helpText)
 		return actionExit, 0
+	case "doctor":
+		return actionExit, runDoctor(args[1:], stdout, stderr, env)
 	case "validate-config":
 		path := ""
 		if len(args) > 1 {
