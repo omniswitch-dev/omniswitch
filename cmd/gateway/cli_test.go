@@ -8,11 +8,11 @@ import (
 	"testing"
 )
 
-func TestDispatchNoArgsServes(t *testing.T) {
+func TestDispatchNoArgsStartsGuidedSetup(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	action, code := dispatch(nil, &stdout, &stderr, os.Getenv)
-	if action != actionServe {
-		t.Fatalf("dispatch(nil) action = %v, want actionServe", action)
+	action, code := dispatch(nil, &stdout, &stderr, func(string) string { return "" })
+	if action != actionStart {
+		t.Fatalf("dispatch(nil) action = %v, want actionStart", action)
 	}
 	if code != 0 {
 		t.Fatalf("dispatch(nil) code = %d, want 0", code)

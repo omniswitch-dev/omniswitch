@@ -344,6 +344,18 @@ func isDashboardRoute(path string) bool {
 	}
 }
 
+// ServeAppShell serves only the embedded, data-free application document.
+// All /api and inference requests continue through normal authentication.
+func ServeAppShell(w http.ResponseWriter, r *http.Request) bool {
+	if (r.Method != http.MethodGet && r.Method != http.MethodHead) || !isDashboardRoute(r.URL.Path) {
+		return false
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	serveDashboardIndex(w, r)
+	return true
+}
+
 func serveDashboardIndex(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -446,6 +446,12 @@ routes:
 </main>
 
 <script>
+const handoff = new URLSearchParams(location.hash.slice(1));
+const handoffKey = handoff.get("omniswitch-key");
+if(handoffKey){
+  sessionStorage.setItem("omniswitch.playgroundKey", handoffKey);
+  history.replaceState(null, "", location.pathname + location.search);
+}
 const API = "";
 const routes = {
   "/": "overview",

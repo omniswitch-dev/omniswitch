@@ -34,6 +34,25 @@ across multiple gateway replicas.
 - **A2A gateway:** Public Agent Card discovery plus authenticated JSON-RPC `SendMessage` through the governed chat pipeline.
 - **Observability and operations:** SQLite logs, per-request trace waterfalls, traces/sessions, feedback, provider metrics, OTLP export (Langfuse/Jaeger/Tempo), Prometheus `/metrics`, Docker, and Kubernetes Kustomize manifests.
 
+## Guided setup
+
+Install a verified platform wheel from the Python package workflow, then run:
+
+```bash
+omniswitch
+```
+
+Choose a provider in the browser, connect, and copy a working Python,
+JavaScript, cURL, or environment integration. The gateway remembers the setup.
+A clearly labeled demo works without a provider key. No Go, Docker, YAML, or
+SDK dependency is needed to run the packaged gateway.
+
+The target public install is `pip install omniswitch`. **PyPI publication is
+pending** the owner configuring Trusted Publishing and publishing the first
+package release; this branch does not claim the public package is already live.
+See [the full onboarding flow](docs/ONBOARDING.md) and
+[package release instructions](docs/PYTHON_RELEASES.md).
+
 ## Quickstart
 
 Install the latest release:
@@ -211,7 +230,7 @@ repository (see [sdk/python](sdk/python/README.md) and
 [sdk/node](sdk/node/README.md)):
 
 ```bash
-pip install "git+https://github.com/omniswitch-dev/omniswitch#subdirectory=sdk/python"
+pip install "omniswitch[sdk] @ git+https://github.com/omniswitch-dev/omniswitch#subdirectory=sdk/python"
 npm install openai ./omniswitch/sdk/node   # from a local clone
 ```
 

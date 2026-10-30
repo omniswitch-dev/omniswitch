@@ -297,11 +297,17 @@ func wrapGatewayMiddleware(settings runtimeSettings, st *store.Store, mux http.H
 
 // newTopMux serves /healthz and /readyz ahead of the auth, authorization,
 // and rate-limit chain so liveness and readiness probes never need
-// credentials and are never rate limited. Every other path goes to handler.
+// credentials and are never rate limited. The embedded app shell is public;
+// data and inference requests go through the authenticated handler.
 func newTopMux(health *healthState, handler http.Handler) *http.ServeMux {
 	topMux := http.NewServeMux()
 	health.registerHealthRoutes(topMux)
-	topMux.Handle("/", handler)
+	topMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if dashboard.ServeAppShell(w, r) {
+			return
+		}
+		handler.ServeHTTP(w, r)
+	})
 	return topMux
 }
 

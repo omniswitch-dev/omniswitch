@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>Welcome to OmniSwitch</title><link rel="stylesheet" href="/setup.css"><script src="/setup.js" defer></script></head>
+<body>
+<header><a class="brand" href="/" aria-label="OmniSwitch"><svg viewBox="0 0 28 28" aria-hidden="true"><path d="M6 5v10c0 4 3 7 7 7h9M22 23V13c0-4-3-7-7-7H6"/><path d="m17 18 5 5 5-5M11 10 6 5 1 10"/></svg><span>omniswitch</span></a><span class="local"><i></i> Your machine. Your models.</span></header>
+<main>
+<div class="steps" aria-label="Setup progress"><span id="step-connect" class="current">01 <b>Connect</b></span><span class="step-line"></span><span id="step-ready">02 <b>Build something</b></span></div>
+<section id="choose" aria-labelledby="welcome-title">
+<div class="eyebrow">A GOOD PLACE TO START</div><h1 id="welcome-title">Your AI stack,<br><em>unwrapped.</em></h1><p class="intro">Pick a provider. We’ll take care of the gateway.</p>
+<div id="providers" class="providers" aria-label="Choose your model provider"></div>
+<form id="connect-form" hidden>
+<div class="form-heading"><span id="provider-label"></span><span class="quiet">Just one connection away.</span></div>
+<div id="detected-row" class="detected" hidden><label><input id="use-env" type="checkbox" checked> Use the key already in your terminal</label></div>
+<div id="url-row" hidden><label for="base-url">Server URL</label><input id="base-url" type="url" value="http://127.0.0.1:11434/v1" spellcheck="false" autocomplete="off"><p class="hint">Works with Ollama, vLLM, and OpenAI-compatible servers.</p></div>
+<div id="key-row"><label id="key-label" for="provider-key">API key</label><div class="key-input"><input id="provider-key" type="password" spellcheck="false" autocomplete="off" placeholder="Paste your provider key"><button id="show-key" type="button" aria-label="Show API key">Show</button></div><p class="hint">Saved on this computer. Sent only to your provider.</p></div>
+<details><summary>Choose a specific model <span>optional</span></summary><label class="sr-only" for="model">Model ID</label><input id="model" placeholder="We’ll choose an available model" spellcheck="false" autocomplete="off"></details>
+<button class="primary" id="connect-button" type="submit">Connect provider <span aria-hidden="true">↗</span></button><p class="hint center">We check the connection. No model request is made.</p>
+</form>
+<button id="demo" class="demo" type="button"><span class="demo-icon">✧</span><span><b>Just looking? Unwrap a demo.</b><small>No API key. No charges. Simulated responses.</small></span><span class="arrow" aria-hidden="true">→</span></button>
+</section>
+<section id="ready" aria-labelledby="ready-title" hidden>
+<div class="success-mark" aria-hidden="true">✓</div><div class="eyebrow">ALL SET</div><h1 id="ready-title">That’s it.<br><em>You’re connected.</em></h1><p class="intro">One endpoint for your app. Everything else is ready.</p>
+<div id="demo-notice" class="demo-notice" hidden>Demo mode · Replies are simulated. Connect a real provider with <code>omniswitch start --setup</code>.</div>
+<div class="connection"><span><i></i><b id="connected-provider"></b></span><span>Model <code>default</code></span></div>
+<div class="integration"><div class="tab-row" role="tablist" aria-label="Integration language"><button type="button" role="tab" aria-selected="true" data-tab="python">Python</button><button type="button" role="tab" aria-selected="false" data-tab="javascript">JavaScript</button><button type="button" role="tab" aria-selected="false" data-tab="env">.env</button><button type="button" role="tab" aria-selected="false" data-tab="curl">cURL</button></div><p id="install-hint" class="install-hint"></p><pre tabindex="0"><code id="snippet"></code></pre><div class="code-actions"><button id="copy" class="copy-button" type="button">Copy integration <span aria-hidden="true">⧉</span></button><button id="download-env" class="text-button" type="button">Download .env ↓</button></div></div>
+<details class="frameworks"><summary>Using a framework?</summary><p class="hint">Set <code>OPENAI_BASE_URL</code> and <code>OPENAI_API_KEY</code> from the .env tab, then use model <code>default</code>. Or copy an example:</p><div class="framework-buttons"><button type="button" data-framework="langchain">LangChain</button><button type="button" data-framework="llamaindex">LlamaIndex</button></div></details>
+<div class="first-request"><div><h2>Meet your gateway.</h2><p id="request-note">Send a small request to see the full connection work.</p></div><label class="sr-only" for="prompt">Your first prompt</label><div class="try-row"><input id="prompt" value="Say hello in one short sentence." maxlength="1000"><button id="try" class="primary" type="button">Send ↗</button></div><div id="reply" class="reply" aria-live="polite" hidden></div></div>
+<a class="playground" href="/playground">Open your playground <span aria-hidden="true">→</span></a><p class="hint center">Next time, just run <code>omniswitch</code>. Your setup is remembered.</p>
+</section>
+<p id="status" role="status" aria-live="polite"></p>
+</main><footer>LESS SETUP. MORE BUILDING.<span>LOCAL FIRST, ALWAYS.</span></footer>
+</body></html>

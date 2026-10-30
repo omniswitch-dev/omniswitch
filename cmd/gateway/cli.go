@@ -15,6 +15,7 @@ type cliAction int
 const (
 	// actionServe starts the gateway server.
 	actionServe cliAction = iota
+	actionStart
 	// actionExit means the command already produced its output; main should
 	// exit with the returned status code without starting a server.
 	actionExit
@@ -26,7 +27,8 @@ Usage:
   omniswitch [command]
 
 Commands:
-  serve             Start the gateway server (default when no command is given)
+  start             Open guided setup or start your saved gateway (default)
+  serve             Start directly from environment variables/config
   validate-config   Validate a gateway config file and exit (defaults to $OMNISWITCH_CONFIG)
   doctor            Check a running gateway's health, readiness, and model access
   version           Print version information
@@ -47,10 +49,15 @@ Environment:
 // use. stdout/stderr are injected for testability.
 func dispatch(args []string, stdout, stderr io.Writer, env func(string) string) (cliAction, int) {
 	if len(args) == 0 {
-		return actionServe, 0
+		if env != nil && strings.TrimSpace(env("OMNISWITCH_CONFIG")) != "" {
+			return actionServe, 0
+		}
+		return actionStart, 0
 	}
 
 	switch args[0] {
+	case "start":
+		return actionStart, 0
 	case "serve":
 		if len(args) > 1 {
 			fmt.Fprintf(stderr, "omniswitch serve: unexpected argument %q\n", args[1])

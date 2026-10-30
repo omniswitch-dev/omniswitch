@@ -1,0 +1,90 @@
+name: Python gateway package
+
+on:
+  pull_request:
+    paths:
+      - 'sdk/python/**'
+      - 'cmd/gateway/**'
+      - 'internal/**'
+      - 'scripts/*python*'
+      - '.github/workflows/python-package.yml'
+      - 'go.mod'
+      - 'go.sum'
+  push:
+    branches: [main]
+    paths:
+      - 'sdk/python/**'
+      - 'cmd/gateway/**'
+      - 'internal/**'
+      - 'scripts/*python*'
+      - '.github/workflows/python-package.yml'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    name: Wheel and fresh install (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {target: linux-amd64, runner: ubuntu-latest}
+          - {target: linux-arm64, runner: ubuntu-24.04-arm}
+          - {target: darwin-amd64, runner: macos-15-intel}
+          - {target: darwin-arm64, runner: macos-latest}
+          - {target: windows-amd64, runner: windows-latest}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install build tools
+        run: python -m pip install build 'setuptools>=77' wheel packaging twine
+      - name: SDK regression tests
+        run: python -m unittest discover -s sdk/python/tests
+      - name: Build self-contained wheel
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          python -c "import os,subprocess,sys; subprocess.run([sys.executable,'scripts/build-python-wheels.py','--target',os.environ['TARGET'],'--version',os.environ.get('RELEASE_TAG') or '0.2.0.dev0'],check=True)"
+      - name: Check package metadata
+        run: python -m twine check dist/python/*.whl
+      - name: Fresh install and first-run smoke test
+        run: |
+          python -c "import pathlib,subprocess,sys; wheel=next(pathlib.Path('dist/python').glob('*.whl')); subprocess.run([sys.executable,'scripts/verify-python-wheel.py',str(wheel)],check=True)"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-wheel-${{ matrix.target }}
+          path: dist/python/*.whl
+
+  publish:
+    name: Publish verified wheels to PyPI
+    if: github.event_name == 'release' && github.event.release.draft == false
+    needs: wheels
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/omniswitch
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: python-wheel-*
+          path: dist
+          merge-multiple: true
+      - name: Publish with PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          attestations: true

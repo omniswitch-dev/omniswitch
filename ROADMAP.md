@@ -6,6 +6,9 @@ OmniSwitch is currently in **public beta** (`v0.2.0-beta.x`). See "Beta scope an
 
 ## Shipped
 
+- Guided local provider setup, remembered profiles, simulated demo, and copyable app integrations.
+- Bundled platform wheels and tested pip launcher; public PyPI availability awaits first publication.
+
 - Stateless Responses and Anthropic Messages custom-tool round trips, parallel tool IDs, image inputs, and Responses structured output. Vendor compatibility remains a documented subset.
 - `omniswitch doctor` for read-only health, readiness, and authenticated model discovery checks.
 
