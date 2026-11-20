@@ -299,9 +299,14 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.Header.Get("x-omniswitch-session-id")
 	userID := r.Header.Get("x-omniswitch-user-id")
 	providerHint := r.Header.Get("x-omniswitch-provider")
+	identity, _ := IdentityFromContext(r.Context())
+	if providerHint != "" && !identity.AllowsProvider(providerHint) {
+		writeProviderError(w, "", router.ErrProviderAccessDenied)
+		return
+	}
 	shadowHint := firstNonEmpty(r.Header.Get("x-omniswitch-shadow-provider"), activeRouter.ShadowProviderForModel(req.Model), cfg.shadowProvider)
 	apiKeyID := r.Header.Get("x-omniswitch-key-id")
-	tenantCacheScope := h.tenantCacheScope(r, cfg)
+	tenantCacheScope := providerPolicyCacheScope(h.tenantCacheScope(r, cfg), identity.AllowedProviders)
 	if enrichmentKey != "" {
 		tenantCacheScope += "|enrichment:" + enrichmentKey
 	}
@@ -391,7 +396,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			recordTraceSpan(ctx, "guardrail_reroute", providerHint, "rerouted", stageStart, map[string]any{"target": rerouteProvider})
 		}
 		if fallbackTarget != "" {
-			providerName, modelID := parseFallbackTarget(fallbackTarget)
+			providerName, modelID := h.parseFallbackTarget(fallbackTarget)
 			if providerName != "" {
 				providerHint = providerName
 			}
@@ -493,7 +498,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			usage := totals.usage
 			h.logRequest(ctx, logContext{
 				ID: reqID, TraceID: traceID, SessionID: sessionID, Request: req, Meta: &logMeta, Usage: &usage,
-				APIKeyID: apiKeyID, Status: statusError, ErrorMessage: err.Error(),
+				APIKeyID: apiKeyID, Status: providerErrorLogStatus(err), ErrorMessage: err.Error(),
 			})
 			w.Header().Set("x-omniswitch-trace-id", traceID)
 			w.Header().Set("x-omniswitch-session-id", sessionID)
@@ -501,7 +506,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 				writeUnsupportedParameterError(w, upErr)
 				return
 			}
-			writeError(w, http.StatusBadGateway, "provider error: "+err.Error())
+			writeProviderError(w, "provider error: ", err)
 			return
 		}
 		recordTraceSpan(ctx, "provider_call", meta.Provider, "ok", stageStart, nil)
@@ -515,7 +520,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if disp.violation() {
 			maxAttempts = retryAttempts(maxAttempts, disp)
 			if attempt+1 < maxAttempts {
-				providerHint, backendReq.Model = applyRetryTarget(disp, providerHint, backendReq.Model)
+				providerHint, backendReq.Model = h.applyRetryTarget(disp, providerHint, backendReq.Model)
 				continue
 			}
 		}
@@ -560,7 +565,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		attribute.Int("llm.usage.total_tokens", usage.TotalTokens),
 		attribute.Float64("llm.usage.cost_usd", logMeta.Cost),
 	)
-	h.shadow(activeRouter, reqID, traceID, meta.Provider, backendReq, shadowHint)
+	h.shadow(ctx, activeRouter, reqID, traceID, meta.Provider, backendReq, shadowHint)
 
 	w.Header().Set("x-omniswitch-trace-id", traceID)
 	w.Header().Set("x-omniswitch-session-id", sessionID)
@@ -619,12 +624,12 @@ func retryAttempts(current int, disp guardrailDisposition) int {
 }
 
 // applyRetryTarget returns the provider hint and model for the next attempt.
-func applyRetryTarget(disp guardrailDisposition, providerHint, model string) (string, string) {
+func (h *Handler) applyRetryTarget(disp guardrailDisposition, providerHint, model string) (string, string) {
 	if disp.RerouteProvider != "" {
 		providerHint = disp.RerouteProvider
 	}
 	if disp.Fallback != "" {
-		pn, mod := parseFallbackTarget(disp.Fallback)
+		pn, mod := h.parseFallbackTarget(disp.Fallback)
 		if pn != "" {
 			providerHint = pn
 		}
@@ -659,34 +664,38 @@ func writeGuardrailDenied(w http.ResponseWriter, reason string) {
 
 // ListModels handles GET /v1/models.
 func (h *Handler) ListModels(w http.ResponseWriter, r *http.Request) {
-	models := h.registry.AllModels()
-	seen := make(map[string]bool, len(models))
-	for _, model := range models {
+	ctx := r.Context()
+	identity, _ := IdentityFromContext(ctx)
+	restricted := len(identity.AllowedProviders) > 0
+	registered := h.registry.AllModels()
+	models := make([]provider.ModelInfo, 0, len(registered))
+	seen := make(map[string]bool, len(registered))
+	for _, model := range registered {
+		if !identity.AllowsModel(model.ID) || restricted &&
+			(!identity.AllowsProvider(firstNonEmpty(model.Provider, model.OwnedBy)) || !h.router.HasEligibleProvider(ctx, model.ID)) {
+			continue
+		}
+		models = append(models, model)
 		seen[model.ID] = true
 	}
 	for _, name := range h.router.LogicalModels() {
-		if !seen[name] {
+		if !seen[name] && identity.AllowsModel(name) && (!restricted || h.router.HasEligibleProvider(ctx, name)) {
 			models = append(models, provider.ModelInfo{ID: name, Object: "model", OwnedBy: "omniswitch", Provider: "omniswitch"})
 		}
 	}
-	identity, _ := IdentityFromContext(r.Context())
-	visible := make([]provider.ModelInfo, 0, len(models))
-	for _, model := range models {
-		if identity.AllowsModel(model.ID) {
-			visible = append(visible, model)
-		}
-	}
-	models = visible
 	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": models})
 }
 
-// parseFallbackTarget splits a "provider/model" reroute target. Either half
-// may be empty; the caller applies only the halves present.
-func parseFallbackTarget(target string) (providerName, modelID string) {
-	name, model, ok := strings.Cut(target, "/")
-	if !ok {
-		return strings.TrimPrefix(target, "@"), ""
+// parseFallbackTarget splits a "provider/model" reroute target. Registered
+// aliases keep their @ prefix. A prefix on a bare provider was also accepted
+// by older configs, so keep supporting that spelling.
+func (h *Handler) parseFallbackTarget(target string) (providerName, modelID string) {
+	name, model, _ := strings.Cut(target, "/")
+	if strings.HasPrefix(name, "@") && h.registry != nil {
+		if _, err := h.registry.Get(name); err == nil {
+			return name, model
+		}
 	}
 	return strings.TrimPrefix(name, "@"), model
 }
@@ -837,14 +846,14 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 			span.SetStatus(codes.Error, "provider stream error")
 			span.SetAttributes(attribute.String("llm.response.provider", meta.Provider))
 			totals.add(meta.Cost, provider.Usage{})
-			logStream(statusError, err.Error(), "", nil)
+			logStream(providerErrorLogStatus(err), err.Error(), "", nil)
 			w.Header().Set("x-omniswitch-trace-id", sc.TraceID)
 			w.Header().Set("x-omniswitch-session-id", sc.SessionID)
 			if upErr, ok := asUnsupportedParameterError(err); ok {
 				writeUnsupportedParameterError(w, upErr)
 				return
 			}
-			writeError(w, http.StatusBadGateway, "provider stream error: "+err.Error())
+			writeProviderError(w, "provider stream error: ", err)
 			return
 		}
 
@@ -893,7 +902,7 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 		if disp.violation() {
 			maxAttempts = retryAttempts(maxAttempts, disp)
 			if attempt+1 < maxAttempts {
-				sc.ProviderHint, sc.BackendRequest.Model = applyRetryTarget(disp, sc.ProviderHint, sc.BackendRequest.Model)
+				sc.ProviderHint, sc.BackendRequest.Model = h.applyRetryTarget(disp, sc.ProviderHint, sc.BackendRequest.Model)
 				continue
 			}
 			break
@@ -941,7 +950,7 @@ func (h *Handler) streamProviderResponse(w http.ResponseWriter, ctx context.Cont
 		attribute.Int("llm.usage.total_tokens", totals.usage.TotalTokens),
 		attribute.Float64("llm.usage.cost_usd", totals.cost),
 	)
-	h.shadow(activeRouter, sc.ID, sc.TraceID, meta.Provider, sc.BackendRequest, sc.ShadowHint)
+	h.shadow(ctx, activeRouter, sc.ID, sc.TraceID, meta.Provider, sc.BackendRequest, sc.ShadowHint)
 }
 
 // streamResult is the outcome of reading one provider stream.
@@ -1447,8 +1456,12 @@ func (h *Handler) tenantCacheScope(r *http.Request, cfg *handlerSettings) string
 // At most maxConcurrentShadowRequests run at once; further shadow requests
 // are dropped. Shadow calls use their own circuit breaker so a failing
 // shadow provider cannot open the circuit for production traffic.
-func (h *Handler) shadow(activeRouter *router.Router, requestID, traceID, primaryProvider string, req provider.ChatRequest, shadowProvider string) {
+func (h *Handler) shadow(ctx context.Context, activeRouter *router.Router, requestID, traceID, primaryProvider string, req provider.ChatRequest, shadowProvider string) {
 	if h.store == nil || strings.TrimSpace(shadowProvider) == "" || shadowProvider == primaryProvider {
+		return
+	}
+	identity, _ := IdentityFromContext(ctx)
+	if !identity.AllowsProvider(shadowProvider) {
 		return
 	}
 	if activeRouter == nil {
@@ -1464,6 +1477,9 @@ func (h *Handler) shadow(activeRouter *router.Router, requestID, traceID, primar
 	go func() {
 		defer func() { <-h.shadowSlots }()
 		shadowCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		if len(identity.AllowedProviders) > 0 {
+			shadowCtx = router.WithProviderAccess(shadowCtx, identity.AllowsProvider)
+		}
 		defer cancel()
 		_, meta, err := shadowRouter.Execute(shadowCtx, req, shadowProvider)
 		if meta.Provider == "" {

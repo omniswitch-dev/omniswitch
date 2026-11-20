@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/omniswitch-dev/omniswitch/internal/provider"
+	"github.com/omniswitch-dev/omniswitch/internal/router"
 )
 
 // Rerank serves a provider-neutral /v1/rerank endpoint for RAG retrieval
@@ -34,7 +35,13 @@ func (h *Handler) Rerank(w http.ResponseWriter, r *http.Request) {
 	traceID := requestHeaderOrNew(r, "x-omniswitch-trace-id", "trace")
 	sessionID := r.Header.Get("x-omniswitch-session-id")
 	keyID := r.Header.Get("x-omniswitch-key-id")
-	reservation, verdict := h.reserveBudget(r.Context(), keyID, h.estimateInputBudget(request.Model, r.Header.Get("x-omniswitch-provider"), request.Query, request.Documents))
+	providerHint := r.Header.Get("x-omniswitch-provider")
+	identity, _ := IdentityFromContext(r.Context())
+	if providerHint != "" && !identity.AllowsProvider(providerHint) {
+		writeProviderError(w, "", router.ErrProviderAccessDenied)
+		return
+	}
+	reservation, verdict := h.reserveBudget(r.Context(), keyID, h.estimateInputBudget(request.Model, providerHint, request.Query, request.Documents))
 	if verdict.rejected() {
 		w.Header().Set("x-omniswitch-trace-id", traceID)
 		writeBudgetVerdict(w, verdict)
@@ -63,11 +70,11 @@ func (h *Handler) Rerank(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	response, meta, err := activeRouter.Rerank(r.Context(), request, r.Header.Get("x-omniswitch-provider"))
+	response, meta, err := activeRouter.Rerank(r.Context(), request, providerHint)
 	if err != nil {
-		h.logRequest(r.Context(), logContext{ID: requestID, TraceID: traceID, SessionID: sessionID, Request: logRequest, Meta: &meta, APIKeyID: keyID, Status: "error", ErrorMessage: err.Error()})
+		h.logRequest(r.Context(), logContext{ID: requestID, TraceID: traceID, SessionID: sessionID, Request: logRequest, Meta: &meta, APIKeyID: keyID, Status: providerErrorLogStatus(err), ErrorMessage: err.Error()})
 		w.Header().Set("x-omniswitch-trace-id", traceID)
-		writeError(w, http.StatusBadGateway, "rerank provider error: "+err.Error())
+		writeProviderError(w, "rerank provider error: ", err)
 		return
 	}
 	if response.ID == "" {

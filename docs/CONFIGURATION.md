@@ -457,6 +457,9 @@ They receive `method`, `path`, `model`, `api_key_id`, `workspace_id`,
 wins. When any `allow` rule exists, a request must also match at least one
 allow rule. This composes with the built-in role checks for the control plane.
 
+Use [API key allowlists](API.md#get-apikeys) to restrict client-facing model
+IDs and the registered providers that can receive a key’s inference requests.
+
 ### External authorization
 
 An optional HTTP JSON callout adds organization-specific policy after API key

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/omniswitch-dev/omniswitch/internal/router"
 	"github.com/omniswitch-dev/omniswitch/internal/store"
 )
 
@@ -27,15 +28,16 @@ type AuthMiddleware struct {
 // management handlers use this instead of trusting caller-provided role or
 // workspace headers.
 type Identity struct {
-	APIKeyID       string
-	RateLimit      int
-	AuthMethod     string
-	Subject        string
-	WorkspaceID    string
-	OrganizationID string
-	Role           string
-	Claims         map[string]any
-	AllowedModels  []string
+	APIKeyID         string
+	RateLimit        int
+	AuthMethod       string
+	Subject          string
+	WorkspaceID      string
+	OrganizationID   string
+	Role             string
+	Claims           map[string]any
+	AllowedModels    []string
+	AllowedProviders []string
 }
 
 // TokenAuthenticator validates a bearer token from an external identity
@@ -143,13 +145,14 @@ func (a *AuthMiddleware) Wrap(next http.Handler) http.Handler {
 			// needs no second key lookup.
 			r = r.WithContext(withAPIKeyBudget(r.Context(), apiKey))
 			a.serveIdentity(w, r, next, Identity{
-				APIKeyID:       apiKey.ID,
-				RateLimit:      apiKey.RateLimit,
-				AuthMethod:     "api_key",
-				WorkspaceID:    apiKey.WorkspaceID,
-				OrganizationID: organizationID,
-				Role:           normalizeRole(apiKey.Role),
-				AllowedModels:  append([]string(nil), apiKey.AllowedModels...),
+				APIKeyID:         apiKey.ID,
+				RateLimit:        apiKey.RateLimit,
+				AuthMethod:       "api_key",
+				WorkspaceID:      apiKey.WorkspaceID,
+				OrganizationID:   organizationID,
+				Role:             normalizeRole(apiKey.Role),
+				AllowedModels:    apiKey.AllowedModels,
+				AllowedProviders: apiKey.AllowedProviders,
 			})
 			return
 		}
@@ -267,6 +270,14 @@ func (a *AuthorizationMiddleware) Wrap(next http.Handler) http.Handler {
 // unrestricted access for existing keys. Operators control alias destinations.
 func (i Identity) AllowsModel(model string) bool {
 	return len(i.AllowedModels) == 0 || slices.Contains(i.AllowedModels, model)
+}
+
+// AllowsProvider checks an upstream's registered name, including any @ alias prefix.
+func (i Identity) AllowsProvider(name string) bool {
+	name = strings.ToLower(name)
+	return len(i.AllowedProviders) == 0 || slices.ContainsFunc(i.AllowedProviders, func(allowed string) bool {
+		return strings.ToLower(allowed) == name
+	})
 }
 
 func isPublicDiscoveryRoute(r *http.Request) bool {
@@ -579,6 +590,9 @@ type contextKey string
 const identityContextKey contextKey = "identity"
 
 func withIdentity(ctx context.Context, identity Identity) context.Context {
+	if len(identity.AllowedProviders) > 0 {
+		ctx = router.WithProviderAccess(ctx, identity.AllowsProvider)
+	}
 	return context.WithValue(ctx, identityContextKey, identity)
 }
 

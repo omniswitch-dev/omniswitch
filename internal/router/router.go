@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -311,22 +312,12 @@ func (r *Router) ShadowProviderForModel(model string) string {
 // provider/fallback configuration as chat traffic. Providers that do not
 // implement embeddings are skipped so mixed fallback chains remain useful.
 func (r *Router) Embeddings(ctx context.Context, req provider.EmbeddingRequest, providerHint string) (provider.EmbeddingResponse, provider.ProviderMeta, error) {
-	logicalModel := req.Model
-	route, hasRoute := r.routeFor(logicalModel)
-	selectedRoute := false
-	if providerHint == "" {
-		if variant, ok := r.selectVariant(logicalModel, provider.ChatRequest{Model: logicalModel}); ok {
-			providerHint = variant.Provider
-			selectedRoute = true
-			if variant.Model != "" {
-				req.Model = variant.Model
-			}
-		}
+	route, hasRoute := r.routeFor(req.Model)
+	providers, model, err := r.requestProviders(ctx, provider.ChatRequest{Model: req.Model}, providerHint, route, hasRoute)
+	if err != nil {
+		return provider.EmbeddingResponse{}, provider.ProviderMeta{}, err
 	}
-	providers := r.resolveProviders(logicalModel, req.Model, providerHint, route, hasRoute && (selectedRoute || providerHint == ""))
-	if len(providers) == 0 {
-		return provider.EmbeddingResponse{}, provider.ProviderMeta{}, fmt.Errorf("no provider found for model %q", req.Model)
-	}
+	req.Model = model
 	var lastErr error
 	for index, current := range providers {
 		embeddingProvider, ok := current.(provider.EmbeddingProvider)
@@ -363,9 +354,9 @@ func (r *Router) Embeddings(ctx context.Context, req provider.EmbeddingRequest, 
 func (r *Router) ImageGeneration(ctx context.Context, req provider.ImageRequest, providerHint string) (provider.ImageResponse, provider.ProviderMeta, error) {
 	logicalModel := req.Model
 	route, hasRoute := r.routeFor(logicalModel)
-	providers := r.resolveProviders(logicalModel, req.Model, providerHint, route, hasRoute && providerHint == "")
-	if len(providers) == 0 {
-		return provider.ImageResponse{}, provider.ProviderMeta{}, fmt.Errorf("no provider found for model %q", req.Model)
+	providers, err := r.resolveProviders(ctx, logicalModel, req.Model, providerHint, route, hasRoute && providerHint == "", true)
+	if err != nil {
+		return provider.ImageResponse{}, provider.ProviderMeta{}, err
 	}
 	var lastErr error
 	for index, current := range providers {
@@ -403,9 +394,9 @@ func (r *Router) ImageGeneration(ctx context.Context, req provider.ImageRequest,
 func (r *Router) Transcription(ctx context.Context, req provider.TranscriptionRequest, providerHint string) (provider.TranscriptionResponse, provider.ProviderMeta, error) {
 	logicalModel := req.Model
 	route, hasRoute := r.routeFor(logicalModel)
-	providers := r.resolveProviders(logicalModel, req.Model, providerHint, route, hasRoute && providerHint == "")
-	if len(providers) == 0 {
-		return provider.TranscriptionResponse{}, provider.ProviderMeta{}, fmt.Errorf("no provider found for model %q", req.Model)
+	providers, err := r.resolveProviders(ctx, logicalModel, req.Model, providerHint, route, hasRoute && providerHint == "", true)
+	if err != nil {
+		return provider.TranscriptionResponse{}, provider.ProviderMeta{}, err
 	}
 	var lastErr error
 	for index, current := range providers {
@@ -443,9 +434,9 @@ func (r *Router) Transcription(ctx context.Context, req provider.TranscriptionRe
 func (r *Router) Speech(ctx context.Context, req provider.SpeechRequest, providerHint string) (io.ReadCloser, string, provider.ProviderMeta, error) {
 	logicalModel := req.Model
 	route, hasRoute := r.routeFor(logicalModel)
-	providers := r.resolveProviders(logicalModel, req.Model, providerHint, route, hasRoute && providerHint == "")
-	if len(providers) == 0 {
-		return nil, "", provider.ProviderMeta{}, fmt.Errorf("no provider found for model %q", req.Model)
+	providers, err := r.resolveProviders(ctx, logicalModel, req.Model, providerHint, route, hasRoute && providerHint == "", true)
+	if err != nil {
+		return nil, "", provider.ProviderMeta{}, err
 	}
 	var lastErr error
 	for index, current := range providers {
@@ -495,22 +486,12 @@ func (c *cancelReadCloser) Close() error {
 // the optional rerank interface. Providers that do not support rerank are
 // skipped in a fallback chain.
 func (r *Router) Rerank(ctx context.Context, req provider.RerankRequest, providerHint string) (provider.RerankResponse, provider.ProviderMeta, error) {
-	logicalModel := req.Model
-	route, hasRoute := r.routeFor(logicalModel)
-	selectedRoute := false
-	if providerHint == "" {
-		if variant, ok := r.selectVariant(logicalModel, provider.ChatRequest{Model: logicalModel}); ok {
-			providerHint = variant.Provider
-			selectedRoute = true
-			if variant.Model != "" {
-				req.Model = variant.Model
-			}
-		}
+	route, hasRoute := r.routeFor(req.Model)
+	providers, model, err := r.requestProviders(ctx, provider.ChatRequest{Model: req.Model}, providerHint, route, hasRoute)
+	if err != nil {
+		return provider.RerankResponse{}, provider.ProviderMeta{}, err
 	}
-	providers := r.resolveProviders(logicalModel, req.Model, providerHint, route, hasRoute && (selectedRoute || providerHint == ""))
-	if len(providers) == 0 {
-		return provider.RerankResponse{}, provider.ProviderMeta{}, fmt.Errorf("no provider found for model %q", req.Model)
-	}
+	req.Model = model
 	var lastErr error
 	for index, current := range providers {
 		rerankProvider, ok := current.(provider.RerankProvider)
@@ -547,22 +528,12 @@ func (r *Router) Rerank(ctx context.Context, req provider.RerankRequest, provide
 // Execute routes a chat request to the appropriate provider,
 // handling retries and fallbacks automatically.
 func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, providerHint string) (provider.ChatResponse, provider.ProviderMeta, error) {
-	logicalModel := req.Model
-	route, hasRoute := r.routeFor(logicalModel)
-	selectedRoute := false
-	if providerHint == "" {
-		if variant, ok := r.selectVariant(logicalModel, req); ok {
-			providerHint = variant.Provider
-			selectedRoute = true
-			if variant.Model != "" {
-				req.Model = variant.Model
-			}
-		}
+	route, hasRoute := r.routeFor(req.Model)
+	providers, model, err := r.requestProviders(ctx, req, providerHint, route, hasRoute)
+	if err != nil {
+		return provider.ChatResponse{}, provider.ProviderMeta{}, err
 	}
-	providers := r.resolveProviders(logicalModel, req.Model, providerHint, route, hasRoute && (selectedRoute || providerHint == ""))
-	if len(providers) == 0 {
-		return provider.ChatResponse{}, provider.ProviderMeta{}, fmt.Errorf("no provider found for model %q", req.Model)
-	}
+	req.Model = model
 
 	var lastErr error
 	for i, prov := range providers {
@@ -632,23 +603,12 @@ func (r *Router) Execute(ctx context.Context, req provider.ChatRequest, provider
 }
 
 func (r *Router) ExecuteStream(ctx context.Context, req provider.ChatRequest, providerHint string) (<-chan provider.ChatResponseChunk, provider.ProviderMeta, error) {
-	logicalModel := req.Model
-	route, hasRoute := r.routeFor(logicalModel)
-	selectedRoute := false
-	if providerHint == "" {
-		if variant, ok := r.selectVariant(logicalModel, req); ok {
-			providerHint = variant.Provider
-			selectedRoute = true
-			if variant.Model != "" {
-				req.Model = variant.Model
-			}
-		}
+	route, hasRoute := r.routeFor(req.Model)
+	providers, model, err := r.requestProviders(ctx, req, providerHint, route, hasRoute)
+	if err != nil {
+		return nil, provider.ProviderMeta{}, err
 	}
-
-	providers := r.resolveProviders(logicalModel, req.Model, providerHint, route, hasRoute && (selectedRoute || providerHint == ""))
-	if len(providers) == 0 {
-		return nil, provider.ProviderMeta{}, fmt.Errorf("no provider found for model %q", req.Model)
-	}
+	req.Model = model
 
 	timeout := routeTimeout(route.Timeout)
 	var lastErr error
@@ -941,44 +901,37 @@ func traceSkippedProvider(ctx context.Context, providerName, model string, err e
 	span.SetStatus(codes.Error, err.Error())
 }
 
-func (r *Router) selectVariant(model string, req provider.ChatRequest) (Variant, bool) {
-	route, ok := r.routeFor(model)
-	if !ok || len(route.Variants) == 0 {
-		return Variant{}, false
+func (r *Router) selectVariant(ctx context.Context, route Route, req provider.ChatRequest) (Variant, bool, bool) {
+	if len(route.Variants) == 0 {
+		return Variant{}, false, false
 	}
 
 	variants := make([]Variant, 0, len(route.Variants))
+	excluded := false
+	total := 0
 	for _, variant := range route.Variants {
-		if strings.TrimSpace(variant.Condition) != "" && !r.matchesCondition(variant.Condition, req) {
+		if variant.Weight <= 0 || strings.TrimSpace(variant.Condition) != "" && !r.matchesCondition(variant.Condition, req) {
+			continue
+		}
+		if variant.Provider != "" && !providerAllowed(ctx, variant.Provider) {
+			excluded = true
 			continue
 		}
 		variants = append(variants, variant)
-	}
-	if len(variants) == 0 {
-		return Variant{}, false
-	}
-	total := 0
-	for _, variant := range variants {
-		if variant.Weight > 0 {
-			total += variant.Weight
-		}
+		total += variant.Weight
 	}
 	if total <= 0 {
-		return Variant{}, false
+		return Variant{}, false, excluded
 	}
 
 	roll := randomInt(total)
-	accumulated := 0
 	for _, variant := range variants {
-		if variant.Weight <= 0 {
-			continue
-		}
-		accumulated += variant.Weight
-		if roll < accumulated {
-			return variant, true
+		roll -= variant.Weight
+		if roll < 0 {
+			return variant, true, excluded
 		}
 	}
-	return variants[len(variants)-1], true
+	return Variant{}, false, excluded
 }
 
 func randomInt(max int) int {
@@ -1047,23 +1000,56 @@ func errorString(err error) string {
 	return err.Error()
 }
 
-// resolveProviders returns the ordered list of providers to try for the given model.
-func (r *Router) resolveProviders(logicalModel, model, hint string, route Route, useRouteFallbacks bool) []provider.Provider {
+// requestProviders selects a weighted variant before resolving the remaining
+// route candidates. A policy-filtered variant cannot send an otherwise
+// unconfigured alias through the implicit model-name guess.
+func (r *Router) requestProviders(ctx context.Context, req provider.ChatRequest, hint string, route Route, hasRoute bool) ([]provider.Provider, string, error) {
+	model := req.Model
+	useRoute := hint == "" && hasRoute
+	allowImplicit := true
+	if useRoute {
+		variant, selected, excluded := r.selectVariant(ctx, route, req)
+		allowImplicit = selected || !excluded
+		if selected {
+			hint = variant.Provider
+			if variant.Model != "" {
+				model = variant.Model
+			}
+		}
+	}
+	providers, err := r.resolveProviders(ctx, req.Model, model, hint, route, useRoute, allowImplicit)
+	return providers, model, err
+}
+
+// resolveProviders returns the ordered list of permitted providers to try.
+func (r *Router) resolveProviders(ctx context.Context, logicalModel, model, hint string, route Route, useRoute, allowImplicit bool) ([]provider.Provider, error) {
+	providers, err := r.providerCandidates(ctx, model, hint, route, useRoute, allowImplicit)
+	if hint == "" && err == nil {
+		providers = r.applyStrategy(logicalModel, model, route.Strategy, providers)
+	}
+	return providers, err
+}
+
+func (r *Router) providerCandidates(ctx context.Context, model, hint string, route Route, useRoute, allowImplicit bool) ([]provider.Provider, error) {
 	var provs []provider.Provider
 
-	// If a provider is explicitly requested via header, use it.
 	if hint != "" {
+		if !providerAllowed(ctx, hint) {
+			return nil, ErrProviderAccessDenied
+		}
 		if p, err := r.registry.Get(hint); err == nil {
 			provs = append(provs, p)
+		} else if hasProviderAccessPolicy(ctx) && !useRoute {
+			return nil, err
 		}
 	}
 
-	if useRouteFallbacks && len(provs) == 0 && route.Provider != "" {
+	if useRoute && len(provs) == 0 && route.Provider != "" {
 		if p, err := r.registry.Get(route.Provider); err == nil {
 			provs = append(provs, p)
 		}
 	}
-	if useRouteFallbacks && route.Strategy != StrategyDirect {
+	if useRoute && route.Strategy != StrategyDirect {
 		for _, fb := range route.Fallbacks {
 			if p, err := r.registry.Get(fb); err == nil {
 				provs = appendUniqueProvider(provs, p)
@@ -1071,25 +1057,54 @@ func (r *Router) resolveProviders(logicalModel, model, hint string, route Route,
 		}
 	}
 
-	// Auto-resolve by model name.
-	if len(provs) == 0 {
+	if allowImplicit && len(provs) == 0 {
 		if p, err := r.registry.ResolveModel(model); err == nil {
 			provs = append(provs, p)
-		}
-	}
-
-	// Guess provider from model name prefix.
-	if len(provs) == 0 {
-		guessed := guessProvider(model)
-		if p, err := r.registry.Get(guessed); err == nil {
+		} else if p, err := r.registry.Get(guessProvider(model)); err == nil {
 			provs = append(provs, p)
 		}
 	}
 
-	if hint == "" {
-		provs = r.applyStrategy(logicalModel, model, route.Strategy, provs)
+	if hasProviderAccessPolicy(ctx) {
+		provs = slices.DeleteFunc(provs, func(p provider.Provider) bool {
+			return !providerAllowed(ctx, p.Name())
+		})
+		if len(provs) == 0 {
+			return nil, ErrProviderAccessDenied
+		}
 	}
-	return provs
+	if len(provs) == 0 {
+		return nil, fmt.Errorf("no provider found for model %q", model)
+	}
+	return provs, nil
+}
+
+// HasEligibleProvider reports if a model could use a permitted backend.
+// Conditional variants are considered possible during discovery because the
+// client has not supplied a prompt yet.
+func (r *Router) HasEligibleProvider(ctx context.Context, model string) bool {
+	route, hasRoute := r.routeFor(model)
+	allowImplicit := true
+	for _, variant := range route.Variants {
+		if variant.Weight <= 0 {
+			continue
+		}
+		if variant.Provider != "" && !providerAllowed(ctx, variant.Provider) {
+			if strings.TrimSpace(variant.Condition) == "" {
+				allowImplicit = false
+			}
+			continue
+		}
+		target := variant.Model
+		if target == "" {
+			target = model
+		}
+		if _, err := r.providerCandidates(ctx, target, variant.Provider, route, true, true); err == nil {
+			return true
+		}
+	}
+	_, err := r.providerCandidates(ctx, model, "", route, hasRoute, allowImplicit)
+	return err == nil
 }
 
 func (r *Router) applyStrategy(logicalModel, model string, strategy Strategy, providers []provider.Provider) []provider.Provider {

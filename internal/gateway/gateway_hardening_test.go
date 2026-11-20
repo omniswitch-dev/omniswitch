@@ -498,7 +498,7 @@ func TestShadowTrafficBoundedAndIsolated(t *testing.T) {
 	for i := 0; i < cap(h.shadowSlots); i++ {
 		h.shadowSlots <- struct{}{}
 	}
-	h.shadow(rt, "req_dropped", "trace", "primary", provider.ChatRequest{Model: "test-model"}, "shadow")
+	h.shadow(context.Background(), rt, "req_dropped", "trace", "primary", provider.ChatRequest{Model: "test-model"}, "shadow")
 	time.Sleep(50 * time.Millisecond)
 	if atomic.LoadInt64(&shadowCalls) != 0 {
 		t.Fatalf("shadow call ran with a full semaphore")
@@ -508,7 +508,7 @@ func TestShadowTrafficBoundedAndIsolated(t *testing.T) {
 	}
 
 	// A failing shadow provider must not open the production breaker.
-	h.shadow(rt, "req_shadow", "trace", "primary", provider.ChatRequest{Model: "test-model", Messages: []provider.Message{{Role: "user", Content: "hi"}}}, "shadow")
+	h.shadow(context.Background(), rt, "req_shadow", "trace", "primary", provider.ChatRequest{Model: "test-model", Messages: []provider.Message{{Role: "user", Content: "hi"}}}, "shadow")
 	var logs []store.ShadowLog
 	for i := 0; i < 200 && len(logs) == 0; i++ {
 		time.Sleep(10 * time.Millisecond)

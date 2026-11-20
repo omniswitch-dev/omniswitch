@@ -28,7 +28,7 @@ across multiple gateway replicas.
 - **Config hot-reload:** Routes, guardrails, cache posture, and circuit breaker settings reload from the config file without restarting; invalid files keep the previous configuration.
 - **Rust-accelerated guardrails:** Custom rule scanning runs in a single pass inside an embedded WebAssembly module compiled from Rust, with an identical pure-Go fallback ([benchmarks](BENCHMARKS.md)).
 - **Tenant-safe cache and quotas:** Exact and semantic cache with API key, workspace, organization, or global scope; per-key budgets; local or Redis-backed request limits.
-- **Identity and authorization:** Hashed API keys, bootstrap owner key, role gates, OIDC/JWKS workload identity, and CEL allow/deny authorization policies.
+- **Identity and authorization:** Hashed API keys with model and upstream provider allowlists, bootstrap owner key, role gates, OIDC/JWKS workload identity, and CEL allow/deny authorization policies.
 - **Guardrails:** Built-in PII, injection, SQL, toxic, and secret checks; regex rules; webhook guardrail connectors; local OpenAI-compatible moderation; output redaction and buffered SSE protection.
 - **MCP gateway:** HTTP and streamable HTTP/SSE pass-through, persistent stdio targets, federated `tools/list`, policy-gated `tools/call`, target headers, explicit OIDC bearer delegation, **OpenAPI-to-MCP conversion**, and SEP-414 trace context propagation.
 - **A2A gateway:** Public Agent Card discovery plus authenticated JSON-RPC `SendMessage` through the governed chat pipeline.
@@ -188,7 +188,7 @@ OMNISWITCH_CONFIG=examples/gateway-config.yaml go run ./cmd/gateway serve
 | --- | --- |
 | Inference APIs | Chat, Responses subset, Anthropic Messages subset, embeddings, rerank, models, local moderation |
 | Routing | Fallbacks, weighted variants, CEL conditions, retries, timeouts, circuit breaker, shadow traffic |
-| Security | API keys, OIDC/JWKS, CEL authorization, workspace/org scoping, encrypted provider vault |
+| Security | API keys with model and provider allowlists, OIDC/JWKS, CEL authorization, workspace/org scoping, encrypted provider vault |
 | Guardrails | Built-in checks, regex rules, webhooks, redaction, buffered output checks; single-pass Rust-WASM scanner with Go fallback |
 | Hot reload | Routes, guardrails, cache posture, circuit breaker, and shadow provider reload without restart |
 | MCP | HTTP, streamable HTTP/SSE, stdio, tool federation, policy and audit |

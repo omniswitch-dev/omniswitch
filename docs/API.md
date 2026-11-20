@@ -485,6 +485,7 @@ Creates a OmniSwitch API key.
   "workspace_id": "ws_123",
   "role": "admin",
   "allowed_models": ["support", "gpt-4o-mini"],
+  "allowed_providers": ["@openai-prod", "anthropic"],
   "rate_limit": 120,
   "budget_usd": 500,
   "monthly_cost_budget": 50,
@@ -536,14 +537,29 @@ IDs. Omitted, `null`, or `[]` preserves unrestricted model access. With
 authentication enabled, a model outside the list returns 403 before inference;
 the list applies to all POST `/v1/*` inference endpoints, including streaming,
 and to the shared chat pipeline used by A2A messages.
-`GET /v1/models` shows only permitted registered models and configured route
-aliases. This is a model-name policy, not a provider allowlist: an allowed
-logical route still uses operator-configured variants, fallbacks, request
-shaping, guardrail reroutes, and shadow providers. Use CEL/external policy and
-trusted routing configuration for additional restrictions. Existing keys keep
-their access after the automatic schema migration. A restricted caller creating
-a child key cannot grant broader model access; an omitted/empty child list
-inherits the caller's restrictions.
+A restricted caller creating a child key cannot grant broader model access.
+An omitted or empty child list inherits the caller's restrictions.
+
+`allowed_providers` is an optional list of up to 128 provider names from
+`GET /api/providers`. Names are case-insensitive, are limited to 128 bytes each, and include the `@` prefix
+for named provider accounts, such as `@openai-prod`. Omitted, `null`, or `[]`
+gives unrestricted provider access for keys issued by an unrestricted caller.
+Keys created before this field existed retain unrestricted provider access.
+
+The provider policy applies to chat (including streaming), Responses, Messages,
+A2A inference, embeddings, and rerank. Routing skips disallowed fallback and
+variant providers before sending the request. Explicit provider overrides,
+guardrail reroutes, or routes with no permitted provider return HTTP 403
+with code `provider_access_denied` on the inference HTTP API. A2A reports
+the denial through its JSON-RPC result. Disallowed shadow calls are skipped.
+Cache entries are isolated by provider allowlist in addition to the
+configured cache scope.
+
+`GET /v1/models` filters registered models and base route aliases by both
+allowlists. Conditional variants count as potential routes at discovery time.
+A provider-restricted caller can issue only equally or more restricted keys.
+An omitted or empty child list inherits its provider list. You can set both
+allowlists and the key budgets from the dashboard's API Keys page.
 
 ### `DELETE /api/keys?id=<key_id>`
 

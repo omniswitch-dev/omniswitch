@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,6 +38,7 @@ type CreateKeyRequest struct {
 	MonthlyTokenBudget int      `json:"monthly_token_budget,omitempty"`
 	ExpiresIn          string   `json:"expires_in,omitempty"`
 	AllowedModels      []string `json:"allowed_models,omitempty"`
+	AllowedProviders   []string `json:"allowed_providers,omitempty"`
 }
 
 // CreateKeyResponse includes the full API key (shown only once).
@@ -71,6 +73,19 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if len(req.AllowedProviders) > 128 {
+		writeError(w, http.StatusBadRequest, "allowed_providers must contain at most 128 provider names")
+		return
+	}
+	for i, name := range req.AllowedProviders {
+		if name == "" || strings.TrimSpace(name) != name || len(name) > 128 {
+			writeError(w, http.StatusBadRequest, "allowed_providers must contain non-empty provider names up to 128 bytes without surrounding whitespace")
+			return
+		}
+		req.AllowedProviders[i] = strings.ToLower(name)
+	}
+	slices.Sort(req.AllowedProviders)
+	req.AllowedProviders = slices.Compact(req.AllowedProviders)
 	var expiresAt *time.Time
 	if req.ExpiresIn != "" {
 		dur, err := time.ParseDuration(req.ExpiresIn)
@@ -89,6 +104,17 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 			for _, model := range req.AllowedModels {
 				if !caller.AllowsModel(model) {
 					writeError(w, http.StatusForbidden, "cannot create a key with broader model access than your own")
+					return
+				}
+			}
+		}
+		if len(caller.AllowedProviders) > 0 {
+			if len(req.AllowedProviders) == 0 {
+				req.AllowedProviders = slices.Clone(caller.AllowedProviders)
+			}
+			for _, name := range req.AllowedProviders {
+				if !caller.AllowsProvider(name) {
+					writeError(w, http.StatusForbidden, "cannot create a key with broader provider access than your own")
 					return
 				}
 			}
@@ -145,6 +171,7 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		MonthlyTokenBudget: req.MonthlyTokenBudget,
 		Enabled:            true,
 		AllowedModels:      req.AllowedModels,
+		AllowedProviders:   req.AllowedProviders,
 		ExpiresAt:          expiresAt,
 	}
 

@@ -6,6 +6,15 @@ The format is based on Keep a Changelog, and this project follows semantic versi
 
 ## [Unreleased]
 
+### Provider access for workload keys
+
+- Set `allowed_providers` on API keys to limit which registered upstreams can
+  receive inference traffic. The limit follows variants, fallbacks, guardrail
+  reroutes, and shadow calls. Model discovery and shared cache access honor
+  the provider policy.
+- Issue keys with provider and model allowlists, lifetime spend budgets, and
+  monthly spend or token budgets from the dashboard.
+
 ### Agent workflows and first-run diagnostics
 
 - Responses accepts stateless `function_call`/`function_call_output` history,

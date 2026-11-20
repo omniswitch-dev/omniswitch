@@ -32,7 +32,7 @@ OmniSwitch is in public beta. This page lists limitations that are current, know
 ## Authorization
 
 - **External authorization uses OmniSwitch's HTTP JSON decision protocol.** It does not implement Envoy ext_authz gRPC/HTTP wire compatibility, credential injection, or arbitrary request-body forwarding. It requires authentication to be enabled and URL/timeout changes require a restart. See [configuration](CONFIGURATION.md#external-authorization).
-- **Per-key model restrictions apply to exact client-facing model IDs.** They do not limit providers or the destinations behind operator-controlled aliases, fallbacks, or shadow traffic. No wildcard model matching or per-provider key permissions are implemented.
+- **Per-key allowlists use exact model IDs and registered provider names.** Model IDs refer to the client-facing alias and provider names refer to the configured upstream account. The provider policy controls the first hop from OmniSwitch. For upstream aggregators, configure any further routing restrictions with the aggregator. MCP target permissions use separate MCP policies.
 
 ## Prompt deployment
 

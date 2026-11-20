@@ -7,6 +7,10 @@ development-branch documentation can change. This is not a benchmark, a full
 product ranking, or a claim of feature/wire-protocol parity. Hosted product
 features are identified separately from OSS gateway implementations.
 
+On 2026-11-20 OmniSwitch added [per-key provider allowlists](../API.md#get-apikeys)
+and exposed both allowlists and budgets in the API Keys dashboard. The policy
+applies to routing variants, fallbacks, guardrail reroutes, and shadow calls.
+
 ## Findings and implementation choices
 
 | Project / source | Documented capability relevant to this review | OmniSwitch before this change | Outcome |
@@ -63,7 +67,6 @@ features are identified separately from OSS gateway implementations.
 | Gap | Why it needs a separate implementation |
 | --- | --- |
 | Per-minute token quotas | Define streaming usage normalization, reservations/reconciliation, and shared backend semantics before exposing limits |
-| Provider-scoped key permissions | Enforce every actual dispatch, including variants, fallback, guardrail reroutes, and asynchronous shadow traffic |
 | Complete Responses/Messages tool parity | Requires protocol fixtures for tool events, multimodal payloads, and streaming translation; current compatibility remains a documented subset |
 | Prompt playground | Labels follow workspace isolation; a deployment and comparison UI remains future work |
 | Adaptive experiments / quality evaluation | Existing weighted routing and policy replay do not replace statistical quality evaluation |

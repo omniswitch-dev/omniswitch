@@ -230,3 +230,36 @@ func TestMigrateIsIdempotent(t *testing.T) {
 		}
 	})
 }
+
+func TestMigratePreservesExistingKeyAccess(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "sentinel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE api_keys (id TEXT PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT UNIQUE NOT NULL,
+		key_prefix TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT, rate_limit INTEGER DEFAULT 60,
+		budget_usd REAL DEFAULT 0, spend_usd REAL DEFAULT 0, enabled INTEGER DEFAULT 1, metadata TEXT,
+		allowed_models TEXT NOT NULL DEFAULT '[]');
+		INSERT INTO api_keys (id, name, key_hash, key_prefix, created_at, allowed_models)
+		VALUES ('legacy', 'legacy key', 'hash', 'prefix', '2026-01-01T00:00:00Z', '["support"]');`)
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	key, err := st.GetAPIKeyByHash(context.Background(), "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !key.Enabled || len(key.AllowedProviders) != 0 || len(key.AllowedModels) != 1 || key.AllowedModels[0] != "support" {
+		t.Fatalf("migration changed legacy key access: %+v", key)
+	}
+}

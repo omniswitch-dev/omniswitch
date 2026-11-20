@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/omniswitch-dev/omniswitch/internal/provider"
+	"github.com/omniswitch-dev/omniswitch/internal/router"
 )
 
 // Embeddings serves OpenAI-compatible /v1/embeddings for native OpenAI and
@@ -31,7 +32,13 @@ func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
 	traceID := requestHeaderOrNew(r, "x-omniswitch-trace-id", "trace")
 	sessionID := r.Header.Get("x-omniswitch-session-id")
 	keyID := r.Header.Get("x-omniswitch-key-id")
-	reservation, verdict := h.reserveBudget(r.Context(), keyID, h.estimateInputBudget(request.Model, r.Header.Get("x-omniswitch-provider"), request.Input))
+	providerHint := r.Header.Get("x-omniswitch-provider")
+	identity, _ := IdentityFromContext(r.Context())
+	if providerHint != "" && !identity.AllowsProvider(providerHint) {
+		writeProviderError(w, "", router.ErrProviderAccessDenied)
+		return
+	}
+	reservation, verdict := h.reserveBudget(r.Context(), keyID, h.estimateInputBudget(request.Model, providerHint, request.Input))
 	if verdict.rejected() {
 		w.Header().Set("x-omniswitch-trace-id", traceID)
 		writeBudgetVerdict(w, verdict)
@@ -59,11 +66,11 @@ func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	response, meta, err := activeRouter.Embeddings(r.Context(), request, r.Header.Get("x-omniswitch-provider"))
+	response, meta, err := activeRouter.Embeddings(r.Context(), request, providerHint)
 	if err != nil {
-		h.logRequest(r.Context(), logContext{ID: requestID, TraceID: traceID, SessionID: sessionID, Request: logRequest, Meta: &meta, APIKeyID: keyID, Status: "error", ErrorMessage: err.Error()})
+		h.logRequest(r.Context(), logContext{ID: requestID, TraceID: traceID, SessionID: sessionID, Request: logRequest, Meta: &meta, APIKeyID: keyID, Status: providerErrorLogStatus(err), ErrorMessage: err.Error()})
 		w.Header().Set("x-omniswitch-trace-id", traceID)
-		writeError(w, http.StatusBadGateway, "embedding provider error: "+err.Error())
+		writeProviderError(w, "embedding provider error: ", err)
 		return
 	}
 	logResponse := provider.ChatResponse{ID: requestID, Object: "embedding", Created: time.Now().Unix(), Model: response.Model, Usage: response.Usage}

@@ -9,7 +9,7 @@ OmniSwitch is currently in **public beta** (`v0.2.0-beta.x`). See "Beta scope an
 - Stateless Responses and Anthropic Messages custom-tool round trips, parallel tool IDs, image inputs, and Responses structured output. Vendor compatibility remains a documented subset.
 - `omniswitch doctor` for read-only health, readiness, and authenticated model discovery checks.
 
-- Per-key model access restrictions and filtered model/alias discovery.
+- Per-key model and provider access restrictions, filtered model/alias discovery, and dashboard key issuance with budget controls.
 - HTTP JSON external authorization with fail-closed policy decisions.
 - Persistent prompt labels for API-driven promotion and rollback.
 - Route-level prompt prepend/append enrichment before guardrails and caching.

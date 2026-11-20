@@ -122,6 +122,9 @@ code{background:var(--surface-2);border:1px solid var(--border);border-radius:5p
 .trace-summary .mini{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:12px}
 .trace-summary .mini strong{display:block;font-size:18px;margin-top:5px;word-break:break-word}
 .raw-block{background:#0a0c0f;border:1px solid var(--border);border-radius:8px;padding:12px;overflow:auto;max-height:280px;font-family:"Cascadia Mono","Consolas",monospace;font-size:12px;line-height:1.55}
+#key-allowlist-help{margin:0 0 14px}
+#keys-list{overflow-x:auto}
+#keys-list .key-policy{min-width:150px;overflow-wrap:anywhere}
 .api-key-row{display:grid;grid-template-columns:minmax(220px,1fr) 160px;gap:10px;align-items:end;margin-bottom:14px}
 @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
 @media(max-width:980px){
@@ -413,20 +416,28 @@ routes:
         <p>Issue and revoke workload keys.</p>
       </div>
     </div>
-    <div class="grid-2">
-      <div class="panel">
-        <div class="panel-header"><h2>Create Key</h2></div>
-        <div class="panel-body">
-          <div class="field"><label for="key-name">Name</label><input id="key-name" placeholder="production-app"></div>
-          <div class="field"><label for="key-rate">Rate limit</label><input id="key-rate" type="number" min="1" value="60"></div>
-          <button type="button" class="btn btn-primary" id="key-create">Generate Key</button>
-          <div class="meta-row" id="key-result"></div>
+    <div class="panel">
+      <div class="panel-header"><h2>Create Key</h2></div>
+      <form class="panel-body" id="key-form">
+        <div class="grid-2">
+          <div class="field"><label for="key-name">Name</label><input id="key-name" placeholder="production-app" required></div>
+          <div class="field"><label for="key-rate">Requests per rate limit window</label><input id="key-rate" type="number" min="1" value="60" required></div>
+          <div class="field"><label for="key-providers">Allowed providers (comma-separated)</label><input id="key-providers" aria-describedby="key-allowlist-help" placeholder="@approved-openai, anthropic"></div>
+          <div class="field"><label for="key-models">Allowed models (comma-separated)</label><input id="key-models" aria-describedby="key-allowlist-help" placeholder="support, gpt-4o-mini"></div>
         </div>
-      </div>
-      <div class="panel">
-        <div class="panel-header"><h2>Active Keys</h2></div>
-        <div id="keys-list"></div>
-      </div>
+        <p class="sub" id="key-allowlist-help">Empty allowlists inherit the issuing key’s access.</p>
+        <div class="grid-3">
+          <div class="field"><label for="key-lifetime-budget">Lifetime budget (USD)</label><input id="key-lifetime-budget" type="number" min="0" step="any" placeholder="Optional"></div>
+          <div class="field"><label for="key-monthly-budget">Monthly budget (USD)</label><input id="key-monthly-budget" type="number" min="0" step="any" placeholder="Optional"></div>
+          <div class="field"><label for="key-monthly-tokens">Monthly token budget</label><input id="key-monthly-tokens" type="number" min="0" step="1" placeholder="Optional"></div>
+        </div>
+        <button type="submit" class="btn btn-primary" id="key-create">Generate Key</button>
+        <div class="meta-row" id="key-result" aria-live="polite"></div>
+      </form>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><h2>Issued Keys</h2></div>
+      <div id="keys-list"></div>
     </div>
   </section>
 
@@ -1010,17 +1021,33 @@ function buildTraceEvents(trace){
   return events.sort((a,b) => a.start - b.start);
 }
 
-async function createKey(){
+async function createKey(event){
+  event.preventDefault();
   const name = $("key-name").value.trim();
-  const rateLimit = Number($("key-rate").value || 60);
   if(!name) return;
+  const button = $("key-create");
+  const rateLimit = Number($("key-rate").value);
+  const splitList = id => $(id).value.split(",").map(value => value.trim()).filter(Boolean);
+  const body = {
+    name,
+    rate_limit: rateLimit,
+    allowed_providers: splitList("key-providers"),
+    allowed_models: splitList("key-models"),
+    budget_usd: Number($("key-lifetime-budget").value),
+    monthly_cost_budget: Number($("key-monthly-budget").value),
+    monthly_token_budget: Number($("key-monthly-tokens").value)
+  };
+  button.disabled = true;
   try{
-    const {data} = await requestJSON("/api/keys", {method:"POST", headers:jsonHeaders(), body:JSON.stringify({name, rate_limit: rateLimit})});
+    const {data} = await requestJSON("/api/keys", {method:"POST", headers:jsonHeaders(), body:JSON.stringify(body)});
     $("key-result").innerHTML = `<span class="chip"><strong>Key:</strong>&nbsp;<code>${escapeHTML(data.key || "")}</code></span>`;
-    $("key-name").value = "";
+    event.target.reset();
+    $("key-rate").value = rateLimit;
     await loadKeys();
   }catch(err){
     $("key-result").innerHTML = `<span class="chip">${escapeHTML(err.message)}</span>`;
+  }finally{
+    button.disabled = false;
   }
 }
 
@@ -1030,11 +1057,23 @@ async function loadKeys(){
     const keys = data.keys || [];
     const el = $("keys-list");
     if(!keys.length){el.innerHTML = `<div class="empty">No API keys created yet.</div>`;return;}
-    el.innerHTML = `<table><thead><tr><th>Name</th><th>Prefix</th><th>Rate Limit</th><th>Created</th><th>Status</th><th>Action</th></tr></thead><tbody>` +
+    const accessList = values => values?.length ? escapeHTML(values.join(", ")) : "Any";
+    el.innerHTML = `<table><thead><tr><th>Name</th><th>Prefix</th><th>Rate limit</th><th>Access</th><th>Budgets</th><th>Created</th><th>Status</th><th>Action</th></tr></thead><tbody>` +
       keys.map(key => `<tr>
         <td>${escapeHTML(key.name)}</td>
         <td><code>${escapeHTML(key.key_prefix)}</code></td>
-        <td>${formatInt(key.rate_limit)}/min</td>
+        <td>${formatInt(key.rate_limit)} per window</td>
+        <td class="key-policy">
+          <div><strong>Providers</strong> ${accessList(key.allowed_providers)}</div>
+          <div><strong>Models</strong> ${accessList(key.allowed_models)}</div>
+        </td>
+        <td>
+          ${[
+            key.budget_usd > 0 ? `<div>Lifetime ${formatMoney(key.budget_usd)}</div>` : "",
+            key.monthly_cost_budget > 0 ? `<div>Monthly ${formatMoney(key.monthly_cost_budget)}</div>` : "",
+            key.monthly_token_budget > 0 ? `<div>Monthly ${formatInt(key.monthly_token_budget)} tokens</div>` : ""
+          ].filter(Boolean).join("") || "None"}
+        </td>
         <td>${escapeHTML(new Date(key.created_at).toLocaleDateString())}</td>
         <td><span class="badge-sm ${key.enabled ? "status-success" : "status-error"}">${key.enabled ? "active" : "disabled"}</span></td>
         <td><button type="button" class="btn btn-danger btn-small key-delete" data-id="${escapeAttr(key.id)}">Revoke</button></td>
@@ -1122,7 +1161,7 @@ $("cfg-save").addEventListener("click", saveConfig);
 $("cfg-reset").addEventListener("click", resetConfigForm);
 $("cfg-new").addEventListener("click", resetConfigForm);
 $("cfg-refresh").addEventListener("click", loadConfigs);
-$("key-create").addEventListener("click", createKey);
+$("key-form").addEventListener("submit", createKey);
 $("prompt-create").addEventListener("click", createPrompt);
 
 const storedKey = sessionStorage.getItem("omniswitch.playgroundKey");

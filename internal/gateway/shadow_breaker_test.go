@@ -65,14 +65,14 @@ func TestShadowRequestsUseConfiguredBreaker(t *testing.T) {
 		return store.ShadowLog{}
 	}
 	req := provider.ChatRequest{Model: "test-model", Messages: []provider.Message{{Role: "user", Content: "hi"}}}
-	h.shadow(rt, "req_shadow_1", "trace", "primary", req, "shadow")
+	h.shadow(context.Background(), rt, "req_shadow_1", "trace", "primary", req, "shadow")
 	if entry := waitLog("req_shadow_1"); entry.Status != statusError {
 		t.Fatalf("first shadow log = %+v, want error", entry)
 	}
 	if state := shadowBreaker.State("shadow"); state != router.CircuitOpen {
 		t.Fatalf("configured shadow breaker state = %s, want open after one failure", state)
 	}
-	h.shadow(rt, "req_shadow_2", "trace", "primary", req, "shadow")
+	h.shadow(context.Background(), rt, "req_shadow_2", "trace", "primary", req, "shadow")
 	entry := waitLog("req_shadow_2")
 	if !strings.Contains(entry.ErrorMessage, "circuit is open") {
 		t.Fatalf("second shadow log error = %q, want circuit open", entry.ErrorMessage)
