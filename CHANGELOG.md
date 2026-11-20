@@ -14,6 +14,9 @@ The format is based on Keep a Changelog, and this project follows semantic versi
   the provider policy.
 - Issue keys with provider and model allowlists, lifetime spend budgets, and
   monthly spend or token budgets from the dashboard.
+- Open the dashboard directly in authenticated deployments and enter the key
+  from any dashboard page. The static UI loads before authentication and API
+  calls use the key saved for the browser tab.
 
 ### Agent workflows and first-run diagnostics
 

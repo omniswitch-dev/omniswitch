@@ -93,8 +93,8 @@ curl -H "Authorization: Bearer $OMNISWITCH_BOOTSTRAP_API_KEY" http://localhost:8
 
 With auth on, the gateway refuses to start when no API key exists (unless OIDC
 is configured), so the first start needs `OMNISWITCH_BOOTSTRAP_API_KEY`. The
-bootstrap key is an owner key; use it to create named keys through `/api/keys`
-(see [docs/API.md](docs/API.md)).
+bootstrap key is an owner key. Enter it under **Dashboard access** to create
+workload keys in the browser, or use [the key API](docs/API.md#get-apikeys).
 
 Run with Docker Compose (auth is on, so the first start needs the bootstrap
 key; on an empty database the gateway exits without it. Later runs may leave

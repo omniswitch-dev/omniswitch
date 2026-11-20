@@ -21,6 +21,11 @@ OPENAI_API_KEY=... \
 ./bin/gateway
 ```
 
+Open the dashboard and enter a gateway API key under **Dashboard access**.
+The browser keeps the key in session storage for the current tab. The static
+dashboard pages load before sign-in. With gateway authentication enabled,
+dashboard API requests use the key and its role permissions.
+
 ## Run with Docker
 
 ```bash

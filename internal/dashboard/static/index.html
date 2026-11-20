@@ -122,6 +122,10 @@ code{background:var(--surface-2);border:1px solid var(--border);border-radius:5p
 .trace-summary .mini{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:12px}
 .trace-summary .mini strong{display:block;font-size:18px;margin-top:5px;word-break:break-word}
 .raw-block{background:#0a0c0f;border:1px solid var(--border);border-radius:8px;padding:12px;overflow:auto;max-height:280px;font-family:"Cascadia Mono","Consolas",monospace;font-size:12px;line-height:1.55}
+#dashboard-access{margin-bottom:16px}
+#dashboard-access summary{cursor:pointer;color:var(--muted);font-size:13px}
+#dashboard-access form{margin:10px 0 0}
+#dashboard-access input{width:min(100%,320px)}
 #key-allowlist-help{margin:0 0 14px}
 #keys-list{overflow-x:auto}
 #keys-list .key-policy{min-width:150px;overflow-wrap:anywhere}
@@ -161,6 +165,17 @@ code{background:var(--surface-2);border:1px solid var(--border);border-radius:5p
 </nav>
 
 <main class="main">
+  <details id="dashboard-access">
+    <summary>Dashboard access</summary>
+    <form class="toolbar" id="dashboard-access-form">
+      <label for="dashboard-key">Gateway API key</label>
+      <input id="dashboard-key" type="password" autocomplete="off" required>
+      <button type="submit" class="btn btn-primary" id="dashboard-key-save">Use Key</button>
+      <button type="button" class="btn" id="dashboard-key-clear" hidden>Clear Key</button>
+      <span class="status-line" id="dashboard-key-status" aria-live="polite"></span>
+    </form>
+  </details>
+
   <section id="overview" class="section active">
     <div class="page-header">
       <div>
@@ -506,6 +521,37 @@ function authHeader(){
   const bearer = bearerValue(key);
   return bearer ? {"Authorization": bearer} : {};
 }
+function showDashboardKeyStatus(){
+  const saved = Boolean(sessionStorage.getItem("omniswitch.playgroundKey"));
+  $("dashboard-key-clear").hidden = !saved;
+  setStatus("dashboard-key-status", saved ? "Key saved for this tab." : "", "");
+}
+
+function saveDashboardKey(key){
+  sessionStorage.setItem("omniswitch.playgroundKey", key);
+  $("pg-api-key").value = key;
+  delete $("pg-model").dataset.loaded;
+  showDashboardKeyStatus();
+}
+
+async function accessDashboard(event){
+  event.preventDefault();
+  const key = $("dashboard-key").value.trim();
+  if(!key) return;
+  const button = $("dashboard-key-save");
+  button.disabled = true;
+  try{
+    await requestJSON("/api/version", {headers:{Authorization:bearerValue(key)}});
+    saveDashboardKey(key);
+    $("dashboard-key").value = "";
+    routeFromLocation();
+  }catch(err){
+    setStatus("dashboard-key-status", err.message, "err");
+  }finally{
+    button.disabled = false;
+  }
+}
+
 function jsonHeaders(){
   return {"Content-Type":"application/json", ...authHeader()};
 }
@@ -681,7 +727,7 @@ async function runPlayground(){
   const stream = $("pg-stream").checked;
   const configRef = $("pg-config").value;
   const apiKey = $("pg-api-key").value.trim();
-  if(apiKey) sessionStorage.setItem("omniswitch.playgroundKey", apiKey);
+  if(apiKey) saveDashboardKey(apiKey);
   if(!user){
     setStatus("pg-status", "User message is required.", "err");
     return;
@@ -1144,6 +1190,11 @@ async function loadProviders(){
   }
 }
 
+$("dashboard-access-form").addEventListener("submit", accessDashboard);
+$("dashboard-key-clear").addEventListener("click", () => {
+  sessionStorage.removeItem("omniswitch.playgroundKey");
+  location.reload();
+});
 $("ov-window").addEventListener("change", loadMetrics);
 $("log-provider").addEventListener("change", loadLogs);
 $("log-status").addEventListener("change", loadLogs);
@@ -1155,7 +1206,7 @@ $("pg-temp").addEventListener("input", event => {$("pg-temp-val").textContent = 
 $("pg-top-p").addEventListener("input", event => {$("pg-top-p-val").textContent = Number(event.target.value).toFixed(2);});
 $("pg-api-key").addEventListener("change", event => {
   const value = event.target.value.trim();
-  if(value) sessionStorage.setItem("omniswitch.playgroundKey", value);
+  if(value) saveDashboardKey(value);
 });
 $("cfg-save").addEventListener("click", saveConfig);
 $("cfg-reset").addEventListener("click", resetConfigForm);
@@ -1166,6 +1217,15 @@ $("prompt-create").addEventListener("click", createPrompt);
 
 const storedKey = sessionStorage.getItem("omniswitch.playgroundKey");
 if(storedKey) $("pg-api-key").value = storedKey;
+showDashboardKeyStatus();
+if(!storedKey){
+  fetch(API + "/api/version").then(response => {
+    if(response.status === 401 && !sessionStorage.getItem("omniswitch.playgroundKey")){
+      $("dashboard-access").open = true;
+      setStatus("dashboard-key-status", "Enter an API key to access dashboard data.", "");
+    }
+  }).catch(() => {});
+}
 routeFromLocation();
 loadMetrics();
 loadModels();

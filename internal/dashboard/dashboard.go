@@ -335,6 +335,19 @@ func (h *Handler) rawConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// WithPublicShell serves the static dashboard pages before credential checks,
+// so a browser can load the UI and enter its key. Data and management requests
+// continue through the gateway middleware.
+func WithPublicShell(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && isDashboardRoute(r.URL.Path) {
+			serveDashboardIndex(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func isDashboardRoute(path string) bool {
 	switch path {
 	case "/", "/overview", "/playground", "/logs", "/configs", "/guardrails", "/prompts", "/keys", "/providers":

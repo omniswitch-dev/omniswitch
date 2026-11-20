@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,5 +135,28 @@ func TestGatewayMuxRegistersRoutes(t *testing.T) {
 	// /metrics is registered only when Prometheus is enabled.
 	if rec := serveRoute(h, http.MethodGet, "/metrics", true); rec.Code != http.StatusNotFound {
 		t.Errorf("GET /metrics with Prometheus disabled = %d, want 404", rec.Code)
+	}
+}
+
+func TestDashboardShellLoadsBeforeAuthentication(t *testing.T) {
+	h := newRouteTestServer(t)
+	for _, path := range []string{"/", "/keys", "/playground", "/traces/example"} {
+		rec := serveRoute(h, http.MethodGet, path, false)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "dashboard-access-form") {
+			t.Errorf("GET %s = %d, want the public dashboard shell", path, rec.Code)
+		}
+	}
+	if rec := serveRoute(h, http.MethodHead, "/keys", false); rec.Code != http.StatusOK || rec.Body.Len() != 0 {
+		t.Errorf("HEAD /keys = %d with %d bytes", rec.Code, rec.Body.Len())
+	}
+	for _, path := range []string{"/api/keys", "/api/logs", "/api/traces/example", "/v1/models"} {
+		if rec := serveRoute(h, http.MethodGet, path, false); rec.Code != http.StatusUnauthorized {
+			t.Errorf("GET %s = %d, want 401", path, rec.Code)
+		}
+	}
+	for _, path := range []string{"/keys", "/api/keys"} {
+		if rec := serveRoute(h, http.MethodPost, path, false); rec.Code != http.StatusUnauthorized {
+			t.Errorf("POST %s = %d, want 401", path, rec.Code)
+		}
 	}
 }
